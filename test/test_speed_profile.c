@@ -409,6 +409,108 @@ static void test_null_safe(void) {
           sp.observed);
 }
 
+// ── adversarial: cases the first round of tests did not cover ───────────────
+
+// A step is a unit. The tick budget is counted per tick, so a step whose ticks
+// straddle the budget ceiling gets cut in half: the car receives some of the
+// detents and never the rest. What a half-turned wheel does is unknown, and
+// "unknown input to the steering column" is exactly what this module must not
+// produce. Budget must be spent in whole steps.
+static void test_never_abandons_a_half_sent_step(void) {
+    FsdSpeedProfile sp;
+    ready(&sp);
+    sp.enc.ticks_per_step = 4;  // FSD_SP_MAX_TICKS (6) is not a multiple of 4
+    FsdSpInputs in = good_inputs(0);
+    uint32_t t = 1000;
+    CHECK(fsd_sp_request(&sp, &in, 3, t) == FSD_SP_OK, "request ok");
+
+    int ticks = 0;
+    // The car never responds, so this ends in a bounded give-up. HOW it gives
+    // up is the point.
+    for (int guard = 0; guard < 100 && fsd_sp_busy(&sp); guard++) {
+        if (fsd_sp_poll(&sp, &in, t) != FSD_SP_ACT_NONE) {
+            ticks++;
+            t += 10;
+        } else {
+            t += 100;
+        }
+    }
+    CHECK(!fsd_sp_busy(&sp), "must terminate");
+    CHECK(sp.pending_ticks == 0,
+          "gave up mid-step with %u detents still owed — the car got a partial "
+          "turn", sp.pending_ticks);
+    CHECK(ticks % (int)sp.enc.ticks_per_step == 0,
+          "emitted %d ticks, which is not a whole number of %u-tick steps",
+          ticks, sp.enc.ticks_per_step);
+}
+
+// The convergence check sits AFTER the precondition re-check, so a request that
+// already reached its target is reported as a failure if anything changes in
+// the same instant. The phone then sees FAILED for work that succeeded.
+static void test_converged_result_survives_a_late_precondition_loss(void) {
+    FsdSpeedProfile sp;
+    ready(&sp);
+    FsdSpInputs in = good_inputs(0);
+    uint32_t t = 1000;
+    CHECK(fsd_sp_request(&sp, &in, 1, t) == FSD_SP_OK, "request 0->1 ok");
+    CHECK(fsd_sp_poll(&sp, &in, t) == FSD_SP_ACT_TICK_UP, "one tick");
+
+    t += 100;
+    in.observed_profile = 1;
+    fsd_sp_observe(&sp, 1, t);  // the car arrived
+
+    in.ota_in_progress = true;  // ...and an OTA starts in the same moment
+    fsd_sp_poll(&sp, &in, t + 10);
+
+    CHECK(sp.observed == sp.target, "precondition of this test: target reached");
+    CHECK(sp.phase == FSD_SP_DONE,
+          "converged request reported as phase=%d (%s) — success must not be "
+          "overwritten by a late abort", sp.phase, fsd_sp_error_str(sp.last_error));
+}
+
+// swcRightScrollTicks is 6 bits signed: -32..31. A larger value is not clamped
+// anywhere, it is masked — and 40 & 0x3F reads back as -24, i.e. the module
+// scrolls the OPPOSITE way from what the table says. Since the table is filled
+// in from a capture by a tool, a bad value must be refused, not reinterpreted.
+static void test_out_of_range_detent_is_refused(void) {
+    FsdSpeedProfile sp;
+    ready(&sp);
+    uint8_t buf[8];
+
+    sp.enc.tick_toward_higher = 40;  // outside 6-bit signed
+    memset(buf, 0, sizeof(buf));
+    buf[0] = 0x01;
+    CHECK(!fsd_sp_apply_scroll(&sp, FSD_SP_ACT_TICK_UP, buf, 8),
+          "detent +40 does not fit 6 bits — must be refused, got byte3=0x%02X",
+          buf[3]);
+
+    sp.enc.tick_toward_higher = -40;
+    memset(buf, 0, sizeof(buf));
+    buf[0] = 0x01;
+    CHECK(!fsd_sp_apply_scroll(&sp, FSD_SP_ACT_TICK_UP, buf, 8),
+          "detent -40 does not fit 6 bits — must be refused");
+
+    // A zero detent is not a movement; emitting it burns budget for nothing.
+    sp.enc.tick_toward_higher = 0;
+    memset(buf, 0, sizeof(buf));
+    buf[0] = 0x01;
+    CHECK(!fsd_sp_apply_scroll(&sp, FSD_SP_ACT_TICK_UP, buf, 8),
+          "a zero detent moves nothing — must be refused");
+
+    // The edges of the range stay valid.
+    sp.enc.tick_toward_higher = 31;
+    memset(buf, 0, sizeof(buf));
+    buf[0] = 0x01;
+    CHECK(fsd_sp_apply_scroll(&sp, FSD_SP_ACT_TICK_UP, buf, 8), "+31 is valid");
+    CHECK(buf[3] == 31, "byte3=0x%02X exp 0x1F", buf[3]);
+
+    sp.enc.tick_toward_higher = -32;
+    memset(buf, 0, sizeof(buf));
+    buf[0] = 0x01;
+    CHECK(fsd_sp_apply_scroll(&sp, FSD_SP_ACT_TICK_UP, buf, 8), "-32 is valid");
+    CHECK(buf[3] == 0x20, "byte3=0x%02X exp 0x20 (6-bit -32)", buf[3]);
+}
+
 int main(void) {
     printf("test_speed_profile\n");
     test_init();
@@ -429,6 +531,9 @@ int main(void) {
     test_encoding_is_table_driven();
     test_ticks_per_step();
     test_null_safe();
+    test_never_abandons_a_half_sent_step();
+    test_converged_result_survives_a_late_precondition_loss();
+    test_out_of_range_detent_is_refused();
 
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
