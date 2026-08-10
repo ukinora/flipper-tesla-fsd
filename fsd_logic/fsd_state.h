@@ -54,6 +54,13 @@ typedef struct FSDState {
     bool tesla_ota_in_progress;  // pause TX while Tesla is updating
     uint32_t crc_err_count;      // CAN bus error counter
     uint32_t rx_count;            // total frames seen (for wiring sanity check)
+    // Bus liveness. rx_count only ever grows, so it cannot tell "quiet bus" from
+    // "busy bus": a pulled connector or a sleeping gateway looks identical to a
+    // healthy one. last_rx_ms is stamped on every frame; rx_stale is derived
+    // from it once per loop (fsd_rx_is_stale) and gates TX — injecting into a
+    // bus we cannot hear is never useful.
+    uint32_t last_rx_ms;         // ms clock at the most recent RX (0 = none yet)
+    bool     rx_stale;           // derived: no frame for FSD_RX_STALE_MS
 
     // live BMS data (read-only sniff)
     bool bms_seen;

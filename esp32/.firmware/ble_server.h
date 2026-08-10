@@ -27,6 +27,11 @@
 // State notify cadence. Slowed automatically while no client is subscribed.
 #define BLE_STATE_PERIOD_MS 200u  // 5 Hz
 
+// How long Active survives a dropped BLE link before it reverts to Listen-Only.
+// Long enough to ride out an app switch or a screen blank, short enough that a
+// phone left behind does not leave the module transmit-capable.
+#define BLE_ACTIVE_GRACE_MS 30000u  // 30 s
+
 // ── Command codes (Command characteristic, byte 0) ───────────────────────────
 #define BLE_CMD_SET_MODE     0x01u  // arg: 0 = Listen-Only, 1 = Active
 #define BLE_CMD_SET_PROFILE  0x10u  // arg: target profile 0..3   (closed loop; TODO)

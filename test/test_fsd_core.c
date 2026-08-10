@@ -2153,6 +2153,55 @@ static void test_blackbox_filter(void) {
     CHECK(!fsd_blackbox_should_record(0x7FF),              "0x7FF dropped");
 }
 
+// ── bus liveness gate ───────────────────────────────────────────────────────
+// rx_count only grows, so it cannot tell a quiet bus from a busy one. A pulled
+// connector or a sleeping gateway must hold TX off — transmitting into a bus we
+// cannot hear achieves nothing and hides the fault.
+static void test_rx_stale(void) {
+    FSDState s;
+    fsd_state_init(&s, TeslaHW_HW3);
+
+    // Fail-closed before the first frame: we are blind, so TX must be refused.
+    CHECK(s.rx_count == 0, "fresh state has rx_count 0");
+    CHECK(s.last_rx_ms == 0, "fresh state has last_rx_ms 0");
+    CHECK(!s.rx_stale, "fresh state starts with the flag clear (derived later)");
+    CHECK(fsd_rx_is_stale(&s, 0), "never heard the bus -> stale");
+    CHECK(fsd_rx_is_stale(&s, 100000), "still stale much later");
+
+    // A frame arrives.
+    s.rx_count = 1;
+    s.last_rx_ms = 10000;
+    CHECK(!fsd_rx_is_stale(&s, 10000), "just received -> fresh");
+    CHECK(!fsd_rx_is_stale(&s, 10000 + FSD_RX_STALE_MS - 1), "1 ms short -> fresh");
+    CHECK(fsd_rx_is_stale(&s, 10000 + FSD_RX_STALE_MS), "exactly at limit -> stale");
+    CHECK(fsd_rx_is_stale(&s, 10000 + FSD_RX_STALE_MS * 10), "long gone -> stale");
+
+    // millis() wraps every ~49 days; unsigned subtraction must still be right.
+    s.last_rx_ms = 0xFFFFFF00u;
+    CHECK(!fsd_rx_is_stale(&s, 0x00000000u + 0xFF), "across the wrap -> fresh");
+    CHECK(fsd_rx_is_stale(&s, 0x00000000u + 0xFF + FSD_RX_STALE_MS),
+          "across the wrap, past the limit -> stale");
+
+    // Not latched: the bus coming back clears it. A car sleeping and waking is
+    // normal, and a latch would need a manual reset every morning.
+    s.last_rx_ms = 20000;
+    CHECK(!fsd_rx_is_stale(&s, 20000), "bus returned -> fresh again");
+
+    // The TX gate honours the derived flag.
+    fsd_state_init(&s, TeslaHW_HW3);
+    s.op_mode = OpMode_Active;
+    s.rx_count = 1;
+    CHECK(fsd_can_transmit(&s), "active + fresh -> TX allowed");
+    s.rx_stale = true;
+    CHECK(!fsd_can_transmit(&s), "active + stale bus -> TX refused");
+    s.rx_stale = false;
+    CHECK(fsd_can_transmit(&s), "flag cleared -> TX allowed again");
+
+    // Listen-Only still wins regardless of liveness.
+    s.op_mode = OpMode_ListenOnly;
+    CHECK(!fsd_can_transmit(&s), "listen-only -> TX refused even with a live bus");
+}
+
 int main(void) {
     printf("test_fsd_core: Tesla FSD protocol core host tests\n");
     test_set_bit();
@@ -2200,6 +2249,7 @@ int main(void) {
     test_profile();
     test_state_init();
     test_blackbox_filter();
+    test_rx_stale();
 
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

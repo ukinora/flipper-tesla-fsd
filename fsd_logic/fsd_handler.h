@@ -147,6 +147,17 @@ bool fsd_handle_nag_killer(FSDState* state, const CANFRAME* frame, CANFRAME* out
 /** Handle CAN ID 0x318 - GTW_carState - update OTA-in-progress flag in state. */
 void fsd_handle_gtw_car_state(FSDState* state, const CANFRAME* frame);
 
+/** How long the bus may stay quiet before TX is held off. Long enough to ride
+ *  out a normal gap, short enough that a pulled connector is caught fast. */
+#define FSD_RX_STALE_MS 2000u
+
+/** True when no frame has arrived for FSD_RX_STALE_MS — or when none has ever
+ *  arrived. Fail-closed: before the first frame we are blind, which is exactly
+ *  when we must not transmit. Not latched; the bus coming back clears it, since
+ *  a car going to sleep and waking is normal. Call once per loop and store the
+ *  result in state->rx_stale. */
+bool fsd_rx_is_stale(const FSDState* state, uint32_t now_ms);
+
 /** Returns true if the current state allows transmitting CAN frames. */
 bool fsd_can_transmit(const FSDState* state);
 

@@ -51,7 +51,14 @@ void prefs_load(FSDState *state) {
     if (g_prefs.isKey("stas")) g_prefs.getString("stas").toCharArray(state->wifi_sta_ssid, sizeof(state->wifi_sta_ssid));
     if (g_prefs.isKey("stap")) g_prefs.getString("stap").toCharArray(state->wifi_sta_pass, sizeof(state->wifi_sta_pass));
 
+#if PERSIST_OP_MODE
     state->op_mode = (OpMode)g_prefs.getUChar("mode", (uint8_t)OpMode_ListenOnly);
+#else
+    // Boards that live permanently wired into a car boot Listen-Only no matter
+    // what was saved. Otherwise the module wakes transmit-capable every time the
+    // car wakes, with nobody present — see PERSIST_OP_MODE in prefs.h.
+    state->op_mode = OpMode_ListenOnly;
+#endif
     // Manual HW selection (#110); TeslaHW_Unknown = auto-detect.
     state->hw_override = (TeslaHWVersion)g_prefs.getUChar("hwov", (uint8_t)TeslaHW_Unknown);
 
