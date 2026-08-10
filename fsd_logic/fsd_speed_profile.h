@@ -76,6 +76,14 @@ extern "C" {
 #define FSD_SP_COOLDOWN_MS 1000u   // after finishing, before accepting another
 #define FSD_SP_STATE_FRESH_MS 1000u // 0x3FD older than this = we are blind
 
+// swcRightScrollTicks is 6 bits signed, so the field holds -32..31. The usable
+// range is narrower and symmetric: a detent must survive negation, because UP
+// and DOWN are the same magnitude with opposite sign. -32 negates to +32, which
+// does not fit and wraps back to -32 — UP and DOWN would encode identically.
+// Zero is excluded for the obvious reason that it moves nothing.
+#define FSD_SP_DETENT_MAX 31
+#define FSD_SP_DETENT_MIN (-31)
+
 typedef enum {
     FSD_SP_IDLE = 0,
     FSD_SP_STEP,    // a tick is due
@@ -148,6 +156,12 @@ typedef struct {
 
 /** Reset to IDLE with the default encoding. */
 void fsd_sp_init(FsdSpeedProfile* sp);
+
+/** True when the table is confirmed AND every field is expressible on the wire.
+ *  The table is written by a tool from a capture, so it is input, not a
+ *  constant: an out-of-range detent would be masked into the wrong direction
+ *  rather than rejected. Requests are refused unless this passes. */
+bool fsd_sp_encoding_ok(const FsdSpEncoding* e);
 
 /** Ask for `target`. Runs every precondition; on refusal nothing changes and
  *  the reason is returned (also stored in last_error). */

@@ -49,13 +49,29 @@ void fsd_sp_abort(FsdSpeedProfile* sp, FsdSpError why, uint32_t now_ms) {
     sp->finished_ms = now_ms;
 }
 
+// The encoding table is filled in by a tool from a capture, so treat it as
+// input, not as a constant. A value that cannot be expressed in the 6-bit
+// signed field would be masked rather than clamped — +40 reads back as -24,
+// i.e. the module would scroll the opposite way from what the table says.
+bool fsd_sp_encoding_ok(const FsdSpEncoding* e) {
+    if(!e) return false;
+    if(!e->verified) return false;
+    if(e->tick_toward_higher == 0) return false;
+    if(e->tick_toward_higher > FSD_SP_DETENT_MAX) return false;
+    if(e->tick_toward_higher < FSD_SP_DETENT_MIN) return false;
+    // A step that cannot fit in the budget could never complete, and the budget
+    // is now spent per whole step.
+    if(e->ticks_per_step == 0 || e->ticks_per_step > FSD_SP_MAX_TICKS) return false;
+    return true;
+}
+
 // Preconditions shared by request() and every poll(). Order matters only for
 // which reason the caller sees first; all of them are hard gates.
 static FsdSpError check_inputs(const FsdSpeedProfile* sp, const FsdSpInputs* in) {
     if(!in) return FSD_SP_ERR_ABORTED;
     if(in->listen_only) return FSD_SP_ERR_LISTEN_ONLY;
     if(!in->tx_armed) return FSD_SP_ERR_NOT_ARMED;
-    if(!sp->enc.verified) return FSD_SP_ERR_UNVERIFIED;
+    if(!fsd_sp_encoding_ok(&sp->enc)) return FSD_SP_ERR_UNVERIFIED;
     if(in->ota_in_progress) return FSD_SP_ERR_OTA;
     if(!in->scroll_bus_present) return FSD_SP_ERR_NO_SCROLL_BUS;
     if(!in->status_fresh) return FSD_SP_ERR_NO_STATE;
@@ -150,6 +166,17 @@ FsdSpAction fsd_sp_poll(FsdSpeedProfile* sp, const FsdSpInputs* in,
                         uint32_t now_ms) {
     if(!fsd_sp_busy(sp)) return FSD_SP_ACT_NONE;
 
+    // Converged — settle this FIRST. The car is already where it was asked to
+    // be, and nothing discovered later in this poll undoes that. Checking it
+    // after the timeout or the precondition re-check would report a request
+    // that succeeded as FAILED whenever an OTA (say) starts in the same tick.
+    if(sp->observed == sp->target && sp->pending_ticks == 0) {
+        sp->phase = FSD_SP_DONE;
+        sp->finished_ms = now_ms;
+        sp->last_error = FSD_SP_OK;
+        return FSD_SP_ACT_NONE;
+    }
+
     if((uint32_t)(now_ms - sp->started_ms) >= FSD_SP_TIMEOUT_MS) {
         fsd_sp_abort(sp, FSD_SP_ERR_TIMEOUT, now_ms);
         return FSD_SP_ACT_NONE;
@@ -158,15 +185,6 @@ FsdSpAction fsd_sp_poll(FsdSpeedProfile* sp, const FsdSpInputs* in,
     // pause, so a half-finished sequence never resumes against a changed car.
     if(check_inputs(sp, in) != FSD_SP_OK) {
         fsd_sp_abort(sp, FSD_SP_ERR_ABORTED, now_ms);
-        return FSD_SP_ACT_NONE;
-    }
-
-    // Converged. Checked before the budget so a final successful tick that
-    // exhausts the budget still reports success.
-    if(sp->observed == sp->target && sp->pending_ticks == 0) {
-        sp->phase = FSD_SP_DONE;
-        sp->finished_ms = now_ms;
-        sp->last_error = FSD_SP_OK;
         return FSD_SP_ACT_NONE;
     }
 
@@ -183,21 +201,25 @@ FsdSpAction fsd_sp_poll(FsdSpeedProfile* sp, const FsdSpInputs* in,
         sp->phase_ms = now_ms;
     }
 
-    if(sp->ticks_used >= FSD_SP_MAX_TICKS) {
-        fsd_sp_abort(sp, FSD_SP_ERR_EXHAUSTED, now_ms);
-        return FSD_SP_ACT_NONE;
-    }
-
-    // Mid-step: keep going the way we already committed to.
+    // Mid-step: the budget for these detents was reserved when the step began,
+    // so finish it. Re-checking the ceiling here is what used to cut a step in
+    // half and hand the car a partial turn.
     if(sp->pending_ticks > 0) {
         return emit(sp, direction(sp), now_ms);
+    }
+
+    // A step is atomic: reserve its whole cost up front or do not start it.
+    uint8_t step = (sp->enc.ticks_per_step > 0) ? sp->enc.ticks_per_step : 1u;
+    if((uint32_t)sp->ticks_used + step > FSD_SP_MAX_TICKS) {
+        fsd_sp_abort(sp, FSD_SP_ERR_EXHAUSTED, now_ms);
+        return FSD_SP_ACT_NONE;
     }
 
     // No end-of-range guard is needed: target is validated to 0..3 and we stop
     // as soon as observed == target, so a tick is never aimed past an end. If
     // the encoding's direction turns out to be inverted (it is unconfirmed),
     // the car simply refuses to move and the stall counter ends the request.
-    sp->pending_ticks = (sp->enc.ticks_per_step > 0) ? sp->enc.ticks_per_step : 1u;
+    sp->pending_ticks = step;
     return emit(sp, direction(sp), now_ms);
 }
 
@@ -206,6 +228,12 @@ bool fsd_sp_apply_scroll(const FsdSpeedProfile* sp, FsdSpAction act,
     if(!sp || !buf || act == FSD_SP_ACT_NONE) return false;
     if(len <= SCROLL_TICKS_BYTE) return false;
     if((buf[SCROLL_MUX_BYTE] & SCROLL_MUX_MASK) != SCROLL_MUX_SWITCHES) return false;
+    // Last line of defence. check_inputs() already rejects a bad table, but this
+    // is the function that actually writes to the wire, so it re-checks rather
+    // than trusting a caller to have gone through the state machine.
+    if(sp->enc.tick_toward_higher == 0) return false;
+    if(sp->enc.tick_toward_higher > FSD_SP_DETENT_MAX) return false;
+    if(sp->enc.tick_toward_higher < FSD_SP_DETENT_MIN) return false;
 
     int8_t tick = sp->enc.tick_toward_higher;
     if(act == FSD_SP_ACT_TICK_DOWN) tick = (int8_t)(-tick);
