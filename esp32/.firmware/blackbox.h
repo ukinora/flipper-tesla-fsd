@@ -99,5 +99,20 @@ String blackbox_list_json();                // [{"name":..,"summary":{...}},..]
 // then stream just the body to the client. The caller owns the HTTP headers.
 bool   blackbox_file_size(const char* name, bool json, size_t* size_out);
 void   blackbox_stream_body(WiFiClient& client, const char* name, bool json);
+
+// Transport-independent download. blackbox_stream_body() is bound to a
+// WiFiClient, which BLE cannot use — and on a T-2CAN we do not intend to bring
+// WiFi up at all, so this is the only way a capture leaves the module.
+//
+// Reads up to `cap` bytes starting at `offset`; returns the byte count (0 =
+// EOF or missing). Stateless, so a caller can pump one chunk per tick and
+// resume at the next offset when the notify queue backs up.
+size_t blackbox_read_chunk(const char* name, bool json, size_t offset,
+                           uint8_t* out, size_t cap);
+
+// Name of the most recent capture (false when there is none). Enough for the
+// common case — grab the dump that was just taken — without making the client
+// parse the listing first.
+bool   blackbox_latest_name(char* out, size_t cap);
 bool   blackbox_delete(const char* name);
 void   blackbox_delete_all();

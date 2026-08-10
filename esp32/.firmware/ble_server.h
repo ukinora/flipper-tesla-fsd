@@ -31,7 +31,7 @@
 #define BLE_CMD_SET_MODE     0x01u  // arg: 0 = Listen-Only, 1 = Active
 #define BLE_CMD_SET_PROFILE  0x10u  // arg: target profile 0..3   (closed loop; TODO)
 #define BLE_CMD_PROFILE_STEP 0x11u  // arg: int8 +1 / -1          (closed loop; TODO)
-#define BLE_CMD_DUMP_START   0x30u  // arg: bus mask              (TODO)
+#define BLE_CMD_DUMP_START   0x30u  // arg: 0 = .log (candump), 1 = .json summary
 #define BLE_CMD_DUMP_STOP    0x31u
 #define BLE_CMD_CAP_RECHECK  0x40u  // re-run the capability listen window
 #define BLE_CMD_PING         0x50u
@@ -42,6 +42,22 @@
 #define BLE_RES_TIMEOUT     2u
 #define BLE_RES_UNSUPPORTED 3u
 #define BLE_RES_SAFETY      4u  // blocked by a safety gate (e.g. moving vehicle)
+#define BLE_RES_NOT_FOUND   5u  // nothing to download
+#define BLE_RES_BUSY        6u  // a transfer is already running
+
+// ── Bulk framing (Bulk characteristic, notify) ───────────────────────────────
+// On a T-2CAN there is no SD card and we do not bring WiFi up, so this is the
+// only way a capture leaves the module.
+//
+//   [0..1] seq, LE16.  0 = header, 1.. = data
+//   header : [2..5] total bytes LE32, [6..] capture name (no NUL)
+//   data   : [2..]  file bytes at the running offset
+//   EOF    : a frame with no payload (length 2)
+//
+// Chunk size follows the negotiated MTU, so a phone that negotiates 517 moves
+// ~500 B per notification and a 23-byte default still works, just slowly.
+#define BLE_BULK_MAX_PAYLOAD   500u
+#define BLE_BULK_CHUNKS_PER_TICK 4u
 
 #ifdef BLE_SERVER_ENABLED
 
