@@ -497,18 +497,66 @@ static void test_out_of_range_detent_is_refused(void) {
     CHECK(!fsd_sp_apply_scroll(&sp, FSD_SP_ACT_TICK_UP, buf, 8),
           "a zero detent moves nothing — must be refused");
 
-    // The edges of the range stay valid.
+    // -32 fits the field but its negation (+32) does not: it wraps back to -32,
+    // so UP and DOWN would put the identical value on the wire. The usable
+    // range has to be symmetric, which makes -32 invalid despite fitting.
+    sp.enc.tick_toward_higher = -32;
+    memset(buf, 0, sizeof(buf));
+    buf[0] = 0x01;
+    CHECK(!fsd_sp_apply_scroll(&sp, FSD_SP_ACT_TICK_UP, buf, 8),
+          "-32 must be refused: negating it does not fit, so UP == DOWN");
+
+    // The real edges stay valid and stay distinguishable.
     sp.enc.tick_toward_higher = 31;
     memset(buf, 0, sizeof(buf));
     buf[0] = 0x01;
     CHECK(fsd_sp_apply_scroll(&sp, FSD_SP_ACT_TICK_UP, buf, 8), "+31 is valid");
-    CHECK(buf[3] == 31, "byte3=0x%02X exp 0x1F", buf[3]);
-
-    sp.enc.tick_toward_higher = -32;
+    CHECK(buf[3] == 0x1F, "byte3=0x%02X exp 0x1F", buf[3]);
     memset(buf, 0, sizeof(buf));
     buf[0] = 0x01;
-    CHECK(fsd_sp_apply_scroll(&sp, FSD_SP_ACT_TICK_UP, buf, 8), "-32 is valid");
-    CHECK(buf[3] == 0x20, "byte3=0x%02X exp 0x20 (6-bit -32)", buf[3]);
+    CHECK(fsd_sp_apply_scroll(&sp, FSD_SP_ACT_TICK_DOWN, buf, 8), "-31 is valid");
+    CHECK(buf[3] == 0x21, "byte3=0x%02X exp 0x21 (6-bit -31)", buf[3]);
+
+    sp.enc.tick_toward_higher = -31;
+    memset(buf, 0, sizeof(buf));
+    buf[0] = 0x01;
+    CHECK(fsd_sp_apply_scroll(&sp, FSD_SP_ACT_TICK_UP, buf, 8), "-31 as UP is valid");
+    CHECK(buf[3] == 0x21, "byte3=0x%02X exp 0x21", buf[3]);
+}
+
+// The table now gates requests, not just the wire write.
+static void test_bad_encoding_refuses_requests(void) {
+    FsdSpeedProfile sp;
+    FsdSpInputs in = good_inputs(0);
+
+    ready(&sp);
+    sp.enc.tick_toward_higher = 40;
+    CHECK(fsd_sp_request(&sp, &in, 3, 1000) == FSD_SP_ERR_UNVERIFIED,
+          "out-of-range detent must refuse the request, not just the write");
+
+    ready(&sp);
+    sp.enc.tick_toward_higher = 0;
+    CHECK(fsd_sp_request(&sp, &in, 3, 1000) == FSD_SP_ERR_UNVERIFIED,
+          "zero detent must refuse the request");
+
+    // A step larger than the whole budget could never complete now that the
+    // budget is reserved per step — catch it up front instead of emitting
+    // nothing and reporting EXHAUSTED.
+    ready(&sp);
+    sp.enc.ticks_per_step = FSD_SP_MAX_TICKS + 1u;
+    CHECK(fsd_sp_request(&sp, &in, 3, 1000) == FSD_SP_ERR_UNVERIFIED,
+          "a step bigger than the budget must refuse the request");
+
+    ready(&sp);
+    sp.enc.ticks_per_step = 0;
+    CHECK(fsd_sp_request(&sp, &in, 3, 1000) == FSD_SP_ERR_UNVERIFIED,
+          "zero ticks per step must refuse the request");
+
+    // And the shipped default is still refused for the original reason.
+    fsd_sp_init(&sp);
+    CHECK(!fsd_sp_encoding_ok(&sp.enc), "shipped table is unverified");
+    ready(&sp);
+    CHECK(fsd_sp_encoding_ok(&sp.enc), "a verified, in-range table passes");
 }
 
 int main(void) {
@@ -534,6 +582,7 @@ int main(void) {
     test_never_abandons_a_half_sent_step();
     test_converged_result_survives_a_late_precondition_loss();
     test_out_of_range_detent_is_refused();
+    test_bad_encoding_refuses_requests();
 
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
