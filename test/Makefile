@@ -11,10 +11,18 @@ SRC     := test_fsd_core.c $(ROOT)/fsd_logic/fsd_handler.c $(ROOT)/fsd_logic/fsd
 test_fsd_core: $(SRC) $(ROOT)/fsd_logic/fsd_handler.h $(ROOT)/fsd_logic/fsd_types.h $(ROOT)/fsd_logic/fsd_checksum.h $(ROOT)/fsd_logic/fsd_can_ops.h $(ROOT)/fsd_logic/fsd_state.h $(ROOT)/fsd_logic/fsd_capture.h $(ROOT)/fsd_logic/fsd_profile.h $(ROOT)/fsd_logic/fsd_events.h $(ROOT)/fsd_logic/fsd_blackbox_summary.h $(ROOT)/fsd_logic/fsd_blackbox_filter.h $(ROOT)/fsd_logic/fsd_capability.h $(ROOT)/fsd_logic/fsd_profile_db.h
 	$(CC) $(CFLAGS) -I$(ROOT)/fsd_logic $(SRC) -o $@ -lm
 
-check: test_fsd_core
+# Speed-profile convergence machine. Standalone: it deliberately depends on
+# nothing but its own header, so it builds without the rest of the core.
+SP_SRC := test_speed_profile.c $(ROOT)/fsd_logic/fsd_speed_profile.c
+
+test_speed_profile: $(SP_SRC) $(ROOT)/fsd_logic/fsd_speed_profile.h
+	$(CC) $(CFLAGS) -I$(ROOT)/fsd_logic $(SP_SRC) -o $@
+
+check: test_fsd_core test_speed_profile
 	./test_fsd_core
+	./test_speed_profile
 
 clean:
-	rm -rf test_fsd_core test_fsd_core.dSYM
+	rm -rf test_fsd_core test_speed_profile *.dSYM
 
 .PHONY: check clean
