@@ -28,6 +28,7 @@
 #include "can_dump.h"
 #include "http_can_stream.h"
 #include "blackbox.h"
+#include "ble_server.h"
 #include "capability.h"
 #include "profile_match.h"
 #include "../../fsd_logic/fsd_events.h"
@@ -1547,6 +1548,7 @@ void setup() {
     can_dump_init();
     blackbox_init(&g_state, &g_state_mux);  // ring + storage (after SD is mounted)
     capability_init(&g_state, &g_state_mux);  // tap capability checker (#125)
+    ble_server_init(&g_state, &g_state_mux);  // GATT server for the phone app
     profile_match_init(&g_state, &g_state_mux);  // variant-profile auto-suggest (#126)
 
 #if defined(BOARD_LILYGO)
@@ -1739,6 +1741,7 @@ void loop() {
     can_dump_tick(now);
     blackbox_tick(now);  // post-roll countdown + flush (#124)
     capability_tick(now);  // finalize the capability listen window (#125)
+    ble_server_tick(now);  // push State notifications to the phone app
 
 #if defined(BOARD_LILYGO)
     sleep_tick(now);
