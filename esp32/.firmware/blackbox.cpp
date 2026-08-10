@@ -305,6 +305,41 @@ static void backend_stream_body(WiFiClient& client, const char* name, bool json)
     f.close();
 }
 
+static size_t backend_read_chunk(const char* name, bool json, size_t offset,
+                                 uint8_t* out, size_t cap) {
+    if (!g_fs_ok || !out || cap == 0) return 0;
+    char p[64];
+    snprintf(p, sizeof(p), BLACKBOX_DIR "/%s.%s", name, json ? "json" : "log");
+    File f = BB_OPEN_R(p);
+    if (!f) return 0;
+    size_t n = 0;
+    if (f.seek(offset)) {
+        int r = f.read(out, cap);
+        if (r > 0) n = (size_t)r;
+    }
+    f.close();
+    return n;
+}
+
+// Newest = last entry the directory hands back. Capture names are timestamped,
+// so listing order tracks age closely enough for "give me the one I just took".
+static bool backend_latest_name(char* out, size_t cap) {
+    if (!g_fs_ok || !out || cap == 0) return false;
+    File dir = BB_FS.open(BLACKBOX_DIR);
+    if (!dir) return false;
+    bool found = false;
+    for (File e = dir.openNextFile(); e; e = dir.openNextFile()) {
+        const char* nm = e.name();
+        if (strstr(nm, ".json")) {
+            bb_basename(nm, out, cap);
+            found = true;
+        }
+        e.close();
+    }
+    dir.close();
+    return found;
+}
+
 static bool backend_delete(const char* name) {
     if (!g_fs_ok) return false;
     char p[64];
@@ -400,6 +435,46 @@ static void backend_stream_body(WiFiClient& client, const char* name, bool json)
                                           f.id, f.data, f.dlc);
         client.write((const uint8_t*)line, n);
     }
+}
+
+static size_t backend_read_chunk(const char* name, bool json, size_t offset,
+                                 uint8_t* out, size_t cap) {
+    if (!g_slot_used || strcmp(name, g_slot_base) != 0 || !out || cap == 0) return 0;
+    if (json) {
+        size_t len = g_slot_json.length();
+        if (offset >= len) return 0;
+        size_t n = len - offset;
+        if (n > cap) n = cap;
+        memcpy(out, g_slot_json.c_str() + offset, n);
+        return n;
+    }
+    // The .log has no stored text — it is regenerated line by line, so seeking
+    // means re-formatting from the start and discarding up to `offset`. O(n)
+    // per chunk, but the ring is ~100 KB and this only runs during a download.
+    char line[72];
+    size_t pos = 0, written = 0;
+    for (uint32_t i = 0; i < g_slot_n && written < cap; i++) {
+        const BBFrame& f = g_slot_frames[i];
+        int n = tesla_format_candump_line(line, sizeof(line), f.ts_ms - g_slot_window_start,
+                                          bb_iface_name(f),
+                                          f.id, f.data, f.dlc);
+        if (n <= 0) continue;
+        if (pos + (size_t)n > offset) {
+            size_t skip = (offset > pos) ? offset - pos : 0;
+            size_t take = (size_t)n - skip;
+            if (take > cap - written) take = cap - written;
+            memcpy(out + written, line + skip, take);
+            written += take;
+        }
+        pos += (size_t)n;
+    }
+    return written;
+}
+
+static bool backend_latest_name(char* out, size_t cap) {
+    if (!g_slot_used || !out || cap == 0) return false;
+    snprintf(out, cap, "%s", g_slot_base);
+    return true;
 }
 
 static bool backend_delete(const char* name) {
@@ -755,6 +830,16 @@ bool blackbox_file_size(const char* name, bool json, size_t* size_out) {
 void blackbox_stream_body(WiFiClient& client, const char* name, bool json) {
     if (!bb_name_ok(name)) return;
     backend_stream_body(client, name, json);
+}
+
+size_t blackbox_read_chunk(const char* name, bool json, size_t offset,
+                           uint8_t* out, size_t cap) {
+    if (!bb_name_ok(name)) return 0;
+    return backend_read_chunk(name, json, offset, out, cap);
+}
+
+bool blackbox_latest_name(char* out, size_t cap) {
+    return backend_latest_name(out, cap);
 }
 
 bool blackbox_delete(const char* name) {
