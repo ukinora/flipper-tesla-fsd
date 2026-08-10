@@ -85,6 +85,11 @@ void fsd_apply_hw_version(FSDState *state, TeslaHWVersion hw) {
 
 bool fsd_rx_is_stale(const FSDState *state, uint32_t now_ms) {
     if (state->rx_count == 0) return true;  // never heard the bus -> blind
+    // rx_count without a stamp means the caller counts frames but does not
+    // record when — the Flipper path does exactly that. Treating an unset
+    // stamp as "just now" would hand out a free TX window for the first
+    // FSD_RX_STALE_MS after boot, so call it stale instead.
+    if (state->last_rx_ms == 0) return true;
     return (uint32_t)(now_ms - state->last_rx_ms) >= FSD_RX_STALE_MS;
 }
 

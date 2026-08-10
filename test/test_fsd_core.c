@@ -2168,6 +2168,15 @@ static void test_rx_stale(void) {
     CHECK(fsd_rx_is_stale(&s, 0), "never heard the bus -> stale");
     CHECK(fsd_rx_is_stale(&s, 100000), "still stale much later");
 
+    // Counting frames without stamping when they arrived (the Flipper path)
+    // must not read as fresh. Otherwise the first FSD_RX_STALE_MS after boot
+    // would be a free TX window on a platform that never updates the stamp.
+    s.rx_count = 1;
+    s.last_rx_ms = 0;
+    CHECK(fsd_rx_is_stale(&s, 1), "counted but never stamped -> stale");
+    CHECK(fsd_rx_is_stale(&s, FSD_RX_STALE_MS - 1),
+          "counted but never stamped, inside the window -> still stale");
+
     // A frame arrives.
     s.rx_count = 1;
     s.last_rx_ms = 10000;
