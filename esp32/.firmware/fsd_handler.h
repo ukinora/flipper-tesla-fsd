@@ -31,6 +31,17 @@ void fsd_state_init(FSDState *state, TeslaHWVersion hw);
 /** Update state for a newly detected HW version (preserves all settings). */
 void fsd_apply_hw_version(FSDState *state, TeslaHWVersion hw);
 
+/** How long the bus may stay quiet before TX is held off. Long enough to ride
+ *  out a normal gap, short enough that a pulled connector is caught fast. */
+#define FSD_RX_STALE_MS 2000u
+
+/** True when no frame has arrived for FSD_RX_STALE_MS — or when none has ever
+ *  arrived. Fail-closed: before the first frame we are blind, which is exactly
+ *  when we must not transmit. Not latched; the bus coming back clears it, since
+ *  a car going to sleep and waking is normal. Call once per loop and store the
+ *  result in state->rx_stale. */
+bool fsd_rx_is_stale(const FSDState *state, uint32_t now_ms);
+
 /** Returns true if current state allows transmitting CAN frames. */
 bool fsd_can_transmit(const FSDState *state);
 

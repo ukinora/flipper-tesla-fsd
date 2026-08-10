@@ -56,6 +56,15 @@ static uint32_t      g_last_state_ms = 0;
 // false (STOP) or arms a new transfer, both single-word writes.
 static volatile bool g_bulk_active = false;
 static bool     g_bulk_json   = false;
+// ── Active-mode lease ────────────────────────────────────────────────────────
+// This project's rule is "compute on the phone, act on the module": with no
+// phone there is nothing to act on, so holding TX authority buys nothing and
+// costs safety. When the link drops we hand Active back after a grace period.
+//
+// Only Active that WE granted is revoked — the button and the web dashboard are
+// independent authorities and a BLE disconnect must not override them.
+static volatile bool     g_active_by_ble = false;
+static volatile uint32_t g_link_down_ms  = 0;  // 0 = link up or nothing to undo
 static char     g_bulk_name[40] = {};
 static size_t   g_bulk_offset = 0;
 static uint16_t g_bulk_seq    = 0;
@@ -223,6 +232,26 @@ static void ble_bulk_pump() {
     }
 }
 
+// Hand Active back once the phone has been gone for BLE_ACTIVE_GRACE_MS.
+// Runs from loop(), so g_state is touched on the same task as everything else.
+static void ble_revoke_active_if_stale(uint32_t now_ms) {
+    if (g_connected || g_link_down_ms == 0) return;
+    if ((uint32_t)(now_ms - g_link_down_ms) < BLE_ACTIVE_GRACE_MS) return;
+
+    g_link_down_ms  = 0;
+    g_active_by_ble = false;
+
+    portENTER_CRITICAL(g_mux);
+    bool was_active = (g_state->op_mode == OpMode_Active);
+    if (was_active) g_state->op_mode = OpMode_ListenOnly;
+    portEXIT_CRITICAL(g_mux);
+
+    if (was_active) {
+        Serial.printf("[BLE] no phone for %u s — reverting to Listen-Only\n",
+                      (unsigned)(BLE_ACTIVE_GRACE_MS / 1000u));
+    }
+}
+
 // ── Command handling ─────────────────────────────────────────────────────────
 class CommandCB : public NimBLECharacteristicCallbacks {
     void onWrite(NimBLECharacteristic *ch, NimBLEConnInfo &info) override {
@@ -250,6 +279,9 @@ class CommandCB : public NimBLECharacteristicCallbacks {
             portENTER_CRITICAL(g_mux);
             g_state->op_mode = m;
             portEXIT_CRITICAL(g_mux);
+            // Remember that this Active is ours, so the grace timer knows what
+            // it may revoke (and stop tracking once the phone turns it off).
+            g_active_by_ble = (m == OpMode_Active);
             Serial.printf("[BLE] mode -> %s\n", arg ? "ACTIVE" : "LISTEN-ONLY");
             ble_send_result(cmd, BLE_RES_OK, (uint16_t)m);
             break;
@@ -308,6 +340,7 @@ class BulkCB : public NimBLECharacteristicCallbacks {
 class ServerCB : public NimBLEServerCallbacks {
     void onConnect(NimBLEServer *, NimBLEConnInfo &) override {
         g_connected = true;
+        g_link_down_ms = 0;  // reconnected in time — cancel the pending revoke
         Serial.println("[BLE] client connected");
     }
     void onDisconnect(NimBLEServer *, NimBLEConnInfo &, int) override {
@@ -316,6 +349,13 @@ class ServerCB : public NimBLEServerCallbacks {
         g_bulk_subscribed  = false;
         g_bulk_active      = false;  // a half-sent capture is not resumable
         g_mtu              = 23;     // next peer renegotiates from the default
+        // Start the grace timer only if there is something to take back. millis()
+        // can return 0 exactly once at boot, which would read as "no timer" — so
+        // clamp to 1; a 1 ms skew on a 30 s window does not matter.
+        if (g_active_by_ble) {
+            uint32_t t = millis();
+            g_link_down_ms = t ? t : 1u;
+        }
         Serial.println("[BLE] client disconnected — advertising again");
         NimBLEDevice::startAdvertising();
     }
@@ -389,6 +429,7 @@ void ble_server_tick(uint32_t now_ms) {
     // Bulk runs every loop(), not on the 5 Hz State cadence — a ~100 KB capture
     // over 5 Hz chunks would take minutes.
     ble_bulk_pump();
+    ble_revoke_active_if_stale(now_ms);
 
     if (now_ms - g_last_state_ms < BLE_STATE_PERIOD_MS) return;
     g_last_state_ms = now_ms;

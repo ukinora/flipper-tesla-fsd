@@ -40,9 +40,15 @@ void fsd_handle_gtw_car_state(FSDState* state, const CANFRAME* frame) {
     }
 }
 
+bool fsd_rx_is_stale(const FSDState* state, uint32_t now_ms) {
+    if(state->rx_count == 0) return true; // never heard the bus -> blind
+    return (uint32_t)(now_ms - state->last_rx_ms) >= FSD_RX_STALE_MS;
+}
+
 bool fsd_can_transmit(const FSDState* state) {
     if(state->op_mode == OpMode_ListenOnly) return false;
     if(state->tesla_ota_in_progress) return false;
+    if(state->rx_stale) return false; // deaf bus: injecting achieves nothing
     return true;
 }
 

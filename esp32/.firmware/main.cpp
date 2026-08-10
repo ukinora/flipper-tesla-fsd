@@ -1063,6 +1063,7 @@ static void process_frame(CanBusId bus, const CanFrame &frame) {
     uint32_t now = millis();
     state_enter();
     g_state.rx_count++;
+    g_state.last_rx_ms = now;  // bus-liveness stamp; rx_stale is derived in loop()
     // Configurable signal mapping (#122): when set, read DAS/steering from the
     // user-configured positions and disable the auto-parsers for those signals.
     fsd_apply_signal_config(&g_state, &frame, millis());
@@ -1635,6 +1636,21 @@ void loop() {
         g_can[i]->serviceHealth();
         // Bus-off just fired → arm a black-box capture via the event-core (#124).
         if (g_can[i]->busOffEvent()) blackbox_busoff(now);
+    }
+
+    // Bus liveness, derived once per loop — process_frame() only runs when a
+    // frame arrives, so a bus that went quiet would never be noticed there.
+    {
+        state_enter();
+        bool was = g_state.rx_stale;
+        g_state.rx_stale = fsd_rx_is_stale(&g_state, now);
+        bool changed = (was != g_state.rx_stale);
+        bool stale = g_state.rx_stale;
+        bool heard = (g_state.rx_count > 0);  // suppress the boot-time edge
+        state_exit();
+        if (changed && heard) {
+            Serial.printf("[CAN] bus %s\n", stale ? "quiet — TX held off" : "back — TX allowed");
+        }
     }
 
     // ── Periodic error counter refresh (~every 250 ms) ────────────────────────

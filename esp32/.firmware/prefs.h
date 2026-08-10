@@ -10,7 +10,19 @@
  *
  * On first boot (empty NVS) prefs_load() is a no-op; fsd_state_init() defaults
  * remain in effect.
+ *
+ * PERSIST_OP_MODE
+ * ---------------
+ * Restoring op_mode assumes the device is picked up, used, and put down — the
+ * user is there. A board wired permanently into a car is the opposite case: it
+ * powers up whenever the car wakes, unattended, and restoring Active would mean
+ * it comes back transmit-capable every single time. Boards in that situation
+ * define PERSIST_OP_MODE=0 and always boot Listen-Only. Everything else
+ * (toggles, WiFi, signal mapping) still persists.
  */
+#ifndef PERSIST_OP_MODE
+#define PERSIST_OP_MODE 1
+#endif
 
 /** Load saved settings into *state.  No-op if no saved state exists yet. */
 void prefs_load(FSDState *state);
