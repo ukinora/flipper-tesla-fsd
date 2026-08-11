@@ -153,22 +153,27 @@ float fsd_cam_angle_diff(float a, float b) {
 
 float fsd_cam_segment_distance_m(int32_t a_lat, int32_t a_lon, int32_t b_lat,
                                  int32_t b_lon, int32_t c_lat, int32_t c_lon) {
+    // Work in metres RELATIVE TO `a`, never in absolute metres.
+    //
+    // Latitude 37.5 deg is 4,174,500 m from the equator. A float carries ~7
+    // significant digits, so absolute metres quantise to about 0.25 m — coarser
+    // than the lane widths this function exists to distinguish. Subtracting the
+    // integer coordinates first keeps every value small and the precision
+    // intact. (The Python prototype used doubles and never showed this.)
     float mid_lat = (float)(a_lat / 2 + b_lat / 2) / (float)FSD_CAM_E7;
     float mlon = m_per_deg_lon(mid_lat);
-    float ax = (float)a_lon / (float)FSD_CAM_E7 * mlon;
-    float ay = (float)a_lat / (float)FSD_CAM_E7 * M_PER_DEG_LAT;
-    float bx = (float)b_lon / (float)FSD_CAM_E7 * mlon;
-    float by = (float)b_lat / (float)FSD_CAM_E7 * M_PER_DEG_LAT;
-    float cx = (float)c_lon / (float)FSD_CAM_E7 * mlon;
-    float cy = (float)c_lat / (float)FSD_CAM_E7 * M_PER_DEG_LAT;
+    float bx = (float)(b_lon - a_lon) / (float)FSD_CAM_E7 * mlon;
+    float by = (float)(b_lat - a_lat) / (float)FSD_CAM_E7 * M_PER_DEG_LAT;
+    float cx = (float)(c_lon - a_lon) / (float)FSD_CAM_E7 * mlon;
+    float cy = (float)(c_lat - a_lat) / (float)FSD_CAM_E7 * M_PER_DEG_LAT;
+    // `a` is the origin, so the segment direction is simply (bx, by).
 
-    float dx = bx - ax, dy = by - ay;
-    float den = dx * dx + dy * dy;
-    if(den <= 0.0f) return sqrtf((cx - ax) * (cx - ax) + (cy - ay) * (cy - ay));
-    float t = ((cx - ax) * dx + (cy - ay) * dy) / den;
+    float den = bx * bx + by * by;
+    if(den <= 0.0f) return sqrtf(cx * cx + cy * cy);
+    float t = (cx * bx + cy * by) / den;
     if(t < 0.0f) t = 0.0f;
     if(t > 1.0f) t = 1.0f;
-    float px = cx - (ax + t * dx), py = cy - (ay + t * dy);
+    float px = cx - t * bx, py = cy - t * by;
     return sqrtf(px * px + py * py);
 }
 

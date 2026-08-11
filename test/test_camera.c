@@ -200,8 +200,12 @@ static void test_segment_distance(void) {
     const int32_t CAM_LON = 1270000000 + (int32_t)(5.0 / 88000.0 * 1e7);
     const int32_t STEP = (int32_t)(16.0 / 111320.0 * 1e7);
 
-    int32_t a_lat = CAM_LAT - STEP / 2 - STEP;
-    int32_t b_lat = a_lat + STEP;
+    // Straddle the camera: one sample 8 m before it, one 8 m after, neither
+    // beside it. The segment between them passes the camera's latitude, so the
+    // true closest approach is the 5 m lateral offset while the best sample is
+    // sqrt(8^2 + 5^2) = 9.4 m.
+    int32_t a_lat = CAM_LAT - STEP / 2;
+    int32_t b_lat = CAM_LAT + STEP / 2;
     float best_sample = fsd_cam_distance_m(a_lat, 1270000000, CAM_LAT, CAM_LON);
     float s2 = fsd_cam_distance_m(b_lat, 1270000000, CAM_LAT, CAM_LON);
     if (s2 < best_sample) best_sample = s2;
