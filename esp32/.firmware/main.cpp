@@ -28,6 +28,7 @@
 #include "can_dump.h"
 #include "http_can_stream.h"
 #include "blackbox.h"
+#include "camera_store.h"
 #include "ble_server.h"
 #include "capability.h"
 #include "profile_match.h"
@@ -1548,6 +1549,11 @@ void setup() {
 
     can_dump_init();
     blackbox_init(&g_state, &g_state_mux);  // ring + storage (after SD is mounted)
+#ifdef BLE_SERVER_ENABLED
+    // Camera database lives in the same filesystem blackbox_init() mounts.
+    // Absent on a fresh flash — the app uploads one over BLE.
+    camera_store_init();
+#endif
     capability_init(&g_state, &g_state_mux);  // tap capability checker (#125)
     ble_server_init(&g_state, &g_state_mux);  // GATT server for the phone app
     profile_match_init(&g_state, &g_state_mux);  // variant-profile auto-suggest (#126)

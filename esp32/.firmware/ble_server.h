@@ -38,6 +38,7 @@
 #define BLE_CMD_PROFILE_STEP 0x11u  // arg: int8 +1 / -1          (closed loop; TODO)
 #define BLE_CMD_DUMP_START   0x30u  // arg: 0 = .log (candump), 1 = .json summary
 #define BLE_CMD_DUMP_STOP    0x31u
+#define BLE_CMD_UPLOAD_ABORT 0x33u  // give up on an in-flight camera.bin upload
 #define BLE_CMD_CAP_RECHECK  0x40u  // re-run the capability listen window
 #define BLE_CMD_PING         0x50u
 
@@ -63,6 +64,23 @@
 // ~500 B per notification and a 23-byte default still works, just slowly.
 #define BLE_BULK_MAX_PAYLOAD   500u
 #define BLE_BULK_CHUNKS_PER_TICK 4u
+
+// ── Upload framing (Upload characteristic, write) ────────────────────────────
+// The mirror image of Bulk: the phone pushes camera.bin to the module. The
+// module cannot judge cameras without a database, and 163 KB will not fit in
+// any other channel we have.
+//
+//   [0..1] seq, LE16.  0 = header, 1.. = data
+//   header : [2..5] total bytes LE32
+//   data   : [2..]  file bytes, in order
+//
+// Sequence numbers must not skip. A gap would punch a hole in the database
+// that nothing downstream could detect, so the module rejects the transfer
+// instead of storing something quietly damaged. Completion is implicit: once
+// the declared byte count has arrived the module verifies and swaps it in.
+//
+// Written without response for throughput; the module never blocks on a chunk.
+#define BLE_UPLOAD_HDR 2u
 
 #ifdef BLE_SERVER_ENABLED
 
