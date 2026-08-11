@@ -98,8 +98,10 @@ typedef struct FSDState {
     // existing *_seen flag would be ambiguous, because the upstream parsers set
     // those without stamping a time — "seen but never timed" and "seen at t=0"
     // would be indistinguishable, and this gate must fail closed.
-    uint8_t  di_gear;            // 0x286 DI_gear: 0=INVALID 1=P 2=R 3=N 4=D 7=SNA
-    uint32_t di_gear_ms;         // ms clock at the last 0x286 parse
+    uint8_t  di_gear;            // 0x118 DI_gear: 0=INVALID 1=P 2=R 3=N 4=D 7=SNA
+                                 // (was wired to 0x286 until 2026-08-12 — that
+                                 //  frame does not carry it. See fsd_autonomy.c)
+    uint32_t di_gear_ms;         // ms clock at the last 0x118 parse
     bool     di_gear_seen;
     uint32_t belt_seen_ms;       // ms clock at the last 0x311 parse (buckle freshness)
     bool     belt_seen;

@@ -2265,7 +2265,12 @@ static void test_drive_observers(void) {
 
     CANFRAME f;
     memset(&f, 0, sizeof(f));
-    f.canId = CAN_ID_DI_STATE;
+    // 0x118 DI_systemStatus, NOT 0x286. This line is the whole test: the
+    // shipped code took 0x286, where these bits are the top of DI_digitalSpeed,
+    // so the gate reported D only between 128 and 159 km/h. The old test set
+    // CAN_ID_DI_STATE here and passed, because it only ever checked the bit
+    // extraction — which was right — and never which frame it came from.
+    f.canId = CAN_ID_DI_SYS_STATUS;
     f.data_lenght = 8;
 
     // DI_gear is bit 21|3 little-endian = byte 2 bits [7:5]. Build the byte from
@@ -2294,6 +2299,49 @@ static void test_drive_observers(void) {
     fsd_drive_observe_gear(&s, &f, 9999);
     CHECK(s.di_gear == before, "short frame does not change gear");
     CHECK(s.di_gear_ms == 2000, "short frame does not refresh the stamp");
+
+    // THE REGRESSION. Hand it 0x286 — the frame it used to be wired to — with
+    // byte 2 holding what a real DI_state carries there: the top bits of
+    // DI_digitalSpeed. At 150 km/h the raw field is 300, and (300 >> 6) & 7 is
+    // 4, which the old code reported as gear D. It must now report nothing.
+    f.data_lenght = 8;
+    f.canId = CAN_ID_DI_STATE;
+    {
+        const uint16_t speed_raw = 300u; // 150.0 at 0.5 per count
+        // DI_digitalSpeed : 15|9@1+ -> bit 15 is byte1 bit7, running up to bit 23.
+        f.buffer[1] = (uint8_t)((speed_raw & 0x01u) << 7);
+        f.buffer[2] = (uint8_t)((speed_raw >> 1) & 0xFFu);
+    }
+    CHECK(((f.buffer[2] >> 5) & 0x07u) == FSD_GEAR_D,
+          "the fixture really does look like gear D to the old code");
+    fsd_drive_observe_gear(&s, &f, 12345);
+    CHECK(s.di_gear == before, "0x286 must not be read as a gear");
+    CHECK(s.di_gear_ms == 2000, "and must not refresh the stamp");
+
+    // Cruise state moved to its own observer when gear left 0x286.
+    // DI_cruiseState : 12|3@1+ -> byte 1 bits [6:4].
+    memset(&f, 0, sizeof(f));
+    f.canId = CAN_ID_DI_STATE;
+    f.data_lenght = 8;
+    f.buffer[1] = (uint8_t)((0x05u << 4) | 0x8Fu); // value 5, neighbours set
+    fsd_drive_observe_cruise(&s, &f);
+    CHECK(s.di_cruise_state == 5, "cruise decoded as 5, got %u",
+          (unsigned)s.di_cruise_state);
+    f.canId = CAN_ID_DI_SYS_STATUS; // wrong frame for cruise
+    f.buffer[1] = (uint8_t)((0x02u << 4) | 0x8Fu);
+    fsd_drive_observe_cruise(&s, &f);
+    CHECK(s.di_cruise_state == 5, "a foreign frame must not change cruise");
+
+    // Belt observer rejects a foreign frame the same way.
+    memset(&f, 0, sizeof(f));
+    f.canId = CAN_ID_DI_STATE;
+    f.data_lenght = 8;
+    f.buffer[1] = (uint8_t)(1u << 5);
+    bool belt_before = s.ui_buckle_status;
+    uint32_t belt_ms_before = s.belt_seen_ms;
+    fsd_drive_observe_belt(&s, &f, 54321);
+    CHECK(s.ui_buckle_status == belt_before, "0x286 must not be read as a belt");
+    CHECK(s.belt_seen_ms == belt_ms_before, "and must not refresh the stamp");
 
     // buckleStatus is bit 13|1 big-endian = byte 1 bit 5.
     memset(&f, 0, sizeof(f));
@@ -2482,7 +2530,7 @@ static void test_observer_extra_fields(void) {
     f.canId = CAN_ID_DI_STATE;
     f.data_lenght = 8;
     f.buffer[1] = (uint8_t)(0x05u << 4) | 0x8Fu; // value 5, neighbours set
-    fsd_drive_observe_gear(&s, &f, 100);
+    fsd_drive_observe_cruise(&s, &f);
     CHECK(s.di_cruise_state == 5, "cruise state %u decoded as 5", s.di_cruise_state);
 
     // Blinkers and door, from 0x311.

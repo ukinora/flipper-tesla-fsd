@@ -1252,10 +1252,19 @@ static void process_frame(CanBusId bus, const CanFrame &frame) {
     // fsd_logic/fsd_handler.c, so its DI_state / UI_warning parsers never ran
     // here and di_cruise_state, ui_buckle_status and the blinker flags have all
     // been structurally zero. These two observers are shared with the Flipper.
-    if (frame.id == CAN_ID_DI_STATE) {
+    // Gear is on 0x118 DI_systemStatus. It was dispatched from 0x286 until
+    // 2026-08-12, which does not carry DI_gear at all — the gate was reading
+    // the top bits of DI_digitalSpeed and refusing at every ordinary speed.
+    if (frame.id == CAN_ID_DI_SYS_STATUS) {
         uint32_t now_ms = millis();
         state_enter();
         fsd_drive_observe_gear(&g_state, &frame, now_ms);
+        state_exit();
+        return;
+    }
+    if (frame.id == CAN_ID_DI_STATE) {
+        state_enter();
+        fsd_drive_observe_cruise(&g_state, &frame);
         state_exit();
         return;
     }
