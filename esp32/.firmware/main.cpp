@@ -1790,6 +1790,10 @@ void loop() {
     // the line above is — would print it exactly when nobody is measuring.
     static uint32_t last_mem_ms = 0;
     if ((now - last_mem_ms) >= 60000u) {
+        // The multiply is a no-op on ESP-IDF (StackType_t is a byte there, and
+        // the high-water mark already comes back in bytes rather than the words
+        // vanilla FreeRTOS returns). Kept because it is what makes the line
+        // read correctly on either.
         Serial.printf("[MEM] heap:%lu min:%lu stack_free:%lu\n",
                       (unsigned long)ESP.getFreeHeap(),
                       (unsigned long)ESP.getMinFreeHeap(),

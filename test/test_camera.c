@@ -1224,6 +1224,62 @@ static void test_policy_out_of_range_readback(void) {
           (unsigned)d.target_profile);
 }
 
+static void test_losing_a_target_does_not_latch(void) {
+    printf("\n-- losing an ACTIVE target must not latch LOWER --\n");
+
+    // fsd_pol_tick() keeps an ACTIVE target adopted when nothing is ahead, on
+    // the grounds that only fsd_pol_on_pass() may end it. That is right while
+    // the TRACKER is still following the camera. The firmware wipes the
+    // tracker's actives on a gap or a refused fix — after which the event can
+    // never come, the frozen distance goes on satisfying the trigger, and LOWER
+    // is returned every tick for the rest of the drive.
+    FsdPolicy p;
+    fsd_pol_init(&p);
+    fsd_pol_new_drive(&p);
+
+    FsdPolTarget tg = target(7, 30, 60.0f);
+    FsdPolDecision d = fsd_pol_tick(&p, &tg, FSD_POL_PROFILE_HURRY, 60.0f, 20.0f, 1.0f);
+    CHECK(d.action == FSD_POL_ACT_LOWER && p.phase == FSD_POL_ACTIVE, "engaged");
+
+    // The latch, demonstrated. Nothing ahead, forever.
+    for (int i = 0; i < 40; i++)
+        d = fsd_pol_tick(&p, NULL, FSD_POL_PROFILE_CHILL, 60.0f, 20.0f, 1.0f);
+    CHECK(d.action == FSD_POL_ACT_LOWER,
+          "without being told, the policy still asks for LOWER after 40 ticks");
+    CHECK(p.phase == FSD_POL_ACTIVE, "and is still ACTIVE on a camera nobody tracks");
+
+    // Told, it ends the way passing it would: hold, then give the driver's
+    // profile back.
+    fsd_pol_init(&p);
+    fsd_pol_new_drive(&p);
+    d = fsd_pol_tick(&p, &tg, FSD_POL_PROFILE_HURRY, 60.0f, 20.0f, 1.0f);
+    CHECK(p.phase == FSD_POL_ACTIVE, "engaged again");
+    CHECK(p.entry_profile == FSD_POL_PROFILE_HURRY, "entry captured");
+
+    fsd_pol_target_lost(&p);
+    CHECK(p.phase == FSD_POL_HOLDING, "loss is handled as a pass");
+
+    bool restored = false;
+    for (int i = 0; i < 40 && !restored; i++) {
+        d = fsd_pol_tick(&p, NULL, FSD_POL_PROFILE_CHILL, 60.0f, 20.0f, 1.0f);
+        if (d.action == FSD_POL_ACT_RESTORE) restored = true;
+    }
+    CHECK(restored, "the hold ends and the entry profile is asked for back");
+    CHECK(d.target_profile == FSD_POL_PROFILE_HURRY,
+          "restoring to what the driver had (%u)", (unsigned)d.target_profile);
+
+    // And it converges: once the car reports the entry profile, we stop asking.
+    d = fsd_pol_tick(&p, NULL, FSD_POL_PROFILE_HURRY, 60.0f, 20.0f, 1.0f);
+    d = fsd_pol_tick(&p, NULL, FSD_POL_PROFILE_HURRY, 60.0f, 20.0f, 1.0f);
+    CHECK(d.action == FSD_POL_ACT_NONE, "and stops once the car is back");
+    CHECK(p.phase == FSD_POL_IDLE, "idle again");
+
+    // Nothing adopted -> nothing to lose. Must not disturb a restore in flight.
+    fsd_pol_init(&p);
+    fsd_pol_target_lost(&p);
+    CHECK(p.phase == FSD_POL_IDLE, "harmless with no target");
+}
+
 static void test_trk_reset_active(void) {
     printf("\n-- reset_active: a gap must not forge a pass --\n");
 
@@ -1415,6 +1471,7 @@ int main(void) {
     test_gps_feeds_the_tracker();
     test_abandon_is_cheap_to_repeat();
     test_policy_out_of_range_readback();
+    test_losing_a_target_does_not_latch();
     test_trk_reset_active();
     test_gap_forges_a_pass_without_a_reset();
     printf("\n%d passed, %d failed\n", g_pass, g_fail);

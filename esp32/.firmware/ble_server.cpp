@@ -165,8 +165,13 @@ static void ble_pack_camstat(uint8_t *out, uint32_t now_ms) {
 
     FsdSupVerdict v = fsd_supervised_drive_why(&s, now_ms);
 
-    // Wait 0: this runs on the BLE task and a status field is never worth
-    // blocking for. A missed borrow reports "no database" for one notify.
+    // Wait 0 because a status field is never worth blocking for: a missed
+    // borrow reports "no database" for one notify and the next one is 1 s away.
+    //
+    // Note this packer runs on the LOOP task, not the BLE task — both of its
+    // callers (ble_server_init from setup(), ble_server_tick from loop()) are
+    // there. That is also what makes camera_task's lock-free accessors below
+    // safe to read from here.
     const FsdCamDb *db = camera_store_db_acquire(0);
     uint32_t built = db ? db->built_at : 0u;
     bool have_db = (db != nullptr);

@@ -78,6 +78,15 @@ void fsd_pol_abandon(FsdPolicy* p) {
     p->phase = FSD_POL_IDLE;
 }
 
+void fsd_pol_target_lost(FsdPolicy* p) {
+    if(!p || !p->has_target) return;
+    /* Deliberately the pass path, key and all. See the header for why losing a
+     * camera and passing it get the same treatment despite being different
+     * events: it is the only ending that neither latches nor strands the car on
+     * a profile it did not choose. */
+    fsd_pol_on_pass(p, p->key);
+}
+
 void fsd_pol_on_pass(FsdPolicy* p, uint64_t key) {
     if(!p || !p->has_target || p->key != key) return;
 

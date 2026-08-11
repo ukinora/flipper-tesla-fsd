@@ -87,7 +87,9 @@
 //   [8..11]  database build time, Unix seconds LE32 (0 = unknown/old file)
 //   [12]     FsdGpsVerdict — why there is no fix (0 = OK)
 //   [13]     FsdPolPhase bits0-2 | FsdPolAction bits3-4 | target profile bits5-6
-//   [14..15] metres to the nearest tracked camera, LE16 (0xFFFF = none)
+//   [14..15] metres to the nearest tracked camera, LE16
+//            (0xFFFF = none, 0xFFFE = 65534 m or more — unreachable in practice,
+//             the scan radius is 600 m, but the field cannot say "65535 m")
 //   [16]     MCU_gpsAccuracy, raw 0.2 m units (0xFF = unknown)
 //   [17]     last decoded 0x3FD profile, RAW 0..7 (0xFF = never decoded)
 //   [18]     cameras with stored learning

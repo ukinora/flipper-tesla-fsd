@@ -173,7 +173,18 @@ uint8_t camera_store_upload_begin(uint32_t total) {
 
     LittleFS.remove(CAM_TMP);
     g_up_file = LittleFS.open(CAM_TMP, "w");
-    if(!g_up_file) return CAM_UP_WRITE_FAIL;
+    if(!g_up_file) {
+        /* We closed the database and then failed to start, so put it back here
+         * rather than leaving it to the abort path. Abort now returns early
+         * when there is nothing to abort — and after this failure there IS
+         * nothing: no upload is active and no camera.tmp exists. Without this
+         * the module would run with no cameras until the next reboot. */
+        if(xSemaphoreTake(g_db_lock, pdMS_TO_TICKS(200)) == pdTRUE) {
+            open_db();
+            xSemaphoreGive(g_db_lock);
+        }
+        return CAM_UP_WRITE_FAIL;
+    }
 
     g_up_total = total;
     g_up_written = 0;

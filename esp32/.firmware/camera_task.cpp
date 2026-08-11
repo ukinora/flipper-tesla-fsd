@@ -161,6 +161,21 @@ void camera_task_observe_profile(bool hw4, const uint8_t* data, uint8_t dlc, uin
 
 // ── the tick ─────────────────────────────────────────────────────────────────
 
+/* Forget every in-flight measurement. ONE function, used by both places that
+ * need it, because the two halves must never drift apart:
+ *
+ * fsd_pol_tick() keeps an ACTIVE target adopted when nothing is ahead — losing
+ * a camera from one scan is not the same as having passed it, and only
+ * fsd_pol_on_pass() may end it. That holds while the TRACKER is still following
+ * the camera. Wiping the tracker without telling the policy breaks it: the
+ * event can never come, the frozen distance goes on satisfying the trigger, and
+ * LOWER latches for the rest of the drive. */
+static void camera_forget_tracking(void) {
+    fsd_pol_target_lost(&g_pol); // before the tracker forgets who it was
+    fsd_trk_reset_active(&g_trk);
+    g_have_prev = false;
+}
+
 /* Drop what is in flight. `hard` is a withdrawal of authority, which must take
  * effect on the same tick (페일세이프-정책.md §7); a data refusal gets a few
  * ticks of grace so one blink in a cutting does not discard a restore we still
@@ -175,9 +190,9 @@ static void camera_release(bool hard) {
     }
 
     /* The measurements go either way. A track carried across a refusal would be
-     * interpolated over the gap when fixes come back. */
-    fsd_trk_reset_active(&g_trk);
-    g_have_prev = false;
+     * interpolated over the gap when fixes come back. After an abandon this is
+     * a no-op on the policy; before the grace expires it is the whole point. */
+    camera_forget_tracking();
     memset(&g_decision, 0, sizeof(g_decision));
     g_nearest_m = 0xFFFFu;
 }
@@ -297,10 +312,7 @@ void camera_task_tick(uint32_t now_ms) {
     /* A late tick means the chord between fixes no longer resembles the road.
      * Interpolating across it can graze a camera the car never went near, and
      * that would be recorded as a pass and NARROW its learned limit. */
-    if(elapsed >= CAMERA_MAX_GAP_MS) {
-        fsd_trk_reset_active(&g_trk);
-        g_have_prev = false;
-    }
+    if(elapsed >= CAMERA_MAX_GAP_MS) camera_forget_tracking();
 
     FsdCamFix fix;
     memset(&fix, 0, sizeof(fix));

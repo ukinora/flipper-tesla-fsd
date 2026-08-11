@@ -75,7 +75,7 @@ uint8_t  camera_task_pol_phase(void);        // FsdPolPhase
 uint8_t  camera_task_pol_action(void);       // FsdPolAction
 uint8_t  camera_task_pol_target(void);       // profile the policy is asking for
 bool     camera_task_pol_suspended(void);
-uint16_t camera_task_nearest_m(void);        // 0xFFFF = nothing being followed
+uint16_t camera_task_nearest_m(void);        // 0xFFFF = none, 0xFFFE = >= 65534 m
 uint8_t  camera_task_gps_accuracy_raw(void); // 0.2 m units; 0xFF = unknown
 uint8_t  camera_task_raw_profile(void);      // last 0x3FD decode, 0xFF = never
 bool     camera_task_profile_fresh(void);    // fresh AND inside 0..3

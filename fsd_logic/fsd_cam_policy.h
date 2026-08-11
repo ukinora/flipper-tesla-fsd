@@ -164,6 +164,30 @@ void fsd_pol_on_pass(FsdPolicy* p, uint64_t key);
  *  authority: the entry profile is forgotten rather than forced back. */
 void fsd_pol_abandon(FsdPolicy* p);
 
+/** The tracker is no longer following our target and cannot report on it again.
+ *
+ *  NOT the same as passing it — we do not know where the camera went, only that
+ *  nobody is measuring it any more. The caller reaches this after wiping the
+ *  tracker's in-flight measurements: a gap in fixes, a refused fix, a reboot.
+ *
+ *  It has to be said out loud, because fsd_pol_tick() deliberately keeps an
+ *  ACTIVE target adopted when `ahead` goes invalid — losing a camera from one
+ *  scan is not the same as having passed it, and the comment there says only
+ *  fsd_pol_on_pass() may end it. That is right while the tracker is still
+ *  following the camera. Once the tracker has forgotten it THE EVENT CAN NEVER
+ *  COME, and the frozen distance goes on satisfying the trigger — so LOWER
+ *  latches for the rest of the drive.
+ *
+ *  Handled as a pass: hold, then restore. Both alternatives are worse — keeping
+ *  it adopted latches, and abandoning leaves the car on the profile we lowered
+ *  it to with nothing owed back.
+ *
+ *  The cost is a shorter margin: the hold is measured from where we lost it
+ *  rather than from the camera, so one lost 60 m short is released 60 m past it
+ *  instead of 120 m. That is the price of not latching, and it is only paid
+ *  when the position was already unreliable. */
+void fsd_pol_target_lost(FsdPolicy* p);
+
 /** Advance one fix.
  *
  *  `ahead` may be NULL or invalid when nothing is on our path.
