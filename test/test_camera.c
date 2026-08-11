@@ -179,7 +179,7 @@ static void test_geometry(void) {
     // Reverse bearing is 180 degrees away.
     float rb = fsd_cam_bearing_deg(B_LAT, B_LON, A_LAT, A_LON);
     CHECK(NEAR(fabsf(fsd_cam_angle_diff(b, rb)), 180.0f, 0.05f),
-          "reverse bearing差 = %.2f exp 180", fsd_cam_angle_diff(b, rb));
+          "reverse bearing diff = %.2f exp 180", fsd_cam_angle_diff(b, rb));
 
     CHECK(NEAR(fsd_cam_distance_m(A_LAT, A_LON, A_LAT, A_LON), 0.0f, 1e-3f),
           "distance to self must be 0");

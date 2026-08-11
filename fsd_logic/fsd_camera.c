@@ -14,6 +14,10 @@
 
 #define M_PER_DEG_LAT 111320.0f
 
+// M_PI is a POSIX extension, not C11 — the build is -std=c11, so define our own
+// rather than loosening the standard for one constant.
+#define FSD_CAM_PI 3.14159265358979323846f
+
 // Little-endian readers. The file is written little-endian by pack.py and both
 // ESP32 and the host test machines are little-endian, but going through these
 // keeps the parsing explicit rather than depending on struct layout.
@@ -31,7 +35,7 @@ static int32_t rdi32(const uint8_t* p) {
 }
 
 static float m_per_deg_lon(float lat_deg) {
-    float c = cosf(lat_deg * (float)M_PI / 180.0f);
+    float c = cosf(lat_deg * FSD_CAM_PI / 180.0f);
     if(c < 0.05f) c = 0.05f; // never divide the world away near the poles
     return M_PER_DEG_LAT * c;
 }
@@ -137,7 +141,7 @@ float fsd_cam_bearing_deg(int32_t a_lat, int32_t a_lon, int32_t b_lat, int32_t b
     float mid_lat = (float)(a_lat / 2 + b_lat / 2) / (float)FSD_CAM_E7;
     float dy = (float)(b_lat - a_lat) / (float)FSD_CAM_E7 * M_PER_DEG_LAT;
     float dx = (float)(b_lon - a_lon) / (float)FSD_CAM_E7 * m_per_deg_lon(mid_lat);
-    float deg = atan2f(dx, dy) * 180.0f / (float)M_PI;
+    float deg = atan2f(dx, dy) * 180.0f / FSD_CAM_PI;
     return deg < 0.0f ? deg + 360.0f : deg;
 }
 
@@ -185,7 +189,7 @@ bool fsd_cam_evaluate(const FsdCamFix* fix, const FsdCamRecord* cam,
     float off = fsd_cam_angle_diff(to_cam, fix->bearing_deg);
     if(fabsf(off) > FSD_CAM_FORWARD_CONE_DEG) return false;
 
-    float rad = off * (float)M_PI / 180.0f;
+    float rad = off * FSD_CAM_PI / 180.0f;
     out->distance_m = d;
     out->along_m = d * cosf(rad);
     out->cpa_m = fabsf(d * sinf(rad));
