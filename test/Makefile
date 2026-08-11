@@ -40,14 +40,22 @@ BODY_SRC := test_body.c $(ROOT)/fsd_logic/fsd_body.c $(ROOT)/fsd_logic/fsd_body_
 test_body: $(BODY_SRC) $(ROOT)/fsd_logic/fsd_body.h $(ROOT)/fsd_logic/fsd_body_t1.h $(ROOT)/fsd_logic/fsd_body_t2.h $(ROOT)/fsd_logic/fsd_autonomy.h
 	$(CC) $(CFLAGS) -I$(ROOT)/fsd_logic $(BODY_SRC) -o $@
 
-check: test_fsd_core test_speed_profile test_camera test_gps test_body
+# Button press classification. Timing only — everything radio-specific is in
+# esp32/.firmware/ble_central.cpp and needs a button to test.
+BTN_SRC := test_button.c $(ROOT)/fsd_logic/fsd_button.c
+
+test_button: $(BTN_SRC) $(ROOT)/fsd_logic/fsd_button.h
+	$(CC) $(CFLAGS) -I$(ROOT)/fsd_logic $(BTN_SRC) -o $@
+
+check: test_fsd_core test_speed_profile test_camera test_gps test_body test_button
 	./test_fsd_core
 	./test_speed_profile
 	./test_camera
 	./test_gps
 	./test_body
+	./test_button
 
 clean:
-	rm -rf test_fsd_core test_speed_profile test_camera test_gps test_body *.dSYM
+	rm -rf test_fsd_core test_speed_profile test_camera test_gps test_body test_button *.dSYM
 
 .PHONY: check clean
