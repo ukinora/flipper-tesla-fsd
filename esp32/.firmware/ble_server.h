@@ -74,6 +74,11 @@
 //   [3]     OpMode
 //   [4..7]  cameras in the database, LE32
 //   [8..11] database build time, Unix seconds LE32 (0 = unknown/old file)
+// Its own version, not BLE_PROTO_VERSION. Sharing one constant meant that
+// bumping State to 2 also announced a CamStat change that never happened, and
+// an app checking the byte would have re-parsed for nothing. Two independent
+// wire formats need two independent version numbers.
+#define BLE_CAMSTAT_VERSION 1u
 #define BLE_CAMSTAT_LEN 12u
 #define BLE_CAMSTAT_PERIOD_MS 1000u
 

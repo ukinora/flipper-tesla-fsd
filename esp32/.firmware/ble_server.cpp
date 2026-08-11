@@ -58,6 +58,9 @@ static volatile bool g_bulk_subscribed  = false;
 static volatile uint16_t g_mtu = 23;              // until the peer negotiates up
 static uint32_t      g_last_state_ms = 0;
 static uint32_t      g_last_camstat_ms = 0;
+// Set by a command handler on the BLE task, consumed by loop(). A single
+// word, written true and read-and-cleared in one place, so no lock is needed.
+static volatile bool g_prefs_dirty = false;
 
 // ── Bulk transfer state ──────────────────────────────────────────────────────
 // Owned by loop() via ble_server_tick(); the BLE task only sets g_bulk_active
@@ -165,7 +168,7 @@ static void ble_pack_camstat(uint8_t *out, uint32_t now_ms) {
     if (db != nullptr)       flags |= (1u << 2);
 
     memset(out, 0, BLE_CAMSTAT_LEN);
-    out[0] = BLE_PROTO_VERSION;
+    out[0] = BLE_CAMSTAT_VERSION;
     out[1] = flags;
     out[2] = (uint8_t)v;
     out[3] = (uint8_t)s.op_mode;
@@ -399,7 +402,10 @@ class CommandCB : public NimBLECharacteristicCallbacks {
                 g_state->op_mode = fsd_autonomy_floor(g_state);
             FSDState snap = *g_state;
             portEXIT_CRITICAL(g_mux);
-            prefs_save(&snap);
+            // Persist from loop(), not here. This file's contract is that
+            // nothing blocks the BLE host task, and an NVS commit is a flash
+            // erase-write that can stall for tens of milliseconds.
+            g_prefs_dirty = true;
             Serial.printf("[BLE] autonomy -> %s\n", on ? "ON" : "OFF");
             ble_send_result(cmd, BLE_RES_OK, (uint16_t)snap.op_mode);
             break;
@@ -562,6 +568,15 @@ void ble_server_tick(uint32_t now_ms) {
     // over 5 Hz chunks would take minutes.
     ble_bulk_pump();
     ble_revoke_active_if_stale(now_ms);
+
+    if (g_prefs_dirty) {
+        g_prefs_dirty = false;
+        FSDState snap;
+        portENTER_CRITICAL(g_mux);
+        snap = *g_state;
+        portEXIT_CRITICAL(g_mux);
+        prefs_save(&snap);
+    }
 
     if (now_ms - g_last_state_ms < BLE_STATE_PERIOD_MS) return;
     g_last_state_ms = now_ms;

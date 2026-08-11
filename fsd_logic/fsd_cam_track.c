@@ -251,6 +251,11 @@ int fsd_trk_update(FsdTracker* t, const FsdCamDb* db, const FsdCamFix* fix,
         FsdCamRecord found[FSD_TRK_SCAN_MAX];
         int found_n = fsd_cam_near(db, fix->lat_e7, fix->lon_e7,
                                    FSD_TRK_SCAN_RADIUS_M, found, FSD_TRK_SCAN_MAX);
+        /* A full buffer may have been truncated, and fsd_cam_near() fills by
+         * cell order rather than distance, so the record left out is not the
+         * least relevant one. Nothing downstream can detect this, so record it. */
+        if(found_n == FSD_TRK_SCAN_MAX && t->scan_full_count < 0xFFFFu)
+            t->scan_full_count++;
         for(int i = 0; i < found_n; i++) {
             uint64_t key = fsd_trk_key(&found[i]);
             if(find_active(t, key)) continue;

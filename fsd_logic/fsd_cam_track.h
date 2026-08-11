@@ -77,9 +77,19 @@ extern "C" {
 #define FSD_TRK_SAMPLES 8
 #endif
 
-/* Records pulled from the database per scan. */
+/* Records pulled from the database per scan.
+ *
+ * Measured against the real national database: within FSD_TRK_SCAN_RADIUS_M the
+ * densest spot in the country holds 17 cameras (37.6075, 127.1343), and four
+ * locations exceed 16. The previous value of 16 therefore truncated in actual
+ * Korean traffic — and fsd_cam_near() fills in GRID ORDER, south-west cell
+ * first, not by distance, so what gets dropped is whatever lies north-east.
+ * Driving north-east through one of those junctions would silently lose the
+ * camera being approached.
+ *
+ * 24 clears the measured maximum with room to spare, at 240 bytes of stack. */
 #ifndef FSD_TRK_SCAN_MAX
-#define FSD_TRK_SCAN_MAX 16
+#define FSD_TRK_SCAN_MAX 24
 #endif
 
 /* How far ahead to look. Must exceed the policy's largest lead distance
@@ -157,6 +167,12 @@ typedef struct {
     FsdTrkCamera mem[FSD_TRK_CAM_MAX];
     uint32_t tick;   // monotonic, drives eviction
     bool dirty;      // learning changed since the last persist
+    /* Scans that came back exactly full, i.e. possibly truncated. A full buffer
+     * is indistinguishable from "there were more", and a dropped record is a
+     * camera we never even judged. Counting it makes the condition reportable
+     * instead of silent — the same reason the upload path refuses a sequence
+     * gap rather than papering over it. */
+    uint16_t scan_full_count;
 } FsdTracker;
 
 /** Stable identity for a camera. The database has no id column, but the
