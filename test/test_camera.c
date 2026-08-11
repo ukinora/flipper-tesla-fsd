@@ -976,7 +976,12 @@ static void test_end_to_end(void) {
 
     int lowered_at_m = 0;
     bool lowered = false;
-    bool restored = false;
+    // Asking and arriving never coincide: the policy stops emitting RESTORE on
+    // the very tick it sees the car has arrived, so "RESTORE while already
+    // there" is a state that cannot occur. The two halves are watched
+    // separately — that it was asked for, and that the car ended up back.
+    bool restore_asked = false;
+    int restore_asked_at_m = 0;
     uint8_t highest_asked = 0;
     bool asked = false;
     FsdSpPhase prev_sp = sp.phase;
@@ -984,7 +989,7 @@ static void test_end_to_end(void) {
 
     // 100 ms steps: the convergence machine settles in 400 ms, so a 1 Hz-only
     // loop would never see it move.
-    for (int step = 0; step < 1200 && !restored; step++, now += 100) {
+    for (int step = 0; step < 1200; step++, now += 100) {
         if (now % 1000 == 0) {
             pos_m = -800.0 + SPEED_MPS * ((double)now / 1000.0);
             FsdCamFix fix = at(37.5 + pos_m / 111320.0, 127.0 + 3.0 / 88000.0, 0.0f,
@@ -1023,8 +1028,13 @@ static void test_end_to_end(void) {
                     fsd_sp_request(&sp, &in, d.target_profile, now);
                 }
             }
-            if (d.action == FSD_POL_ACT_RESTORE && car == d.target_profile)
-                restored = true;
+            if (d.action == FSD_POL_ACT_RESTORE && !restore_asked) {
+                restore_asked = true;
+                restore_asked_at_m = (int)pos_m;
+                CHECK(d.target_profile == ENTRY,
+                      "restore asks for the driver's value (%u), not ours",
+                      d.target_profile);
+            }
         }
 
         // Convergence, and a car that obeys.
@@ -1062,7 +1072,12 @@ static void test_end_to_end(void) {
     CHECK(!fsd_pol_suspended(&pol),
           "no override or failure was misdetected during a clean run");
     CHECK(highest_asked <= ENTRY, "never asked for anything faster than the driver had");
-    CHECK(restored, "the original profile was asked for again after the camera");
+    CHECK(restore_asked, "the original profile was asked for again after the camera");
+    // Not at the camera: the release distance exists because public data does
+    // not mark which cameras shoot the rear plate, so all of them are assumed to.
+    CHECK(restore_asked_at_m >= (int)FSD_POL_RELEASE_DIST_M,
+          "restore asked at %d m past — at or beyond the release distance (%d m)",
+          restore_asked_at_m, (int)FSD_POL_RELEASE_DIST_M);
     CHECK(car == ENTRY, "and the car got back to it");
 
     // The drive taught the tracker something, and it is the kind of thing that
