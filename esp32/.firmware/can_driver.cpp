@@ -161,6 +161,8 @@ public:
         }
     }
 
+    bool isListenOnly() const override { return listen_only_; }
+
     void setAcceptanceFilter(bool single, uint32_t id) override {
         if (filter_single_ == single && (!single || filter_id_ == id)) return;
         filter_single_ = single;
@@ -347,6 +349,10 @@ public:
                           label_, (int)err);
         }
     }
+
+    /* Reports SHUT when the controller was never installed: an uninstalled
+     * driver cannot transmit either, and this must never read as open. */
+    bool isListenOnly() const override { return !installed_ || listen_only_; }
 
     void setAcceptanceFilter(bool single, uint32_t id) override {
         if (!installed_) return;

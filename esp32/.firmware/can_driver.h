@@ -44,6 +44,15 @@ public:
      *  Implementations must reinitialise the hardware as needed. */
     virtual void setListenOnly(bool enable) = 0;
 
+    /** Is the controller currently in hardware listen-only mode?
+     *
+     *  send() refuses outright while it is, and the bit is per-controller
+     *  rather than per-frame, so a caller deciding whether an action is even
+     *  possible has to be able to ASK — not assume from the operating mode.
+     *  Added for the body-control gate (fsd_body.h), which carries it as an
+     *  input defaulting to "shut". */
+    virtual bool isListenOnly() const = 0;
+
     /** Restrict hardware reception to a single CAN id for full-rate single-ID
      *  capture on a busy bus, or restore accept-all.
      *  @param single  true = accept only @p id; false = accept all ids.
