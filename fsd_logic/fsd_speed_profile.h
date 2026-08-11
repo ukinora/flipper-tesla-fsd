@@ -135,8 +135,18 @@ typedef struct {
 } FsdSpEncoding;
 
 // Provisional table: +1 detent assumed to raise the profile, one detent per
-// step, no wrap. Direction and wrap are both open questions in the project
-// notes. `verified` stays false until a capture settles them.
+// step, no wrap.
+//
+// `wrap` is no longer a guess. Observed on the car (2026-08-11) through a
+// commercial device driving this exact path: UP walks Sloth -> Chill ->
+// Standard -> Hurry and STAYS at Hurry when pressed again; DOWN walks back and
+// stays at Sloth. The ends saturate, they do not wrap around.
+//
+// That matters beyond bookkeeping: a request can never be steered past an end,
+// so an overshoot means our own encoding is wrong rather than the car wrapping.
+//
+// Direction and ticks-per-step are still open, so `verified` stays false until
+// a capture settles them.
 extern const FsdSpEncoding FSD_SP_ENCODING_DEFAULT;
 
 typedef struct {
