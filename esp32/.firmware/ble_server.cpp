@@ -128,11 +128,12 @@ static void ble_pack_state(uint8_t *out) {
     out[6]  = (uint8_t)(kph10 & 0xFFu);
     out[7]  = (uint8_t)(kph10 >> 8);
     out[8]  = (uint8_t)(soc + 0.5f);
-    // Byte 9 was speced as "gear" but the ESP32 state has no PRND field yet
-    // (0x286 DI_state is parsed for cruise/park-brake only). Report the cruise
-    // state instead so the byte carries something real, and revisit when a gear
-    // parser exists. Documented in BLE-GATT-프로토콜.md.
-    out[9]  = s.di_cruise_state;
+    // Gear, as originally specified. This byte carried the cruise state as a
+    // placeholder while the ESP32 had no PRND parser — the protocol note said
+    // to put it back once one existed, and fsd_autonomy.c now provides one.
+    // Values are the DBC's: 0=INVALID 1=P 2=R 3=N 4=D 7=SNA.
+    // Wire meaning changed, so BLE_PROTO_VERSION goes to 2.
+    out[9]  = s.di_gear;
     out[10] = (uint8_t)(lim & 0xFFu);
     out[11] = (uint8_t)(lim >> 8);
     // out[12..13] rx_fps — filled by the caller-side counter below.

@@ -12,6 +12,13 @@
  *   Command    write    1..20 B            — app -> module
  *   Result     indicate 4 B                — command ack (must not be lost)
  *   Capability read     JSON               — per-bus verdicts, read once on connect
+ *   Bulk       notify   variable           — black-box capture download
+ *   Upload     write    variable           — camera.bin, phone -> module
+ *   CamStat    read+notify 12 B, 1 Hz      — camera database + autonomy gate
+ *
+ * There is no Config characteristic. The draft reserved 0004 for one; settings
+ * go through Command instead, which costs one opcode rather than a second
+ * serialisation format, and keeps every acknowledgement on Result.
  *
  * Only compiled when BLE_SERVER_ENABLED is defined (see platformio.ini), so
  * boards that don't need it keep their flash footprint unchanged.
@@ -22,9 +29,14 @@
 #include <stdint.h>
 
 // Wire protocol version, first byte of every State notification.
-#define BLE_PROTO_VERSION 1
+//   1 — initial layout; byte 9 carried DI_cruiseState as a stand-in
+//   2 — byte 9 is the gear (PRND), which is what it was specified as; the
+//       stand-in existed only because this build had no gear parser
+#define BLE_PROTO_VERSION 2
 
-// State notify cadence. Slowed automatically while no client is subscribed.
+// State notify cadence. With nobody subscribed the tick returns before the
+// serialisation — it stops rather than slowing down, which is worth saying
+// because the protocol draft claimed a 1 Hz background rate that never existed.
 #define BLE_STATE_PERIOD_MS 200u  // 5 Hz
 
 // How long Active survives a dropped BLE link before it reverts to Listen-Only.
