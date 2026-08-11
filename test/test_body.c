@@ -175,15 +175,37 @@ static void door(FsdT1* t, FsdBodySide side, uint8_t latch, uint32_t now_ms) {
     fsd_t1_observe_door(t, side, id, d, 8, now_ms);
 }
 
-/* Settle both sides CLOSED and consume the initial adoption, so a test can
- * start from a known shut car. */
-static uint32_t t1_settle(FsdT1* t, const FsdBodyInputs* in, uint32_t now) {
-    for (int i = 0; i < 3; i++) {
-        door(t, FSD_BODY_SIDE_LEFT, FSD_LATCH_CLOSED, now);
-        door(t, FSD_BODY_SIDE_RIGHT, FSD_LATCH_CLOSED, now);
-        fsd_t1_tick(t, in, now);
-        now += 200;
+/* Hold both doors at the given latch values for `span_ms`, feeding a frame
+ * every 50 ms the way the car does, and ticking as we go.
+ *
+ * Feeding one frame per state change would be the unrealistic thing here: a
+ * latch bounces through OPENING/CLOSING and can flick through AJAR, which is
+ * exactly what FSD_T1_DEBOUNCE_MS exists for, so a new value only becomes
+ * stable once it has been repeated. The bus repeats it; a test that does not
+ * is testing a car that does not exist.
+ *
+ * Counts the actions rather than returning one, so "exactly once per edge" is
+ * assertable. */
+static uint32_t doors_for(FsdT1* t, uint8_t left, uint8_t right, uint32_t now,
+                          uint32_t span_ms, bool drive_session, int* on_count,
+                          int* off_count) {
+    for (uint32_t e = 0; e <= span_ms; e += 50) {
+        const uint32_t at = now + e;
+        FsdBodyInputs in = good_inputs(at);
+        in.drive_session = drive_session;
+        door(t, FSD_BODY_SIDE_LEFT, left, at);
+        door(t, FSD_BODY_SIDE_RIGHT, right, at);
+        const FsdT1Action a = fsd_t1_tick(t, &in, at);
+        if (a == FSD_T1_ACT_ON && on_count) (*on_count)++;
+        if (a == FSD_T1_ACT_OFF && off_count) (*off_count)++;
     }
+    return now + span_ms;
+}
+
+/* Settle both sides CLOSED and consume the initial adoption. */
+static uint32_t t1_settle(FsdT1* t, uint32_t now) {
+    int on = 0, off = 0;
+    now = doors_for(t, FSD_LATCH_CLOSED, FSD_LATCH_CLOSED, now, 400, true, &on, &off);
     return now;
 }
 
@@ -193,43 +215,30 @@ static void test_t1_edges(void) {
     FsdT1 t;
     fsd_t1_init(&t);
     uint32_t now = 10000;
-    FsdBodyInputs in = good_inputs(now);
+    int on = 0, off = 0;
 
     // Booting next to a closed car must not fire anything.
-    door(&t, FSD_BODY_SIDE_LEFT, FSD_LATCH_CLOSED, now);
-    door(&t, FSD_BODY_SIDE_RIGHT, FSD_LATCH_CLOSED, now);
-    CHECK(fsd_t1_tick(&t, &in, now) == FSD_T1_ACT_NONE, "adopting the first state is silent");
+    now = doors_for(&t, FSD_LATCH_CLOSED, FSD_LATCH_CLOSED, now, 400, true, &on, &off);
+    CHECK(on == 0 && off == 0, "adopting the first state is silent");
 
-    now = t1_settle(&t, &in, now);
-
-    // Open the left rear.
+    // Open the left rear and hold it: exactly one ON, no matter how many frames.
     now += 1000;
-    in = good_inputs(now);
-    door(&t, FSD_BODY_SIDE_LEFT, FSD_LATCH_OPENED, now);
-    door(&t, FSD_BODY_SIDE_RIGHT, FSD_LATCH_CLOSED, now);
-    CHECK(fsd_t1_tick(&t, &in, now) == FSD_T1_ACT_ON, "door opened -> ON");
-    CHECK(fsd_t1_tick(&t, &in, now) == FSD_T1_ACT_NONE, "and only once");
-
-    // Still open: nothing more.
-    now += 500;
-    in = good_inputs(now);
-    door(&t, FSD_BODY_SIDE_LEFT, FSD_LATCH_OPENED, now);
-    door(&t, FSD_BODY_SIDE_RIGHT, FSD_LATCH_CLOSED, now);
-    CHECK(fsd_t1_tick(&t, &in, now) == FSD_T1_ACT_NONE, "holding open is not an edge");
+    on = off = 0;
+    now = doors_for(&t, FSD_LATCH_OPENED, FSD_LATCH_CLOSED, now, 1000, true, &on, &off);
+    CHECK(on == 1, "door opened -> exactly one ON, got %d", on);
+    CHECK(off == 0, "and no OFF");
 
     // Close it. Needs BOTH sides fresh and CLOSED.
     now += 1000;
-    in = good_inputs(now);
-    door(&t, FSD_BODY_SIDE_LEFT, FSD_LATCH_CLOSED, now);
-    door(&t, FSD_BODY_SIDE_RIGHT, FSD_LATCH_CLOSED, now);
-    CHECK(fsd_t1_tick(&t, &in, now) == FSD_T1_ACT_OFF, "both shut -> OFF");
+    on = off = 0;
+    now = doors_for(&t, FSD_LATCH_CLOSED, FSD_LATCH_CLOSED, now, 1000, true, &on, &off);
+    CHECK(off == 1, "both shut -> exactly one OFF, got %d", off);
 
-    // AJAR counts as open for ON, and as not-shut for OFF.
+    // AJAR counts as open.
     now += 1000;
-    in = good_inputs(now);
-    door(&t, FSD_BODY_SIDE_RIGHT, FSD_LATCH_AJAR, now);
-    door(&t, FSD_BODY_SIDE_LEFT, FSD_LATCH_CLOSED, now);
-    CHECK(fsd_t1_tick(&t, &in, now) == FSD_T1_ACT_ON, "ajar is open");
+    on = off = 0;
+    now = doors_for(&t, FSD_LATCH_CLOSED, FSD_LATCH_AJAR, now, 1000, true, &on, &off);
+    CHECK(on == 1, "ajar is open, got %d ON", on);
 }
 
 static void test_t1_fails_closed(void) {
@@ -238,33 +247,38 @@ static void test_t1_fails_closed(void) {
     FsdT1 t;
     fsd_t1_init(&t);
     uint32_t now = 10000;
-    FsdBodyInputs in = good_inputs(now);
-    now = t1_settle(&t, &in, now);
+    int on = 0, off = 0;
+    now = t1_settle(&t, now);
 
-    // A side that has gone stale cannot count as shut. Open the left, then let
-    // the right go quiet and close the left: OFF must not fire, because we
-    // cannot see the right door.
+    // Open the left rear.
     now += 1000;
-    in = good_inputs(now);
-    door(&t, FSD_BODY_SIDE_LEFT, FSD_LATCH_OPENED, now);
-    door(&t, FSD_BODY_SIDE_RIGHT, FSD_LATCH_CLOSED, now);
-    CHECK(fsd_t1_tick(&t, &in, now) == FSD_T1_ACT_ON, "opened");
+    on = off = 0;
+    now = doors_for(&t, FSD_LATCH_OPENED, FSD_LATCH_CLOSED, now, 1000, true, &on, &off);
+    CHECK(on == 1, "opened");
 
-    now += 5000; // right side now far past FSD_BODY_FRESH_MS
-    in = good_inputs(now);
-    door(&t, FSD_BODY_SIDE_LEFT, FSD_LATCH_CLOSED, now);
-    CHECK(fsd_t1_tick(&t, &in, now) == FSD_T1_ACT_NONE,
-          "a door we cannot see does not count as shut");
+    // Now close the left while the RIGHT side goes quiet. OFF must not fire:
+    // a door we cannot see does not count as shut.
+    now += 1000;
+    on = off = 0;
+    for (uint32_t e = 0; e <= 3000; e += 50) {
+        const uint32_t at = now + e;
+        FsdBodyInputs in = good_inputs(at);
+        door(&t, FSD_BODY_SIDE_LEFT, FSD_LATCH_CLOSED, at); // right: nothing
+        const FsdT1Action a = fsd_t1_tick(&t, &in, at);
+        if (a == FSD_T1_ACT_OFF) off++;
+    }
+    CHECK(off == 0, "a door we cannot see does not count as shut, got %d OFF", off);
 
     // Unknown latch values are silence, not knowledge: they must not stamp.
     FsdT1 u;
     fsd_t1_init(&u);
-    door(&u, FSD_BODY_SIDE_LEFT, FSD_LATCH_SNA, 1000);
-    door(&u, FSD_BODY_SIDE_LEFT, FSD_LATCH_FAULT, 1000);
-    door(&u, FSD_BODY_SIDE_LEFT, FSD_LATCH_TIMEOUT, 1000);
-    door(&u, FSD_BODY_SIDE_RIGHT, FSD_LATCH_CLOSED, 1000);
-    FsdBodyInputs in2 = good_inputs(1000);
-    CHECK(fsd_t1_tick(&u, &in2, 1000) == FSD_T1_ACT_NONE, "unknown latches decide nothing");
+    for (uint32_t e = 0; e <= 400; e += 50) {
+        door(&u, FSD_BODY_SIDE_LEFT, FSD_LATCH_SNA, 1000 + e);
+        door(&u, FSD_BODY_SIDE_LEFT, FSD_LATCH_FAULT, 1000 + e);
+        door(&u, FSD_BODY_SIDE_RIGHT, FSD_LATCH_CLOSED, 1000 + e);
+    }
+    FsdBodyInputs in2 = good_inputs(1400);
+    CHECK(fsd_t1_tick(&u, &in2, 1400) == FSD_T1_ACT_NONE, "unknown latches decide nothing");
 
     // Wrong CAN ID for the side: learned nothing, stamped nothing.
     FsdT1 w;
@@ -284,33 +298,29 @@ static void test_t1_respects_the_axis(void) {
     FsdT1 t;
     fsd_t1_init(&t);
     uint32_t now = 10000;
-    FsdBodyInputs in = good_inputs(now);
-    now = t1_settle(&t, &in, now);
+    int on = 0, off = 0;
+    now = t1_settle(&t, now);
 
-    // Refused: no drive session yet.
+    // Refused: no drive has happened yet.
     now += 1000;
-    in = good_inputs(now);
-    in.drive_session = false;
-    door(&t, FSD_BODY_SIDE_LEFT, FSD_LATCH_OPENED, now);
-    door(&t, FSD_BODY_SIDE_RIGHT, FSD_LATCH_CLOSED, now);
-    CHECK(fsd_t1_tick(&t, &in, now) == FSD_T1_ACT_NONE, "refused");
+    on = off = 0;
+    now = doors_for(&t, FSD_LATCH_OPENED, FSD_LATCH_CLOSED, now, 1000, false, &on, &off);
+    CHECK(on == 0, "refused, got %d ON", on);
     CHECK(fsd_t1_last_verdict(&t) == FSD_BODY_NO_DRIVE_SESSION, "and says why");
 
     // The edge was CONSUMED. Granting permission afterwards must not replay a
     // door event that happened while we were not allowed to act — the world has
-    // moved on. The door is still open; only a new edge counts.
+    // moved on. The door is still open; only a NEW edge counts.
     now += 1000;
-    in = good_inputs(now);
-    door(&t, FSD_BODY_SIDE_LEFT, FSD_LATCH_OPENED, now);
-    door(&t, FSD_BODY_SIDE_RIGHT, FSD_LATCH_CLOSED, now);
-    CHECK(fsd_t1_tick(&t, &in, now) == FSD_T1_ACT_NONE, "a refused edge is not replayed");
+    on = off = 0;
+    now = doors_for(&t, FSD_LATCH_OPENED, FSD_LATCH_CLOSED, now, 1000, true, &on, &off);
+    CHECK(on == 0, "a refused edge is not replayed, got %d ON", on);
 
-    // A fresh close-then-open does act.
+    // Closing is a new edge, and it acts.
     now += 1000;
-    in = good_inputs(now);
-    door(&t, FSD_BODY_SIDE_LEFT, FSD_LATCH_CLOSED, now);
-    door(&t, FSD_BODY_SIDE_RIGHT, FSD_LATCH_CLOSED, now);
-    CHECK(fsd_t1_tick(&t, &in, now) == FSD_T1_ACT_OFF, "closing acts");
+    on = off = 0;
+    now = doors_for(&t, FSD_LATCH_CLOSED, FSD_LATCH_CLOSED, now, 1000, true, &on, &off);
+    CHECK(off == 1, "closing acts, got %d OFF", off);
 }
 
 static void test_t1_budget(void) {
@@ -319,18 +329,17 @@ static void test_t1_budget(void) {
     FsdT1 t;
     fsd_t1_init(&t);
     uint32_t now = 10000;
-    FsdBodyInputs in = good_inputs(now);
-    now = t1_settle(&t, &in, now);
+    now = t1_settle(&t, now);
 
-    int acted = 0;
+    // 200 open/close cycles, each held long enough to debounce and spaced past
+    // FSD_T1_MIN_GAP_MS. 200 * 1100 ms is ~3.7 minutes, well inside the window.
+    int on = 0, off = 0;
     for (int i = 0; i < 200; i++) {
-        now += 1100; // clears FSD_T1_MIN_GAP_MS every time
-        in = good_inputs(now);
         const uint8_t l = (i & 1) ? FSD_LATCH_CLOSED : FSD_LATCH_OPENED;
-        door(&t, FSD_BODY_SIDE_LEFT, l, now);
-        door(&t, FSD_BODY_SIDE_RIGHT, FSD_LATCH_CLOSED, now);
-        if (fsd_t1_tick(&t, &in, now) != FSD_T1_ACT_NONE) acted++;
+        now = doors_for(&t, l, FSD_LATCH_CLOSED, now, 1050, true, &on, &off);
+        now += 50;
     }
+    const int acted = on + off;
     CHECK(acted <= (int)FSD_T1_MAX_PER_WINDOW, "bounded at %u per window, got %d",
           FSD_T1_MAX_PER_WINDOW, acted);
     CHECK(acted > 0, "but not zero — it does work");
