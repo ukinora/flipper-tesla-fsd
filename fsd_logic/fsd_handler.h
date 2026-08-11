@@ -35,7 +35,8 @@
 #define CAN_ID_SCCM_LSTALK   0x249  // 585  - SCCM_leftStalk (high beam, turn signal, wiper wash — Party CAN, 3 bytes)
 #define CAN_ID_DI_TORQUE     0x108  // 264  - DI_torque (motor torque/power — Party CAN)
 #define CAN_ID_DAS_CONTROL   0x2B9  // 697  - DAS_control (ACC state, set speed — Party CAN)
-#define CAN_ID_DI_STATE      0x286  // 646  - DI_state (cruise state, gear, park brake — Party CAN)
+#define CAN_ID_DI_STATE      0x286  // 646  - DI_state (cruise state, digital speed, park brake).
+                                   //        NOT gear — DI_gear is on 0x118. See fsd_autonomy.c.
 #define CAN_ID_UI_WARNING    0x311  // 785  - UI_warning (blinker, door, buckle, wiper — Party CAN)
 #define CAN_ID_ESP_WHEELSPD  0x175  // 373  - ESP_wheelSpeeds (4 wheel speeds — Party CAN)
 #define CAN_ID_STEER_ANGLE   0x129  // 297  - SCCM_steeringAngleSensor (steering angle — Party CAN)

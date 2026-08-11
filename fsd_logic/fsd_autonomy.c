@@ -4,12 +4,44 @@
 
 #include "fsd_autonomy.h"
 
-// DI_gear (0x286 DI_state, party bus)
-//   opendbc tesla_model3_party.dbc:  SG_ DI_gear : 21|3@1+ (1,0)
-//   little-endian, start bit 21, 3 bits wide -> byte 2, bits [7:5].
+// CAN_ID_* live here. Included rather than redefined: the bug this file was
+// shipped with was a frame identity error, and a second copy of the numbers is
+// how those happen.
+#include "fsd_handler.h"
+
+/* DI_gear — 0x118 DI_systemStatus, NOT 0x286 DI_state.
+ *
+ *   opendbc tesla_model3_party.dbc:82, inside BO_ 280 DI_systemStatus:
+ *     SG_ DI_gear : 21|3@1+ (1,0)
+ *   little-endian, start bit 21, 3 bits wide -> byte 2, bits [7:5].
+ *
+ * 🔴 THIS WAS WRONG WHEN SHIPPED AND THE BIT MATH IS NOT WHAT WAS WRONG.
+ * The original comment cited this exact DBC line and then attributed it to
+ * 0x286, which does not carry DI_gear at all (BO_ 646 DI_state, party.dbc:
+ * 223-236). On 0x286 those bits are the top three of
+ * DI_digitalSpeed : 15|9@1+ (0.5,0), so the gate computed
+ *
+ *     di_gear = (speed_raw >> 6) & 7
+ *
+ * which reports D only while the car is doing 128-159 km/h and P at 32-63.
+ * fsd_supervised_drive() therefore refused at every ordinary speed: the
+ * camera feature could not have run on a real car. It failed CLOSED, which is
+ * why nothing dangerous happened and also why nothing revealed it.
+ *
+ * The tests did not catch it because they built a frame by hand, set
+ * f.canId = CAN_ID_DI_STATE, and asserted the bit extraction — which was
+ * always correct. Nothing asserted the observer was looking at the right
+ * frame. Hence the ID checks below. */
 #define GEAR_BYTE 2u
 #define GEAR_SHIFT 5u
 #define GEAR_MASK 0x07u
+
+/* DI_cruiseState — 0x286 DI_state, party.dbc:234: SG_ DI_cruiseState : 12|3@1+
+ * little-endian, start bit 12 -> byte 1, bits [6:4]. This half was right; it
+ * just lived in a function reading a different frame. */
+#define CRUISE_BYTE 1u
+#define CRUISE_SHIFT 4u
+#define CRUISE_MASK 0x07u
 
 // buckleStatus (0x311 UI_warning, party bus)
 //   opendbc:  SG_ buckleStatus : 13|1@0+ (1,0)   1 = LATCHED
@@ -24,24 +56,35 @@
  * frame we actually understood. */
 void fsd_drive_observe_gear(FSDState* state, const CANFRAME* frame, uint32_t now_ms) {
     if(!state || !frame) return;
+    /* The check that would have prevented this function's original defect. A
+     * frame we were handed by mistake must produce nothing, not a gear derived
+     * from whatever happens to sit in byte 2. This is a safety-gate input; the
+     * codebase's usual "trust the dispatcher" convention is not good enough
+     * here, and the dispatcher was in fact wrong. */
+    if(frame->id != CAN_ID_DI_SYS_STATUS) return;
     if(frame->data_lenght <= GEAR_BYTE) return;
 
     state->di_gear = (uint8_t)((frame->buffer[GEAR_BYTE] >> GEAR_SHIFT) & GEAR_MASK);
     state->di_gear_ms = now_ms;
     state->di_gear_seen = true;
+}
 
-    /* DI_cruiseState, bit 12|3 little-endian -> byte 1 bits [6:4].
-     *
-     * Not needed by the gate. It is here because on the ESP32 this is the ONLY
+void fsd_drive_observe_cruise(FSDState* state, const CANFRAME* frame) {
+    if(!state || !frame) return;
+    if(frame->id != CAN_ID_DI_STATE) return;
+    if(frame->data_lenght <= CRUISE_BYTE) return;
+
+    /* Not needed by the gate. It is here because on the ESP32 this is the ONLY
      * parser for 0x286 — that build does not compile fsd_logic/fsd_handler.c —
      * so di_cruise_state has been going out over BLE as a structural zero.
      * A field that is always zero for a reason nobody can see costs more to
      * debug later than it costs to fill now. */
-    if(frame->data_lenght > 1) state->di_cruise_state = (frame->buffer[1] >> 4) & 0x07u;
+    state->di_cruise_state = (frame->buffer[CRUISE_BYTE] >> CRUISE_SHIFT) & CRUISE_MASK;
 }
 
 void fsd_drive_observe_belt(FSDState* state, const CANFRAME* frame, uint32_t now_ms) {
     if(!state || !frame) return;
+    if(frame->id != CAN_ID_UI_WARNING) return; // same reason as the gear observer
     if(frame->data_lenght <= BELT_BYTE) return;
 
     state->ui_buckle_status = ((frame->buffer[BELT_BYTE] >> BELT_SHIFT) & 0x01u) != 0u;

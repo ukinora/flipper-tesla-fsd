@@ -81,19 +81,35 @@ typedef enum {
     FSD_SUP_OTA,            // Tesla is updating
 } FsdSupVerdict;
 
-/** Read DI_gear out of a 0x286 DI_state frame and stamp it.
+/** Read DI_gear out of a **0x118 DI_systemStatus** frame and stamp it.
  *
- *  Deliberately separate from the existing fsd_handle_di_state(): that one is
- *  upstream's general parser and is not compiled into the ESP32 build at all,
- *  which is why the firmware has never had a gear reading. This one is small,
- *  shared by both builds, and writes only the fields the supervision gate owns.
- *  Ignores frames too short to contain the signal, and does not stamp them —
+ *  🔴 This took 0x286 when it shipped, and 0x286 does not carry DI_gear.
+ *  It read the top three bits of DI_digitalSpeed instead, so the gate saw "D"
+ *  only between 128 and 159 km/h and refused everywhere else — the camera
+ *  feature could not have run on a real car. It failed closed, which is why it
+ *  was harmless and also why it stayed hidden. See fsd_autonomy.c.
+ *
+ *  Deliberately separate from the existing fsd_handle_di_sys_status(): that one
+ *  is upstream's general parser and is not compiled into the ESP32 build at
+ *  all, which is why the firmware has never had a gear reading. This one is
+ *  small, shared by both builds, and writes only what the supervision gate owns.
+ *
+ *  REFUSES ANY OTHER CAN ID. Frames too short are ignored and NOT stamped —
  *  stamping at the call site would mark a rejected frame as fresh. */
 void fsd_drive_observe_gear(FSDState* state, const CANFRAME* frame, uint32_t now_ms);
 
+/** Read DI_cruiseState out of a 0x286 DI_state frame.
+ *
+ *  Split out of the gear observer when that one moved to 0x118 — one function
+ *  cannot read two frames. Not used by any gate; it exists because on the
+ *  ESP32 this is the only parser for 0x286, so di_cruise_state was going out
+ *  over BLE as a structural zero. No timestamp: nothing gates on it. */
+void fsd_drive_observe_cruise(FSDState* state, const CANFRAME* frame);
+
 /** Read buckleStatus out of a 0x311 UI_warning frame and stamp it.
  *  Writes the same ui_buckle_status the Flipper parser writes; on that build
- *  both run and agree, on the ESP32 this is the only writer. */
+ *  both run and agree, on the ESP32 this is the only writer.
+ *  Refuses any other CAN ID, for the same reason the gear observer does. */
 void fsd_drive_observe_belt(FSDState* state, const CANFRAME* frame, uint32_t now_ms);
 
 /** Why supervision is (not) satisfied. FSD_SUP_OK means a person is driving. */

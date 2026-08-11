@@ -339,6 +339,10 @@ static int32_t fsd_running_worker(void* context) {
                 // Extras: read-only vehicle state parsers (mode-independent)
                 else if(frame.canId == CAN_ID_DI_SYS_STATUS) {
                     fsd_handle_di_system_status(&state, &frame);
+                    // Gear, for the supervision gate. DI_gear lives HERE, not on
+                    // 0x286 — it was wired to 0x286 until 2026-08-12, where
+                    // those bits are the top of DI_digitalSpeed.
+                    fsd_drive_observe_gear(&state, &frame, furi_get_tick());
                 }
                 else if(frame.canId == CAN_ID_VCRIGHT_STATUS) {
                     fsd_handle_vcright_status(&state, &frame);
@@ -391,11 +395,11 @@ static int32_t fsd_running_worker(void* context) {
                 }
                 else if(frame.canId == CAN_ID_DI_STATE) {
                     fsd_handle_di_state(&state, &frame);
-                    // Gear, for the supervision gate. Separate from the parser
-                    // above because that one is not compiled into the ESP32
-                    // build; keeping the gate's inputs in fsd_autonomy.c is what
-                    // lets both platforms answer the question the same way.
-                    fsd_drive_observe_gear(&state, &frame, furi_get_tick());
+                    // Cruise state. Separate from the parser above because that
+                    // one is not compiled into the ESP32 build; keeping the
+                    // shared observers in fsd_autonomy.c is what lets both
+                    // platforms answer the same question the same way.
+                    fsd_drive_observe_cruise(&state, &frame);
                 }
                 else if(frame.canId == CAN_ID_DI_TORQUE) {
                     fsd_handle_di_torque(&state, &frame);
