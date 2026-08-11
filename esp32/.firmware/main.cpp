@@ -21,6 +21,7 @@
 #include "config.h"
 #include "can_signals.h"
 #include "fsd_handler.h"
+#include "../../fsd_logic/fsd_autonomy.h"
 #include "can_driver.h"
 #include "led.h"
 #include "wifi_manager.h"
@@ -1242,6 +1243,25 @@ static void process_frame(CanBusId bus, const CanFrame &frame) {
     if (frame.id == CAN_ID_VCFRONT_LIGHT) {
         state_enter();
         fsd_handle_vcfront_lighting(&g_state, &frame);
+        state_exit();
+        return;
+    }
+    // Supervision inputs (fsd_autonomy.h): is a person driving right now?
+    // Neither frame was parsed on this build before — the ESP32 does not compile
+    // fsd_logic/fsd_handler.c, so its DI_state / UI_warning parsers never ran
+    // here and di_cruise_state, ui_buckle_status and the blinker flags have all
+    // been structurally zero. These two observers are shared with the Flipper.
+    if (frame.id == CAN_ID_DI_STATE) {
+        uint32_t now_ms = millis();
+        state_enter();
+        fsd_drive_observe_gear(&g_state, &frame, now_ms);
+        state_exit();
+        return;
+    }
+    if (frame.id == CAN_ID_UI_WARNING) {
+        uint32_t now_ms = millis();
+        state_enter();
+        fsd_drive_observe_belt(&g_state, &frame, now_ms);
         state_exit();
         return;
     }

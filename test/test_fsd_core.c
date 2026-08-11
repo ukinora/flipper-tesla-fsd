@@ -18,6 +18,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "fsd_autonomy.h"
 #include "fsd_can_ops.h"
 #include "fsd_blackbox_filter.h"
 #include "fsd_blackbox_summary.h"
@@ -2211,6 +2212,210 @@ static void test_rx_stale(void) {
     CHECK(!fsd_can_transmit(&s), "listen-only -> TX refused even with a live bus");
 }
 
+// ── TX gate is an allow-list ─────────────────────────────────────────────────
+// The point of the change is what happens to a mode that does not exist yet.
+// C lets an enum hold any value in its range, so an undeclared mode can be
+// forced in here — which is exactly the shape of the bug being prevented: a
+// future OpMode_Autonomous silently inheriting general TX permission.
+static void test_tx_allowlist(void) {
+    printf("\n-- TX gate allow-list --\n");
+
+    FSDState s;
+    fsd_state_init(&s, TeslaHW_HW3);
+    s.rx_count = 1;
+    s.last_rx_ms = 1000;
+    s.rx_stale = false;
+
+    s.op_mode = OpMode_ListenOnly;
+    CHECK(!fsd_can_transmit(&s), "listen-only: no TX");
+    s.op_mode = OpMode_Active;
+    CHECK(fsd_can_transmit(&s), "active: TX");
+    s.op_mode = OpMode_Service;
+    CHECK(fsd_can_transmit(&s), "service: TX");
+
+    // The regression this guards. Under the old deny-list every value except 0
+    // passed, so a mode added later was transmit-capable the day it was named.
+    s.op_mode = (OpMode)3;
+    CHECK(!fsd_can_transmit(&s), "undeclared mode 3: no TX (was: allowed)");
+    s.op_mode = (OpMode)9;
+    CHECK(!fsd_can_transmit(&s), "undeclared mode 9: no TX");
+
+    // Same story on the profile-replay path.
+    fsd_state_init(&s, TeslaHW_HW3);
+    s.speed_seen = true;
+    s.last_speed_tick_ms = 500;
+    s.vehicle_speed_kph = 0.0f;
+    s.op_mode = OpMode_Active;
+    CHECK(fsd_profile_tx_allowed(&s, 600), "profile replay: active + stopped");
+    s.op_mode = OpMode_ListenOnly;
+    CHECK(!fsd_profile_tx_allowed(&s, 600), "profile replay: listen-only");
+    s.op_mode = (OpMode)3;
+    CHECK(!fsd_profile_tx_allowed(&s, 600),
+          "profile replay: undeclared mode 3 (was: allowed)");
+}
+
+// ── DI_gear / buckleStatus observers ─────────────────────────────────────────
+static void test_drive_observers(void) {
+    printf("\n-- drive-state observers --\n");
+
+    FSDState s;
+    fsd_state_init(&s, TeslaHW_HW3);
+    CHECK(!s.di_gear_seen, "gear unseen after init");
+    CHECK(!s.belt_seen, "belt unseen after init");
+
+    CANFRAME f;
+    memset(&f, 0, sizeof(f));
+    f.canId = CAN_ID_DI_STATE;
+    f.data_lenght = 8;
+
+    // DI_gear is bit 21|3 little-endian = byte 2 bits [7:5]. Build the byte from
+    // that definition rather than copying the implementation's shift, so a wrong
+    // shift in either place shows up as a disagreement.
+    for(uint8_t g = 0; g <= 7; g++) {
+        f.buffer[2] = (uint8_t)(g << 5);
+        // Neighbouring bits must not bleed in: fill the rest of the byte.
+        f.buffer[2] |= 0x1Fu;
+        fsd_drive_observe_gear(&s, &f, 1000 + g);
+        CHECK(s.di_gear == g, "gear %u decoded", (unsigned)g);
+        CHECK(s.di_gear_ms == (uint32_t)(1000 + g), "gear stamped");
+    }
+    CHECK(s.di_gear_seen, "gear seen flag set");
+
+    // Named values line up with the DBC.
+    f.buffer[2] = (uint8_t)(FSD_GEAR_D << 5);
+    fsd_drive_observe_gear(&s, &f, 2000);
+    CHECK(s.di_gear == FSD_GEAR_D, "D == 4");
+
+    // A frame too short to hold byte 2 must not be parsed AND must not be
+    // stamped — stamping it would report a frame we rejected as fresh.
+    uint8_t before = s.di_gear;
+    f.data_lenght = 2;
+    f.buffer[2] = (uint8_t)(FSD_GEAR_P << 5);
+    fsd_drive_observe_gear(&s, &f, 9999);
+    CHECK(s.di_gear == before, "short frame does not change gear");
+    CHECK(s.di_gear_ms == 2000, "short frame does not refresh the stamp");
+
+    // buckleStatus is bit 13|1 big-endian = byte 1 bit 5.
+    memset(&f, 0, sizeof(f));
+    f.canId = CAN_ID_UI_WARNING;
+    f.data_lenght = 8;
+    f.buffer[1] = 0x00;
+    fsd_drive_observe_belt(&s, &f, 3000);
+    CHECK(!s.ui_buckle_status, "belt unlatched");
+    CHECK(s.belt_seen && s.belt_seen_ms == 3000, "belt stamped");
+
+    f.buffer[1] = (uint8_t)(1u << 5);
+    fsd_drive_observe_belt(&s, &f, 3100);
+    CHECK(s.ui_buckle_status, "belt latched");
+
+    // Every other bit set, buckle clear: proves the mask isolates bit 5.
+    f.buffer[1] = (uint8_t)~(1u << 5);
+    fsd_drive_observe_belt(&s, &f, 3200);
+    CHECK(!s.ui_buckle_status, "neighbouring bits do not fake a latch");
+
+    f.data_lenght = 1;
+    f.buffer[1] = (uint8_t)(1u << 5);
+    fsd_drive_observe_belt(&s, &f, 9999);
+    CHECK(!s.ui_buckle_status && s.belt_seen_ms == 3200, "short belt frame ignored");
+}
+
+// ── supervision gate ─────────────────────────────────────────────────────────
+static void test_supervised_drive(void) {
+    printf("\n-- supervision gate --\n");
+
+    FSDState s;
+    fsd_state_init(&s, TeslaHW_HW3);
+
+    // Nothing seen yet. This is the state a module boots into, and it must not
+    // report a supervised drive.
+    CHECK(fsd_supervised_drive_why(&s, 0) == FSD_SUP_NO_GEAR, "boot: no gear frame");
+    CHECK(!fsd_supervised_drive(&s, 0), "boot: not supervised");
+    CHECK(!fsd_supervised_drive(&s, 100000), "still not supervised much later");
+
+    // Build up a supervised drive one condition at a time; each step names the
+    // gate that is still missing.
+    s.di_gear = FSD_GEAR_D;
+    s.di_gear_ms = 10000;
+    s.di_gear_seen = true;
+    CHECK(fsd_supervised_drive_why(&s, 10000) == FSD_SUP_NO_BELT, "gear only: no belt");
+
+    s.belt_seen = true;
+    s.belt_seen_ms = 10000;
+    s.ui_buckle_status = false;
+    CHECK(fsd_supervised_drive_why(&s, 10000) == FSD_SUP_BELT_UNLATCHED, "belt undone");
+
+    s.ui_buckle_status = true;
+    CHECK(fsd_supervised_drive_why(&s, 10000) == FSD_SUP_OK, "D + belt = supervised");
+    CHECK(fsd_supervised_drive(&s, 10000), "supervised");
+
+    // Gears. R counts (reversing is driving); everything else does not.
+    const uint8_t drive_gears[] = {FSD_GEAR_D, FSD_GEAR_R};
+    for(unsigned i = 0; i < sizeof(drive_gears); i++) {
+        s.di_gear = drive_gears[i];
+        CHECK(fsd_supervised_drive(&s, 10000), "gear %u supervises",
+              (unsigned)drive_gears[i]);
+    }
+    const uint8_t idle_gears[] = {FSD_GEAR_INVALID, FSD_GEAR_P, FSD_GEAR_N, 5, 6,
+                                  FSD_GEAR_SNA};
+    for(unsigned i = 0; i < sizeof(idle_gears); i++) {
+        s.di_gear = idle_gears[i];
+        CHECK(fsd_supervised_drive_why(&s, 10000) == FSD_SUP_GEAR_NOT_DRIVE,
+              "gear %u does not supervise", (unsigned)idle_gears[i]);
+    }
+
+    // Freshness. The window is exclusive at the limit, same as fsd_rx_is_stale.
+    s.di_gear = FSD_GEAR_D;
+    CHECK(fsd_supervised_drive(&s, 10000 + FSD_DRIVE_CTX_FRESH_MS - 1),
+          "1 ms inside the window: still supervised");
+    CHECK(fsd_supervised_drive_why(&s, 10000 + FSD_DRIVE_CTX_FRESH_MS) ==
+              FSD_SUP_GEAR_STALE,
+          "exactly at the limit: gear stale");
+
+    // Only the belt goes stale.
+    s.di_gear_ms = 20000;
+    s.belt_seen_ms = 10000;
+    CHECK(fsd_supervised_drive_why(&s, 20000) == FSD_SUP_BELT_STALE, "belt stale");
+
+    // Millisecond clock wrap-around must read as a short gap, not a 49-day one.
+    s.di_gear_ms = 0xFFFFFF00u;
+    s.belt_seen_ms = 0xFFFFFF00u;
+    CHECK(fsd_supervised_drive(&s, 0x000000FFu), "across the wrap: supervised");
+    CHECK(!fsd_supervised_drive(&s, 0x000000FFu + FSD_DRIVE_CTX_FRESH_MS),
+          "across the wrap: goes stale on schedule");
+
+    // Bus and OTA outrank driver presence, and are reported first because they
+    // are the more actionable answer.
+    fsd_state_init(&s, TeslaHW_HW3);
+    s.di_gear = FSD_GEAR_D;
+    s.di_gear_ms = 10000;
+    s.di_gear_seen = true;
+    s.belt_seen = true;
+    s.belt_seen_ms = 10000;
+    s.ui_buckle_status = true;
+    CHECK(fsd_supervised_drive(&s, 10000), "baseline supervised");
+
+    s.rx_stale = true;
+    CHECK(fsd_supervised_drive_why(&s, 10000) == FSD_SUP_RX_STALE, "quiet bus refuses");
+    s.rx_stale = false;
+    s.tesla_ota_in_progress = true;
+    CHECK(fsd_supervised_drive_why(&s, 10000) == FSD_SUP_OTA, "OTA refuses");
+    s.rx_stale = true;
+    CHECK(fsd_supervised_drive_why(&s, 10000) == FSD_SUP_OTA, "OTA reported before bus");
+
+    // No latch: withdrawing a condition takes authority away on the same call,
+    // and restoring it gives authority back with no re-arm step.
+    s.tesla_ota_in_progress = false;
+    s.rx_stale = false;
+    CHECK(fsd_supervised_drive(&s, 10000), "restored");
+    s.ui_buckle_status = false;
+    CHECK(!fsd_supervised_drive(&s, 10000), "belt off -> immediately unsupervised");
+    s.ui_buckle_status = true;
+    CHECK(fsd_supervised_drive(&s, 10000), "belt back -> supervised, no re-arm");
+
+    // NULL is a caller bug, but it must not be a crash in a safety gate.
+    CHECK(!fsd_supervised_drive(NULL, 10000), "NULL state is not supervised");
+}
+
 int main(void) {
     printf("test_fsd_core: Tesla FSD protocol core host tests\n");
     test_set_bit();
@@ -2259,6 +2464,10 @@ int main(void) {
     test_state_init();
     test_blackbox_filter();
     test_rx_stale();
+
+    test_tx_allowlist();
+    test_drive_observers();
+    test_supervised_drive();
 
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

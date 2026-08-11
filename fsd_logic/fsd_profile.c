@@ -122,7 +122,10 @@ FsdProfileLineKind fsd_profile_parse_line(const char* line, FsdProfileStep* step
 }
 
 bool fsd_profile_tx_allowed(const FSDState* state, uint32_t now_ms) {
-    if(state->op_mode == OpMode_ListenOnly) return false;      // never TX in listen
+    // Allow-list, not deny-list — a mode added later must not inherit replay
+    // permission by default. Unchanged for the three modes that exist today.
+    if(state->op_mode != OpMode_Active && state->op_mode != OpMode_Service)
+        return false;                                          // never TX outside Active/Service
     if(!state->speed_seen) return false;                       // fail-closed: no speed proof
     if((now_ms - state->last_speed_tick_ms) > FSD_PROFILE_SPEED_FRESH_MS)
         return false;                                          // speed frame is stale
