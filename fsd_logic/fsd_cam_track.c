@@ -21,6 +21,14 @@ void fsd_trk_init(FsdTracker* t) {
     memset(t, 0, sizeof(*t));
 }
 
+void fsd_trk_reset_active(FsdTracker* t) {
+    if(!t) return;
+    /* Only the in-flight measurements. mem[] is the learning and must survive —
+     * that is the whole point of the split. tick, dirty and scan_full_count are
+     * bookkeeping about the tracker itself, not about any one camera. */
+    memset(t->active, 0, sizeof(t->active));
+}
+
 // ── learning store ───────────────────────────────────────────────────────────
 
 static FsdTrkCamera* find_cam(FsdTracker* t, uint64_t key) {

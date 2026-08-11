@@ -20,6 +20,7 @@
 #include "../../fsd_logic/fsd_autonomy.h"
 #include "blackbox.h"
 #include "camera_store.h"
+#include "camera_task.h"
 #include "capability.h"
 #include "config.h"
 #include "prefs.h"
@@ -150,9 +151,12 @@ static void ble_pack_state(uint8_t *out) {
 }
 
 // ── camera / autonomy status ─────────────────────────────────────────────────
-// Reports only what this build actually knows. The tracker and policy compile
-// but are not instantiated — nothing feeds them a position yet — so their
-// fields are absent rather than present-and-always-zero.
+// v2: the tracker, GPS layer and policy are instantiated in camera_task.cpp, so
+// the fields v1 deliberately left out now exist. See ble_server.h for the byte
+// map and for the one thing that is still structurally absent.
+//
+// Every value here is OBSERVED. The policy decision is published, never acted
+// on — there is no path in this firmware from a decision to a CAN frame.
 static void ble_pack_camstat(uint8_t *out, uint32_t now_ms) {
     FSDState s;
     portENTER_CRITICAL(g_mux);
@@ -160,12 +164,28 @@ static void ble_pack_camstat(uint8_t *out, uint32_t now_ms) {
     portEXIT_CRITICAL(g_mux);
 
     FsdSupVerdict v = fsd_supervised_drive_why(&s, now_ms);
-    const FsdCamDb *db = camera_store_db();
+
+    // Wait 0 because a status field is never worth blocking for: a missed
+    // borrow reports "no database" for one notify and the next one is 1 s away.
+    //
+    // Note this packer runs on the LOOP task, not the BLE task — both of its
+    // callers (ble_server_init from setup(), ble_server_tick from loop()) are
+    // there. That is also what makes camera_task's lock-free accessors below
+    // safe to read from here.
+    const FsdCamDb *db = camera_store_db_acquire(0);
+    uint32_t built = db ? db->built_at : 0u;
+    bool have_db = (db != nullptr);
+    if (db) camera_store_db_release();
 
     uint8_t flags = 0;
-    if (s.autonomy_enabled)  flags |= (1u << 0);
-    if (v == FSD_SUP_OK)     flags |= (1u << 1);
-    if (db != nullptr)       flags |= (1u << 2);
+    if (s.autonomy_enabled)             flags |= (1u << 0);
+    if (v == FSD_SUP_OK)                flags |= (1u << 1);
+    if (have_db)                        flags |= (1u << 2);
+    if (fsd_autonomy_allows(&s, now_ms)) flags |= (1u << 3);
+    if (camera_task_pol_suspended())    flags |= (1u << 4);
+    if (camera_task_learning_dirty())   flags |= (1u << 5);
+    if (camera_task_profile_fresh())    flags |= (1u << 6);
+    if (camera_task_save_failing())     flags |= (1u << 7);
 
     memset(out, 0, BLE_CAMSTAT_LEN);
     out[0] = BLE_CAMSTAT_VERSION;
@@ -174,11 +194,29 @@ static void ble_pack_camstat(uint8_t *out, uint32_t now_ms) {
     out[3] = (uint8_t)s.op_mode;
 
     uint32_t n = camera_store_count();
-    uint32_t built = db ? db->built_at : 0u;
     for (int i = 0; i < 4; i++) {
         out[4 + i]  = (uint8_t)((n >> (8 * i)) & 0xFFu);
         out[8 + i]  = (uint8_t)((built >> (8 * i)) & 0xFFu);
     }
+
+    out[12] = camera_task_gps_verdict();
+    out[13] = (uint8_t)((camera_task_pol_phase()  & 0x07u) |
+                        ((camera_task_pol_action() & 0x03u) << 3) |
+                        ((camera_task_pol_target() & 0x03u) << 5));
+
+    uint16_t near_m = camera_task_nearest_m();
+    out[14] = (uint8_t)(near_m & 0xFFu);
+    out[15] = (uint8_t)(near_m >> 8);
+
+    out[16] = camera_task_gps_accuracy_raw();
+    // RAW, before camera_task's range check, so a bring-up drive can tell a
+    // mis-decode ("it says 5") from an absent frame ("it says 0xFF").
+    out[17] = camera_task_raw_profile();
+
+    uint16_t learned = camera_task_learned_count();
+    out[18] = (learned > 255u) ? 255u : (uint8_t)learned;
+    uint16_t full = camera_task_scan_full_count();
+    out[19] = (full > 255u) ? 255u : (uint8_t)full;
 }
 
 // ── frames/s, derived the same way the dashboard does ────────────────────────
@@ -548,6 +586,14 @@ void ble_server_init(FSDState *state, portMUX_TYPE *state_mux) {
     // gear and the belt.
     g_ch_camstat = svc->createCharacteristic(
         BLE_UUID_CAMSTAT, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
+    // Seed it, the way Capability is seeded. Without this the first READ before
+    // the first notify returns an empty value, and a client that reads once on
+    // connect sees a zero-length payload rather than version 2.
+    {
+        uint8_t cs[BLE_CAMSTAT_LEN];
+        ble_pack_camstat(cs, millis());
+        g_ch_camstat->setValue(cs, sizeof(cs));
+    }
 
     // NimBLE 2.x: services start with the server, not individually.
     g_server->start();
@@ -578,6 +624,19 @@ void ble_server_tick(uint32_t now_ms) {
         prefs_save(&snap);
     }
 
+    // CamStat first, and gated on the connection alone. It used to sit below the
+    // State-subscription check, so a client that subscribed to CamStat but not
+    // to State — which the protocol allows, and which is what an app showing
+    // only camera status would do — received nothing at all, forever.
+    if (g_connected && g_ch_camstat &&
+        now_ms - g_last_camstat_ms >= BLE_CAMSTAT_PERIOD_MS) {
+        g_last_camstat_ms = now_ms;
+        uint8_t cs[BLE_CAMSTAT_LEN];
+        ble_pack_camstat(cs, now_ms);
+        g_ch_camstat->setValue(cs, sizeof(cs));
+        g_ch_camstat->notify();
+    }
+
     if (now_ms - g_last_state_ms < BLE_STATE_PERIOD_MS) return;
     g_last_state_ms = now_ms;
 
@@ -591,14 +650,6 @@ void ble_server_tick(uint32_t now_ms) {
 
     g_ch_state->setValue(buf, sizeof(buf));
     g_ch_state->notify();
-
-    if (g_ch_camstat && now_ms - g_last_camstat_ms >= BLE_CAMSTAT_PERIOD_MS) {
-        g_last_camstat_ms = now_ms;
-        uint8_t cs[BLE_CAMSTAT_LEN];
-        ble_pack_camstat(cs, now_ms);
-        g_ch_camstat->setValue(cs, sizeof(cs));
-        g_ch_camstat->notify();
-    }
 }
 
 bool ble_server_connected(void) { return g_connected; }

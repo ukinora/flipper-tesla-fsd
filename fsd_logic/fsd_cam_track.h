@@ -87,7 +87,9 @@ extern "C" {
  * Driving north-east through one of those junctions would silently lose the
  * camera being approached.
  *
- * 24 clears the measured maximum with room to spare, at 240 bytes of stack. */
+ * 24 clears the measured maximum with room to spare, at 288 bytes of stack —
+ * FsdCamRecord is 12 bytes once aligned (int32, int32, uint8, uint8), not the
+ * 10-byte FSD_CAM_REC_SIZE that goes on the wire. */
 #ifndef FSD_TRK_SCAN_MAX
 #define FSD_TRK_SCAN_MAX 24
 #endif
@@ -196,6 +198,21 @@ float fsd_trk_cpa_limit(const FsdTracker* t, uint64_t key, float bearing_deg,
  *  database upload is replacing the file underneath us. */
 int fsd_trk_update(FsdTracker* t, const FsdCamDb* db, const FsdCamFix* fix,
                    FsdTrkEvent* out, int max_events);
+
+/** Forget every camera currently being measured. Learning is untouched.
+ *
+ *  Call this after a gap in fixes — a tunnel, a reboot, a spell where the fix
+ *  was refused. FsdTrkActive.prev_lat/prev_lon otherwise survive the gap, and
+ *  the segment interpolation in fsd_trk_update() then draws one chord across
+ *  the WHOLE of it. A chord kilometres long that happens to graze a camera the
+ *  car never went near collapses min_dist_m to a few metres, and retirement
+ *  branches on min_dist_m rather than on how far the car appeared to jump — so
+ *  the gap is recorded as a PASS and NARROWS that camera's learned limit.
+ *
+ *  That is the worst direction to be wrong in: a limit learned from a fiction
+ *  is narrower than the truth, and a too-narrow limit silently stops warning
+ *  about a camera that really is ours. */
+void fsd_trk_reset_active(FsdTracker* t);
 
 /** The nearest camera currently being followed, or false when there is none.
  *  This is what the policy layer reads: it wants a level, not an edge. */
