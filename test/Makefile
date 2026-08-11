@@ -21,17 +21,25 @@ test_speed_profile: $(SP_SRC) $(ROOT)/fsd_logic/fsd_speed_profile.h
 # On-module camera database + approach judgement. Reads a real camera.bin
 # produced by camera-db/pack.py, so this doubles as a format compatibility
 # check between the Python writer and the C reader.
-CAM_SRC := test_camera.c $(ROOT)/fsd_logic/fsd_camera.c $(ROOT)/fsd_logic/fsd_cam_track.c $(ROOT)/fsd_logic/fsd_cam_policy.c $(ROOT)/fsd_logic/fsd_speed_profile.c
+CAM_SRC := test_camera.c $(ROOT)/fsd_logic/fsd_camera.c $(ROOT)/fsd_logic/fsd_cam_track.c $(ROOT)/fsd_logic/fsd_cam_policy.c $(ROOT)/fsd_logic/fsd_speed_profile.c $(ROOT)/fsd_logic/fsd_gps.c
 
-test_camera: $(CAM_SRC) $(ROOT)/fsd_logic/fsd_camera.h $(ROOT)/fsd_logic/fsd_cam_track.h $(ROOT)/fsd_logic/fsd_cam_policy.h
+test_camera: $(CAM_SRC) $(ROOT)/fsd_logic/fsd_camera.h $(ROOT)/fsd_logic/fsd_cam_track.h $(ROOT)/fsd_logic/fsd_cam_policy.h $(ROOT)/fsd_logic/fsd_gps.h
 	$(CC) $(CFLAGS) -I$(ROOT)/fsd_logic $(CAM_SRC) -o $@ -lm
 
-check: test_fsd_core test_speed_profile test_camera
+# The car's GPS off the bus. Links fsd_camera.c for fsd_cam_distance_m(), which
+# the freeze detector uses to ask whether the reported position actually moved.
+GPS_SRC := test_gps.c $(ROOT)/fsd_logic/fsd_gps.c $(ROOT)/fsd_logic/fsd_camera.c
+
+test_gps: $(GPS_SRC) $(ROOT)/fsd_logic/fsd_gps.h $(ROOT)/fsd_logic/fsd_camera.h
+	$(CC) $(CFLAGS) -I$(ROOT)/fsd_logic $(GPS_SRC) -o $@ -lm
+
+check: test_fsd_core test_speed_profile test_camera test_gps
 	./test_fsd_core
 	./test_speed_profile
 	./test_camera
+	./test_gps
 
 clean:
-	rm -rf test_fsd_core test_speed_profile test_camera *.dSYM
+	rm -rf test_fsd_core test_speed_profile test_camera test_gps *.dSYM
 
 .PHONY: check clean
