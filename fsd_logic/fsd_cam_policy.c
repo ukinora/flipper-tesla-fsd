@@ -97,11 +97,23 @@ void fsd_pol_on_pass(FsdPolicy* p, uint64_t key) {
 
 void fsd_pol_new_drive(FsdPolicy* p) {
     if(!p) return;
+    /* Drop everything from the previous drive, not just the budgets.
+     *
+     * The entry profile used to survive: a drive that ended while still
+     * restoring left entry_valid set, the capture-once guard then refused to
+     * read the driver's new choice, and the first camera of the next drive
+     * restored to YESTERDAY's value. A driver who set Sloth this morning would
+     * be pulled up to the Hurry they left in last night — us overruling a
+     * person, which is the single thing this layer must never do.
+     *
+     * Nothing about the previous drive is worth carrying: the car has been
+     * parked, the driver may be someone else, and the profile on the screen is
+     * whatever they chose just now. */
+    fsd_pol_abandon(p);
     p->overrides = 0;
     p->failures = 0;
     p->suspended = false;
     p->observed_valid = false;
-    p->requested_valid = false;
 }
 
 bool fsd_pol_suspended(const FsdPolicy* p) {

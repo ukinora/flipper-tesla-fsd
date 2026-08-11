@@ -947,6 +947,54 @@ static void test_session_budgets(void) {
     CHECK(!fsd_pol_suspended(NULL), "NULL policy is not suspended");
 }
 
+static void test_entry_does_not_survive_a_drive(void) {
+    printf("\n-- policy: a new drive forgets the last one --\n");
+
+    FsdPolicy p;
+    fsd_pol_init(&p);
+    fsd_pol_new_drive(&p);
+
+    // Drive 1: driver is in Hurry. Engage, pass, run the hold out, start the
+    // restore — then park before the car has climbed back.
+    uint8_t observed = FSD_POL_PROFILE_HURRY;
+    FsdPolTarget a = target(1, 30, 100.0f);
+    FsdPolDecision d = fsd_pol_tick(&p, &a, observed, 60.0f, 20.0f, 1.0f);
+    CHECK(d.phase == FSD_POL_ACTIVE, "drive 1: engaged");
+    observed = d.target_profile; // Chill
+    fsd_pol_on_pass(&p, 1);
+    for (int i = 0; i < 7; i++)
+        d = fsd_pol_tick(&p, NULL, observed, 60.0f, 20.0f, 1.0f);
+    CHECK(d.phase == FSD_POL_RESTORING, "drive 1: restoring when the drive ends");
+
+    // Key goes off. Next drive, the driver has deliberately chosen Sloth — the
+    // slowest profile — and sets off.
+    fsd_pol_new_drive(&p);
+    observed = FSD_POL_PROFILE_SLOTH;
+
+    FsdPolTarget b = target(2, 30, 100.0f);
+    d = fsd_pol_tick(&p, &b, observed, 60.0f, 20.0f, 1.0f);
+    CHECK(d.phase == FSD_POL_ACTIVE, "drive 2: engaged");
+    CHECK(d.target_profile == FSD_POL_PROFILE_SLOTH, "drive 2: never raises");
+
+    fsd_pol_on_pass(&p, 2);
+    for (int i = 0; i < 7; i++)
+        d = fsd_pol_tick(&p, NULL, observed, 60.0f, 20.0f, 1.0f);
+
+    // The bug: the entry profile from drive 1 survives the parking cycle, the
+    // "capture once" guard sees it as already valid, and the restore therefore
+    // aims at LAST drive's value. The car is pulled from the Sloth the driver
+    // chose up to the Hurry they left behind yesterday — us overruling a
+    // person, which is the one thing this layer must never do.
+    if (d.phase == FSD_POL_RESTORING) {
+        CHECK(d.target_profile == FSD_POL_PROFILE_SLOTH,
+              "restores this drive's value (%u), not the last drive's (%u)",
+              d.target_profile, FSD_POL_PROFILE_HURRY);
+    } else {
+        CHECK(d.action == FSD_POL_ACT_NONE,
+              "nothing to restore when the drive began at the target");
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // End to end
 //
@@ -1131,6 +1179,7 @@ int main(void) {
     test_profile_decode();
     test_override_detection();
     test_session_budgets();
+    test_entry_does_not_survive_a_drive();
     test_end_to_end();
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
