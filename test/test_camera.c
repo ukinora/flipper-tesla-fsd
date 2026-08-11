@@ -27,6 +27,7 @@
 #include "fsd_cam_policy.h"
 #include "fsd_cam_track.h"
 #include "fsd_camera.h"
+#include "fsd_speed_profile.h"
 
 static int g_pass = 0;
 static int g_fail = 0;
@@ -614,6 +615,463 @@ static void test_policy_standstill(void) {
     CHECK(fsd_trk_key(NULL) == 0, "a NULL record has no key");
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Persistence
+// ─────────────────────────────────────────────────────────────────────────────
+
+typedef struct {
+    unsigned char buf[8192];
+    size_t len;
+    size_t pos;
+    size_t fail_after; // stop short once this many bytes have moved (0 = never)
+} Stream;
+
+static size_t st_write(void* ctx, const void* buf, size_t len) {
+    Stream* s = (Stream*)ctx;
+    if (s->fail_after && s->len >= s->fail_after) return 0;
+    if (s->len + len > sizeof(s->buf)) return 0;
+    memcpy(s->buf + s->len, buf, len);
+    s->len += len;
+    return len;
+}
+
+static size_t st_read(void* ctx, void* buf, size_t len) {
+    Stream* s = (Stream*)ctx;
+    size_t n = s->len - s->pos;
+    if (n > len) n = len;
+    memcpy(buf, s->buf + s->pos, n);
+    s->pos += n;
+    return n;
+}
+
+static void test_learning_persistence(void) {
+    printf("\n-- persistence: learning survives a power cycle --\n");
+
+    FsdCamDb db;
+    MemSrc src = make_src();
+    fsd_cam_open(&db, mem_read, &src);
+
+    FsdTracker t;
+    fsd_trk_init(&t);
+    drive_past(&t, &db, 3.0, NULL);
+    drive_past(&t, &db, 3.0, NULL);
+
+    FsdCamRecord seoul = {375000000, 1270000000, 30, 0};
+    uint64_t key = fsd_trk_key(&seoul);
+    bool learned = false;
+    float before = fsd_trk_cpa_limit(&t, key, 0.0f, &learned);
+    CHECK(learned && before < 11.0f, "learned before saving");
+
+    Stream s;
+    memset(&s, 0, sizeof(s));
+    CHECK(fsd_trk_save(&t, st_write, &s), "save succeeds");
+    CHECK(s.len > FSD_TRK_HEADER_SIZE + 4, "something was written (%u B)",
+          (unsigned)s.len);
+    CHECK(t.dirty, "save does not clear dirty — only the caller knows it landed");
+
+    // Power cycle.
+    FsdTracker t2;
+    fsd_trk_init(&t2);
+    CHECK(!fsd_trk_cpa_limit(&t2, key, 0.0f, &learned) || !learned,
+          "a fresh tracker knows nothing");
+
+    s.pos = 0;
+    CHECK(fsd_trk_load(&t2, st_read, &s), "load succeeds");
+    float after = fsd_trk_cpa_limit(&t2, key, 0.0f, &learned);
+    CHECK(learned, "still learned after the round trip");
+    // Samples are stored in centimetres, so the limit comes back to 1 cm.
+    CHECK(NEAR(after, before, 0.02f), "limit %.3f -> %.3f survives", (double)before,
+          (double)after);
+    CHECK(fsd_trk_passes(&t2, key, 0.0f) == 2, "pass count survives");
+
+    // Direction separation has to survive too, or the whole thing collapses to
+    // one profile and the opposite carriageway gets excluded by mistake.
+    CHECK(NEAR(fsd_trk_cpa_limit(&t2, key, 180.0f, &learned), FSD_CAM_DEFAULT_CPA_M,
+               0.01f),
+          "southbound is still unlearned after loading");
+
+    // A tracker that has learned nothing writes a header and a trailer, not
+    // seven kilobytes of zeros.
+    FsdTracker empty;
+    fsd_trk_init(&empty);
+    Stream es;
+    memset(&es, 0, sizeof(es));
+    CHECK(fsd_trk_save(&empty, st_write, &es), "empty save succeeds");
+    CHECK(es.len == FSD_TRK_HEADER_SIZE + 4, "empty file is %u B, expected %u",
+          (unsigned)es.len, (unsigned)(FSD_TRK_HEADER_SIZE + 4));
+}
+
+static void test_learning_rejects_damage(void) {
+    printf("\n-- persistence: damaged files are refused, not half-read --\n");
+
+    FsdCamDb db;
+    MemSrc src = make_src();
+    fsd_cam_open(&db, mem_read, &src);
+
+    FsdTracker t;
+    fsd_trk_init(&t);
+    drive_past(&t, &db, 3.0, NULL);
+    drive_past(&t, &db, 3.0, NULL);
+
+    Stream good;
+    memset(&good, 0, sizeof(good));
+    fsd_trk_save(&t, st_write, &good);
+
+    FsdCamRecord seoul = {375000000, 1270000000, 30, 0};
+    uint64_t key = fsd_trk_key(&seoul);
+    bool learned = false;
+
+    // A flipped bit in the body. Half a learning store is worse than none: a
+    // limit that came back too narrow silently stops warning about a camera
+    // that really is ours, and nothing downstream can tell it from a real one.
+    Stream bad = good;
+    bad.pos = 0;
+    bad.buf[FSD_TRK_HEADER_SIZE + 9] ^= 0x20;
+    FsdTracker t2;
+    CHECK(!fsd_trk_load(&t2, st_read, &bad), "corrupt body refused");
+    fsd_trk_cpa_limit(&t2, key, 0.0f, &learned);
+    CHECK(!learned, "and the tracker is left empty, not half-filled");
+
+    // Truncated — a write that ran out of space.
+    Stream cut = good;
+    cut.pos = 0;
+    cut.len = good.len - 6;
+    CHECK(!fsd_trk_load(&t2, st_read, &cut), "truncated file refused");
+
+    Stream bm = good;
+    bm.pos = 0;
+    bm.buf[0] = 'X';
+    CHECK(!fsd_trk_load(&t2, st_read, &bm), "bad magic refused");
+
+    Stream bv = good;
+    bv.pos = 0;
+    bv.buf[4] = 99;
+    CHECK(!fsd_trk_load(&t2, st_read, &bv), "unknown version refused");
+
+    // Rebuilt with different ring geometry: the records would parse into the
+    // wrong fields and look perfectly valid, so the shape is checked explicitly.
+    Stream bg = good;
+    bg.pos = 0;
+    bg.buf[9] = (unsigned char)(FSD_TRK_SAMPLES + 1);
+    CHECK(!fsd_trk_load(&t2, st_read, &bg), "different sample geometry refused");
+
+    // A write that fails partway must report failure rather than a short file.
+    Stream fw;
+    memset(&fw, 0, sizeof(fw));
+    fw.fail_after = FSD_TRK_HEADER_SIZE;
+    CHECK(!fsd_trk_save(&t, st_write, &fw), "a failing writer is reported");
+
+    CHECK(!fsd_trk_save(NULL, st_write, &fw), "NULL tracker refused");
+    CHECK(!fsd_trk_load(&t2, NULL, &fw), "NULL reader refused");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 0x3FD decode
+// ─────────────────────────────────────────────────────────────────────────────
+
+static void test_profile_decode(void) {
+    printf("\n-- 0x3FD: reading the profile back --\n");
+
+    uint8_t f[8];
+    uint8_t out = 0xFF;
+
+    // HW3: mux 0, byte 6 bits [2:1]. Built from the DBC position, then checked
+    // against what the write path in fsd_handler.c actually emits.
+    for (uint8_t v = 0; v <= 3; v++) {
+        memset(f, 0, sizeof(f));
+        f[0] = 0; // mux 0
+        f[6] = (uint8_t)(v << 1);
+        f[6] |= 0xF9; // every neighbouring bit set
+        CHECK(fsd_sp_decode_profile(f, 8, false, &out), "hw3 mux0 decodes");
+        CHECK(out == v, "hw3 profile %u decoded as %u", v, out);
+    }
+
+    // Other muxes on the same ID carry different fields entirely.
+    memset(f, 0, sizeof(f));
+    f[0] = 1;
+    f[6] = 0x06;
+    CHECK(!fsd_sp_decode_profile(f, 8, false, &out), "hw3 mux1 is not the profile");
+    f[0] = 2;
+    CHECK(!fsd_sp_decode_profile(f, 8, false, &out), "hw3 mux2 is not the profile");
+
+    // HW4: mux 2, byte 7 bits [7:5], three bits wide.
+    for (uint8_t v = 0; v <= 7; v++) {
+        memset(f, 0, sizeof(f));
+        f[0] = 2;
+        f[7] = (uint8_t)(v << 5);
+        f[7] |= 0x1F;
+        CHECK(fsd_sp_decode_profile(f, 8, true, &out), "hw4 mux2 decodes");
+        CHECK(out == v, "hw4 profile %u decoded as %u", v, out);
+    }
+    memset(f, 0, sizeof(f));
+    f[0] = 0;
+    CHECK(!fsd_sp_decode_profile(f, 8, true, &out), "hw4 mux0 is not the profile");
+
+    // Short frames must be refused rather than read past.
+    memset(f, 0, sizeof(f));
+    f[0] = 0;
+    CHECK(!fsd_sp_decode_profile(f, 6, false, &out), "hw3 needs 7 bytes");
+    f[0] = 2;
+    CHECK(!fsd_sp_decode_profile(f, 7, true, &out), "hw4 needs 8 bytes");
+    CHECK(!fsd_sp_decode_profile(NULL, 8, false, &out), "NULL data refused");
+    CHECK(!fsd_sp_decode_profile(f, 8, false, NULL), "NULL out refused");
+    CHECK(!fsd_sp_decode_profile(f, 0, false, &out), "zero dlc refused");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Override detection and session budgets
+// ─────────────────────────────────────────────────────────────────────────────
+
+static void engage(FsdPolicy* p, uint8_t observed) {
+    FsdPolTarget tg = target(1, 30, 100.0f);
+    fsd_pol_tick(p, &tg, observed, 60.0f, 20.0f, 1.0f);
+}
+
+static void test_override_detection(void) {
+    printf("\n-- override: the driver always wins --\n");
+
+    FsdPolicy p;
+    fsd_pol_init(&p);
+    fsd_pol_new_drive(&p);
+
+    // Ask to go from Hurry (3) down to Chill (1).
+    engage(&p, FSD_POL_PROFILE_HURRY);
+    fsd_pol_observe_profile(&p, FSD_POL_PROFILE_HURRY);
+
+    // Our own convergence steps 3 -> 2 -> 1. The intermediate 2 is not the
+    // value we asked for, and a naive "not what we requested" test would call
+    // it an override and abandon every multi-step change we ever make.
+    CHECK(!fsd_pol_observe_profile(&p, FSD_POL_PROFILE_STANDARD),
+          "stepping toward the target is us, not the driver");
+    CHECK(!fsd_pol_observe_profile(&p, FSD_POL_PROFILE_CHILL), "arriving is us");
+    CHECK(fsd_pol_suspended(&p) == false, "not suspended");
+
+    // Now the driver scrolls it back up. That moves AWAY from the request.
+    CHECK(fsd_pol_observe_profile(&p, FSD_POL_PROFILE_STANDARD),
+          "moving away from the request is the driver");
+
+    FsdPolDecision d = fsd_pol_tick(&p, NULL, FSD_POL_PROFILE_STANDARD, 60.0f, 20.0f,
+                                    1.0f);
+    CHECK(d.action == FSD_POL_ACT_NONE, "target abandoned");
+    CHECK(d.phase == FSD_POL_IDLE, "and no restore is attempted");
+
+    // Overshoot counts as away too: if the car sailed past what we asked for,
+    // something is wrong and letting go is the safe response.
+    fsd_pol_init(&p);
+    fsd_pol_new_drive(&p);
+    engage(&p, FSD_POL_PROFILE_STANDARD);
+    fsd_pol_observe_profile(&p, FSD_POL_PROFILE_STANDARD);
+    CHECK(!fsd_pol_observe_profile(&p, FSD_POL_PROFILE_CHILL), "arrived at the target");
+    CHECK(fsd_pol_observe_profile(&p, FSD_POL_PROFILE_SLOTH), "overshoot is flagged");
+
+    // Nothing requested: the driver moving the profile is simply their business.
+    fsd_pol_init(&p);
+    fsd_pol_new_drive(&p);
+    CHECK(!fsd_pol_observe_profile(&p, FSD_POL_PROFILE_HURRY), "first sample, no history");
+    CHECK(!fsd_pol_observe_profile(&p, FSD_POL_PROFILE_SLOTH),
+          "with nothing requested, a change is not an override");
+}
+
+static void test_session_budgets(void) {
+    printf("\n-- budgets: stop arguing after three --\n");
+
+    FsdPolicy p;
+    fsd_pol_init(&p);
+    fsd_pol_new_drive(&p);
+
+    for (unsigned i = 0; i < FSD_POL_MAX_OVERRIDES; i++) {
+        engage(&p, FSD_POL_PROFILE_HURRY);
+        fsd_pol_observe_profile(&p, FSD_POL_PROFILE_HURRY);
+        fsd_pol_observe_profile(&p, FSD_POL_PROFILE_CHILL);   // us, arriving
+        CHECK(fsd_pol_observe_profile(&p, FSD_POL_PROFILE_HURRY),
+              "override %u detected", i + 1);
+    }
+    CHECK(fsd_pol_suspended(&p), "suspended after %u overrides", FSD_POL_MAX_OVERRIDES);
+
+    FsdPolTarget tg = target(2, 30, 50.0f);
+    FsdPolDecision d = fsd_pol_tick(&p, &tg, FSD_POL_PROFILE_HURRY, 60.0f, 20.0f, 1.0f);
+    CHECK(d.action == FSD_POL_ACT_NONE, "suspended: offers nothing even with a camera");
+
+    // A new drive lifts it — a budget that never resets latches the feature off
+    // permanently after one bad day.
+    fsd_pol_new_drive(&p);
+    CHECK(!fsd_pol_suspended(&p), "a new drive lifts the suspension");
+    d = fsd_pol_tick(&p, &tg, FSD_POL_PROFILE_HURRY, 60.0f, 20.0f, 1.0f);
+    CHECK(d.action == FSD_POL_ACT_LOWER, "and it works again");
+
+    // Convergence failures. Unattended, a car that stopped listening to 0x3C2
+    // would otherwise be scrolled at for the entire drive.
+    fsd_pol_init(&p);
+    fsd_pol_new_drive(&p);
+    for (unsigned i = 0; i < FSD_POL_MAX_FAILURES - 1; i++) {
+        fsd_pol_on_convergence_failed(&p);
+        CHECK(!fsd_pol_suspended(&p), "still trying after %u failures", i + 1);
+    }
+    fsd_pol_on_convergence_failed(&p);
+    CHECK(fsd_pol_suspended(&p), "suspended after %u failures", FSD_POL_MAX_FAILURES);
+
+    // Consecutive, not cumulative: one success clears the count.
+    fsd_pol_init(&p);
+    fsd_pol_new_drive(&p);
+    fsd_pol_on_convergence_failed(&p);
+    fsd_pol_on_convergence_failed(&p);
+    fsd_pol_on_convergence_ok(&p);
+    fsd_pol_on_convergence_failed(&p);
+    fsd_pol_on_convergence_failed(&p);
+    CHECK(!fsd_pol_suspended(&p), "a success in between resets the count");
+
+    fsd_pol_new_drive(NULL);
+    fsd_pol_on_convergence_ok(NULL);
+    fsd_pol_on_convergence_failed(NULL);
+    CHECK(!fsd_pol_observe_profile(NULL, 0), "NULL policy is not an override");
+    CHECK(!fsd_pol_suspended(NULL), "NULL policy is not suspended");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// End to end
+//
+// Every piece above is checked on its own. This is the first time a position
+// goes in one end and a scroll detent comes out the other:
+//
+//   fix -> fsd_cam_near -> evaluate -> tracker -> policy -> convergence -> car
+//
+// The glue in the middle is what the firmware will have to write, so writing it
+// here first is the cheapest place to find out it is wrong. Integration is also
+// where the interesting failures live: two modules that each behave correctly
+// can still disagree about who moved the profile.
+// ─────────────────────────────────────────────────────────────────────────────
+
+static void test_end_to_end(void) {
+    printf("\n-- end to end: a drive past a school-zone camera --\n");
+
+    FsdCamDb db;
+    MemSrc src = make_src();
+    CHECK(fsd_cam_open(&db, mem_read, &src), "database opens");
+
+    FsdTracker trk;
+    FsdPolicy pol;
+    FsdSpeedProfile sp;
+    fsd_trk_init(&trk);
+    fsd_pol_init(&pol);
+    fsd_pol_new_drive(&pol);
+    fsd_sp_init(&sp);
+
+    // Stand in for the state after a capture has settled the wire encoding.
+    // Everything else on the safety interlock stays as it ships.
+    sp.enc.verified = true;
+
+    FsdSpInputs in;
+    memset(&in, 0, sizeof(in));
+    in.tx_armed = true;
+    in.scroll_bus_present = true;
+    in.status_fresh = true;
+
+    const uint8_t ENTRY = FSD_POL_PROFILE_HURRY;
+    uint8_t car = ENTRY; // the profile the simulated car is actually on
+
+    // 800 m before the camera to 400 m past, 3 m to the side, 60 km/h.
+    const double SPEED_MPS = 60.0 / 3.6;
+    double pos_m = -800.0;
+    uint32_t now = 0;
+
+    int lowered_at_m = 0;
+    bool lowered = false;
+    bool restored = false;
+    uint8_t highest_asked = 0;
+    bool asked = false;
+    FsdSpPhase prev_sp = sp.phase;
+    double prev_pos = pos_m;
+
+    // 100 ms steps: the convergence machine settles in 400 ms, so a 1 Hz-only
+    // loop would never see it move.
+    for (int step = 0; step < 1200 && !restored; step++, now += 100) {
+        if (now % 1000 == 0) {
+            pos_m = -800.0 + SPEED_MPS * ((double)now / 1000.0);
+            FsdCamFix fix = at(37.5 + pos_m / 111320.0, 127.0 + 3.0 / 88000.0, 0.0f,
+                               60.0f);
+
+            FsdTrkEvent ev[4];
+            int n = fsd_trk_update(&trk, &db, &fix, ev, 4);
+            for (int i = 0; i < n; i++) {
+                if (ev[i].kind != FSD_TRK_APPROACH) fsd_pol_on_pass(&pol, ev[i].key);
+            }
+
+            FsdPolTarget ahead;
+            memset(&ahead, 0, sizeof(ahead));
+            FsdCamRecord cam;
+            uint64_t key;
+            float dist;
+            if (fsd_trk_nearest(&trk, &cam, &key, &dist)) {
+                ahead.valid = true;
+                ahead.key = key;
+                ahead.limit_kph = cam.limit_kph;
+                ahead.distance_m = dist;
+            }
+
+            FsdPolDecision d = fsd_pol_tick(&pol, ahead.valid ? &ahead : NULL, car,
+                                            60.0f, (float)(pos_m - prev_pos), 1.0f);
+            prev_pos = pos_m;
+
+            if (d.action != FSD_POL_ACT_NONE) {
+                if (!asked || d.target_profile > highest_asked)
+                    highest_asked = d.target_profile;
+                asked = true;
+                // Only start a convergence when the ask differs from where the
+                // car already is, and only when the machine is free.
+                if (!fsd_sp_busy(&sp) && car != d.target_profile) {
+                    in.observed_profile = car;
+                    fsd_sp_request(&sp, &in, d.target_profile, now);
+                }
+            }
+            if (d.action == FSD_POL_ACT_RESTORE && car == d.target_profile)
+                restored = true;
+        }
+
+        // Convergence, and a car that obeys.
+        in.observed_profile = car;
+        FsdSpAction act = fsd_sp_poll(&sp, &in, now);
+        if (act == FSD_SP_ACT_TICK_UP && car < FSD_SP_PROFILE_MAX) car++;
+        if (act == FSD_SP_ACT_TICK_DOWN && car > FSD_SP_PROFILE_MIN) car--;
+        if (act != FSD_SP_ACT_NONE) {
+            fsd_sp_observe(&sp, car, now);
+            // The policy watches the same read-back. If it mistook our own
+            // stepping for the driver it would abandon here, which is exactly
+            // the sort of thing only an integration run catches.
+            fsd_pol_observe_profile(&pol, car);
+        }
+
+        if (sp.phase != prev_sp) {
+            if (sp.phase == FSD_SP_DONE) fsd_pol_on_convergence_ok(&pol);
+            if (sp.phase == FSD_SP_FAILED) fsd_pol_on_convergence_failed(&pol);
+            prev_sp = sp.phase;
+        }
+
+        if (!lowered && car == FSD_POL_PROFILE_CHILL) {
+            lowered = true;
+            lowered_at_m = (int)pos_m;
+        }
+    }
+
+    CHECK(lowered, "the car actually reached Chill");
+    // Before the camera, and not absurdly early: the trigger at 60 km/h is
+    // 200 m, plus whatever the convergence takes.
+    CHECK(lowered_at_m < 0, "lowered at %d m — before the camera, not after",
+          lowered_at_m);
+    CHECK(lowered_at_m > -260, "lowered at %d m — not needlessly early", lowered_at_m);
+
+    CHECK(!fsd_pol_suspended(&pol),
+          "no override or failure was misdetected during a clean run");
+    CHECK(highest_asked <= ENTRY, "never asked for anything faster than the driver had");
+    CHECK(restored, "the original profile was asked for again after the camera");
+    CHECK(car == ENTRY, "and the car got back to it");
+
+    // The drive taught the tracker something, and it is the kind of thing that
+    // narrows the limit next time.
+    FsdCamRecord seoul = {375000000, 1270000000, 30, 0};
+    CHECK(fsd_trk_passes(&trk, fsd_trk_key(&seoul), 0.0f) >= 1,
+          "the pass was recorded for next time");
+}
+
 int main(void) {
     printf("test_camera\n");
     test_open();
@@ -633,6 +1091,12 @@ int main(void) {
     test_policy_entry_does_not_ratchet();
     test_policy_abandon();
     test_policy_standstill();
+    test_learning_persistence();
+    test_learning_rejects_damage();
+    test_profile_decode();
+    test_override_detection();
+    test_session_budgets();
+    test_end_to_end();
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }

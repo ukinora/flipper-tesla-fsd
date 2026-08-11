@@ -14,6 +14,8 @@
 
 #define CAM_PATH "/camera.bin"
 #define CAM_TMP "/camera.tmp"
+#define LEARN_PATH "/learn.bin"
+#define LEARN_TMP "/learn.tmp"
 
 static bool g_fs_ok = false;
 static File g_db_file;    // held open so lookups are just seek + read
@@ -206,6 +208,71 @@ uint8_t camera_store_upload_end(void) {
     if(!open_db()) return CAM_UP_BAD_FORMAT;
     Serial.printf("[CAM] upload OK — %u cameras\n", (unsigned)g_db.rec_count);
     return CAM_UP_OK;
+}
+
+// ── learned lane discrimination ──────────────────────────────────────────────
+
+static size_t learn_write(void* ctx, const void* buf, size_t len) {
+    File* f = (File*)ctx;
+    return f->write((const uint8_t*)buf, len);
+}
+
+static size_t learn_read(void* ctx, void* buf, size_t len) {
+    File* f = (File*)ctx;
+    int n = f->read((uint8_t*)buf, len);
+    return n > 0 ? (size_t)n : 0;
+}
+
+bool camera_store_load_learning(FsdTracker* t) {
+    if(!t) return false;
+    fsd_trk_init(t);
+    if(!g_fs_ok || !LittleFS.exists(LEARN_PATH)) {
+        Serial.println("[CAM] no learning yet — limits start wide");
+        return false;
+    }
+    File f = LittleFS.open(LEARN_PATH, "r");
+    if(!f) return false;
+    bool ok = fsd_trk_load(t, learn_read, &f);
+    f.close();
+    if(!ok) {
+        /* Unreadable is not the same as absent, and keeping it around means
+         * failing the same way at every boot. Drop it and relearn. */
+        Serial.println("[CAM] learning file rejected — discarding");
+        LittleFS.remove(LEARN_PATH);
+        return false;
+    }
+    unsigned n = 0;
+    for(int i = 0; i < FSD_TRK_CAM_MAX; i++)
+        if(t->mem[i].used) n++;
+    Serial.printf("[CAM] learning restored for %u cameras\n", n);
+    return true;
+}
+
+bool camera_store_save_learning(FsdTracker* t) {
+    if(!t || !g_fs_ok) return false;
+
+    /* Same atomic replacement the database gets. A power cut mid-write must
+     * leave the previous learning intact, not a truncated file that fails its
+     * CRC and throws away every pass ever recorded. */
+    LittleFS.remove(LEARN_TMP);
+    File f = LittleFS.open(LEARN_TMP, "w");
+    if(!f) return false;
+    bool ok = fsd_trk_save(t, learn_write, &f);
+    f.close();
+    if(!ok) {
+        LittleFS.remove(LEARN_TMP);
+        Serial.println("[CAM] learning write failed");
+        return false;
+    }
+
+    LittleFS.remove(LEARN_PATH); // rename() will not overwrite
+    if(!LittleFS.rename(LEARN_TMP, LEARN_PATH)) {
+        LittleFS.remove(LEARN_TMP);
+        Serial.println("[CAM] learning rename failed");
+        return false;
+    }
+    t->dirty = false; // only now: the bytes are actually in place
+    return true;
 }
 
 void camera_store_upload_abort(void) {

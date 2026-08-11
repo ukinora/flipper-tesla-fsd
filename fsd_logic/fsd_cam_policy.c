@@ -74,6 +74,7 @@ void fsd_pol_abandon(FsdPolicy* p) {
     p->entry_valid = false;
     p->entry_profile = 0;
     p->restore_s = 0.0f;
+    p->requested_valid = false;
     p->phase = FSD_POL_IDLE;
 }
 
@@ -94,8 +95,72 @@ void fsd_pol_on_pass(FsdPolicy* p, uint64_t key) {
     if(p->phase != FSD_POL_RESTORING) p->phase = FSD_POL_IDLE;
 }
 
-static FsdPolDecision decide(const FsdPolicy* p, FsdPolAction act, uint8_t profile,
+void fsd_pol_new_drive(FsdPolicy* p) {
+    if(!p) return;
+    p->overrides = 0;
+    p->failures = 0;
+    p->suspended = false;
+    p->observed_valid = false;
+    p->requested_valid = false;
+}
+
+bool fsd_pol_suspended(const FsdPolicy* p) {
+    return p && p->suspended;
+}
+
+void fsd_pol_on_convergence_failed(FsdPolicy* p) {
+    if(!p) return;
+    if(p->failures < 0xFFu) p->failures++;
+    if(p->failures >= FSD_POL_MAX_FAILURES) {
+        p->suspended = true;
+        fsd_pol_abandon(p);
+    }
+}
+
+void fsd_pol_on_convergence_ok(FsdPolicy* p) {
+    if(!p) return;
+    p->failures = 0;
+}
+
+/* Distance from a profile value to the one we asked for. Plain magnitude — the
+ * profiles are an ordered scale, so "how many steps away" is all that matters. */
+static uint8_t steps_from(uint8_t v, uint8_t target) {
+    return (uint8_t)(v > target ? v - target : target - v);
+}
+
+bool fsd_pol_observe_profile(FsdPolicy* p, uint8_t observed) {
+    if(!p) return false;
+
+    uint8_t prev = p->last_observed;
+    bool had_prev = p->observed_valid;
+    p->last_observed = observed;
+    p->observed_valid = true;
+
+    if(!had_prev || prev == observed) return false; // nothing moved
+    if(!p->requested_valid) return false;           // we are not asking for anything
+
+    /* Closer to what we asked for: that is our own convergence stepping, and a
+     * multi-step request legitimately passes through values that are not the
+     * target. Only movement AWAY from the request is a second hand on the
+     * wheel. Overshoot counts as away too — if the car sailed past the value we
+     * asked for, something is wrong and letting go is the safe response. */
+    if(steps_from(observed, p->requested) < steps_from(prev, p->requested)) return false;
+
+    if(p->overrides < 0xFFu) p->overrides++;
+    fsd_pol_abandon(p); // forgets the entry profile: the driver's value is theirs now
+    if(p->overrides >= FSD_POL_MAX_OVERRIDES) p->suspended = true;
+    return true;
+}
+
+static FsdPolDecision decide(FsdPolicy* p, FsdPolAction act, uint8_t profile,
                              float trigger_m) {
+    /* Remember what we asked for. fsd_pol_observe_profile() needs it to tell
+     * our own convergence from the driver's hand, and recording it here means
+     * every exit from fsd_pol_tick() is covered — a return added later cannot
+     * forget to do it. */
+    p->requested_valid = (act != FSD_POL_ACT_NONE);
+    p->requested = profile;
+
     FsdPolDecision d;
     memset(&d, 0, sizeof(d));
     d.phase = p->phase;
@@ -124,6 +189,14 @@ FsdPolDecision fsd_pol_tick(FsdPolicy* p, const FsdPolTarget* ahead,
     }
     if(moved_m < 0.0f) moved_m = 0.0f;
     if(dt_s < 0.0f) dt_s = 0.0f;
+
+    /* Suspended: the driver has corrected us repeatedly, or the car has stopped
+     * responding to the scroll. Either way, keep quiet until the next drive
+     * rather than spending the whole one arguing. */
+    if(p->suspended) {
+        p->phase = FSD_POL_IDLE;
+        return decide(p, FSD_POL_ACT_NONE, 0, 0.0f);
+    }
 
     // ── holding past a camera ────────────────────────────────────────────────
     // Runs before anything else and cannot be interrupted by a new camera.

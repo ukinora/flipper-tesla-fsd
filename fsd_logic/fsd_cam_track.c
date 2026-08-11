@@ -327,6 +327,178 @@ int fsd_trk_update(FsdTracker* t, const FsdCamDb* db, const FsdCamFix* fix,
     return n;
 }
 
+// ── persistence ──────────────────────────────────────────────────────────────
+
+/* zlib-compatible CRC-32, bitwise. A table would cost 1 KB of flash to save a
+ * few microseconds on a file written once per drive. */
+static uint32_t crc32_update(uint32_t crc, const uint8_t* d, size_t n) {
+    crc = ~crc;
+    while(n--) {
+        crc ^= *d++;
+        for(int k = 0; k < 8; k++)
+            crc = (crc >> 1) ^ (0xEDB88320u & (uint32_t)(-(int32_t)(crc & 1u)));
+    }
+    return ~crc;
+}
+
+static void put_u16(uint8_t* p, uint16_t v) {
+    p[0] = (uint8_t)(v & 0xFFu);
+    p[1] = (uint8_t)(v >> 8);
+}
+
+static void put_u32(uint8_t* p, uint32_t v) {
+    p[0] = (uint8_t)(v & 0xFFu);
+    p[1] = (uint8_t)((v >> 8) & 0xFFu);
+    p[2] = (uint8_t)((v >> 16) & 0xFFu);
+    p[3] = (uint8_t)((v >> 24) & 0xFFu);
+}
+
+static uint16_t get_u16(const uint8_t* p) {
+    return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8));
+}
+
+static uint32_t get_u32(const uint8_t* p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) |
+           ((uint32_t)p[3] << 24);
+}
+
+/* Metres to centimetres, saturating. Closest approaches never exceed
+ * FSD_TRK_MAX_PASS_CPA_M, so the ceiling is unreachable in practice; it is here
+ * so a NaN or a wild value truncates instead of wrapping to something small and
+ * plausible-looking. */
+static uint16_t m_to_cm(float m) {
+    if(!(m > 0.0f)) return 0; // also catches NaN
+    float cm = m * 100.0f + 0.5f;
+    if(cm > 65535.0f) return 65535u;
+    return (uint16_t)cm;
+}
+
+static uint16_t deg_to_cdeg(float deg) {
+    float v = fmodf(deg, 360.0f);
+    if(!(v == v)) v = 0.0f; // NaN
+    if(v < 0.0f) v += 360.0f;
+    uint32_t c = (uint32_t)(v * 100.0f + 0.5f);
+    if(c > 35999u) c = 0u; // 360.00 rounds up into the next turn
+    return (uint16_t)c;
+}
+
+/* One camera on the wire. Fixed size, so a record can be skipped or counted
+ * without parsing it. */
+static void pack_record(const FsdTrkCamera* c, uint8_t* rec) {
+    memset(rec, 0, FSD_TRK_REC_SIZE);
+    put_u32(rec + 0, (uint32_t)(c->key & 0xFFFFFFFFu));
+    put_u32(rec + 4, (uint32_t)(c->key >> 32));
+
+    uint8_t* p = rec + 8;
+    for(uint8_t i = 0; i < FSD_TRK_DIRS; i++) {
+        const FsdTrkDirection* d = &c->dir[i];
+        bool live = i < c->dir_count;
+        put_u16(p + 0, live ? deg_to_cdeg(d->bearing_deg) : 0u);
+        put_u16(p + 2, live ? d->passes : 0u);
+        p[4] = live ? d->count : 0u;
+        p[5] = live ? d->next : 0u;
+        for(uint8_t s = 0; s < FSD_TRK_SAMPLES; s++)
+            put_u16(p + 6 + 2 * s, live ? m_to_cm(d->samples[s]) : 0u);
+        p += 6 + 2 * FSD_TRK_SAMPLES;
+    }
+}
+
+static void unpack_record(FsdTrkCamera* c, const uint8_t* rec) {
+    memset(c, 0, sizeof(*c));
+    c->key = (uint64_t)get_u32(rec + 0) | ((uint64_t)get_u32(rec + 4) << 32);
+    c->used = true;
+
+    const uint8_t* p = rec + 8;
+    for(uint8_t i = 0; i < FSD_TRK_DIRS; i++) {
+        FsdTrkDirection* d = &c->dir[i];
+        d->bearing_deg = (float)get_u16(p + 0) / 100.0f;
+        d->passes = get_u16(p + 2);
+        d->count = p[4];
+        d->next = p[5];
+        /* Clamp what indexes an array. A corrupt count would read past the ring
+         * in dir_limit(); the CRC should have caught it, but a bounds check is
+         * the thing that actually prevents the read. */
+        if(d->count > FSD_TRK_SAMPLES) d->count = FSD_TRK_SAMPLES;
+        if(d->next >= FSD_TRK_SAMPLES) d->next = 0;
+        for(uint8_t s = 0; s < FSD_TRK_SAMPLES; s++)
+            d->samples[s] = (float)get_u16(p + 6 + 2 * s) / 100.0f;
+        if(d->passes > 0) c->dir_count = (uint8_t)(i + 1);
+        p += 6 + 2 * FSD_TRK_SAMPLES;
+    }
+}
+
+bool fsd_trk_save(const FsdTracker* t, FsdTrkWriteFn write, void* ctx) {
+    if(!t || !write) return false;
+
+    uint16_t n = 0;
+    for(int i = 0; i < FSD_TRK_CAM_MAX; i++)
+        if(t->mem[i].used && t->mem[i].dir_count > 0) n++;
+
+    uint8_t hdr[FSD_TRK_HEADER_SIZE];
+    memset(hdr, 0, sizeof(hdr));
+    put_u32(hdr + 0, FSD_TRK_MAGIC);
+    hdr[4] = (uint8_t)FSD_TRK_FORMAT_VERSION;
+    hdr[5] = 0; // flags
+    put_u16(hdr + 6, n);
+    /* Geometry goes in the header so a firmware built with different constants
+     * rejects an old file instead of misreading it into the wrong fields. */
+    hdr[8] = (uint8_t)FSD_TRK_DIRS;
+    hdr[9] = (uint8_t)FSD_TRK_SAMPLES;
+    if(write(ctx, hdr, sizeof(hdr)) != sizeof(hdr)) return false;
+
+    /* CRC covers the records only, and rides at the END of the file — it cannot
+     * be in the header, because writing it there would mean buffering
+     * everything first, which is exactly what streaming avoids. */
+    uint32_t crc = 0;
+    for(int i = 0; i < FSD_TRK_CAM_MAX; i++) {
+        if(!t->mem[i].used || t->mem[i].dir_count == 0) continue;
+        uint8_t rec[FSD_TRK_REC_SIZE];
+        pack_record(&t->mem[i], rec);
+        crc = crc32_update(crc, rec, sizeof(rec));
+        if(write(ctx, rec, sizeof(rec)) != sizeof(rec)) return false;
+    }
+
+    uint8_t tail[4];
+    put_u32(tail, crc);
+    return write(ctx, tail, sizeof(tail)) == sizeof(tail);
+}
+
+bool fsd_trk_load(FsdTracker* t, FsdTrkReadFn read, void* ctx) {
+    if(!t || !read) return false;
+    fsd_trk_init(t);
+
+    uint8_t hdr[FSD_TRK_HEADER_SIZE];
+    if(read(ctx, hdr, sizeof(hdr)) != sizeof(hdr)) return false;
+    if(get_u32(hdr + 0) != FSD_TRK_MAGIC) return false;
+    if(hdr[4] != FSD_TRK_FORMAT_VERSION) return false;
+    if(hdr[8] != (uint8_t)FSD_TRK_DIRS || hdr[9] != (uint8_t)FSD_TRK_SAMPLES)
+        return false;
+
+    uint16_t n = get_u16(hdr + 6);
+    if(n > FSD_TRK_CAM_MAX) return false;
+
+    uint32_t crc = 0;
+    for(uint16_t i = 0; i < n; i++) {
+        uint8_t rec[FSD_TRK_REC_SIZE];
+        if(read(ctx, rec, sizeof(rec)) != sizeof(rec)) {
+            fsd_trk_init(t);
+            return false;
+        }
+        crc = crc32_update(crc, rec, sizeof(rec));
+        unpack_record(&t->mem[i], rec);
+    }
+
+    uint8_t tail[4];
+    if(read(ctx, tail, sizeof(tail)) != sizeof(tail) || get_u32(tail) != crc) {
+        /* Half a learning store is worse than none: a limit that is too narrow
+         * stops warning about a camera that really is ours, and nothing
+         * downstream can tell that from a legitimately learned one. */
+        fsd_trk_init(t);
+        return false;
+    }
+    return true;
+}
+
 bool fsd_trk_nearest(const FsdTracker* t, FsdCamRecord* cam_out, uint64_t* key_out,
                      float* distance_out) {
     if(!t) return false;

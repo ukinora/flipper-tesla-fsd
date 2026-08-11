@@ -78,6 +78,19 @@ extern "C" {
  * simply refuse; asking forever would fight it. */
 #define FSD_POL_RESTORE_TIMEOUT_S 20.0f
 
+/* Overrides in one drive before we stop offering. Once is a disagreement about
+ * a camera; three times is the driver telling us the settings are wrong, and
+ * continuing to argue is worse than being switched off. */
+#define FSD_POL_MAX_OVERRIDES 3u
+
+/* Consecutive convergence failures before the same thing happens.
+ *
+ * This matters far more without a phone in the car. A firmware update that
+ * moves what 0x3C2 means would leave a supervised drive with a driver who sees
+ * it; an unattended module would just keep scrolling at a car that is not
+ * listening, for the whole drive. */
+#define FSD_POL_MAX_FAILURES 3u
+
 typedef enum {
     FSD_POL_IDLE = 0,  // nothing of ours nearby
     FSD_POL_ARMED,     // a camera is ours, but still too far to act
@@ -121,6 +134,16 @@ typedef struct {
     float passed_m; // travelled since the pass
     float held_s;
     float restore_s;
+
+    // Session bookkeeping. Reset by fsd_pol_new_drive(), not by init, because
+    // "this drive" is the unit these budgets are spent over.
+    uint8_t requested;      // profile of the last LOWER/RESTORE we handed out
+    bool requested_valid;
+    uint8_t last_observed;
+    bool observed_valid;
+    uint8_t overrides;      // driver corrections seen this drive
+    uint8_t failures;       // consecutive convergence failures
+    bool suspended;         // stop offering for the rest of this drive
 } FsdPolicy;
 
 /** Reset to idle, forgetting any entry profile. */
@@ -150,6 +173,34 @@ void fsd_pol_abandon(FsdPolicy* p);
 FsdPolDecision fsd_pol_tick(FsdPolicy* p, const FsdPolTarget* ahead,
                             uint8_t observed_profile, float speed_kph,
                             float moved_m, float dt_s);
+
+/** Start of a drive: clears the override and failure budgets and lifts any
+ *  suspension. Call when the gear leaves P (see fsd_autonomy.h) — a budget that
+ *  never resets would eventually latch the feature off forever. */
+void fsd_pol_new_drive(FsdPolicy* p);
+
+/** Feed the profile read back from 0x3FD, every time it is decoded.
+ *
+ *  Detects the driver turning the wheel while we are mid-request. The naive
+ *  test — "the value is not what we asked for" — false-positives on our own
+ *  convergence, because stepping 3 -> 1 passes through 2. What actually
+ *  separates them is DIRECTION: moving closer to the request is us, moving away
+ *  from it is a person.
+ *
+ *  Returns true when an override was detected, in which case the current target
+ *  has already been abandoned (no restore — the driver's value is now theirs).
+ *  After FSD_POL_MAX_OVERRIDES in one drive it also suspends. */
+bool fsd_pol_observe_profile(FsdPolicy* p, uint8_t observed);
+
+/** The convergence machine gave up. FSD_POL_MAX_FAILURES in a row suspends for
+ *  the rest of the drive. */
+void fsd_pol_on_convergence_failed(FsdPolicy* p);
+
+/** The convergence machine arrived. Clears the consecutive-failure count. */
+void fsd_pol_on_convergence_ok(FsdPolicy* p);
+
+/** True while the policy has stopped offering for this drive. */
+bool fsd_pol_suspended(const FsdPolicy* p);
 
 /** Human-readable phase, for logs and the app. */
 const char* fsd_pol_phase_str(FsdPolPhase ph);
