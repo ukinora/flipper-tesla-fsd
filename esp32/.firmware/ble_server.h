@@ -59,27 +59,53 @@
 // A separate characteristic rather than more bytes in State: State is a fixed
 // 20 and full, and widening it would bump the wire version for every client.
 //
-// It reports ONLY what the firmware actually knows today. The tracker and
-// policy are compiled but not instantiated — nothing feeds them a position yet
-// — so their fields are absent rather than present-and-always-zero. Sending a
-// zero that means "not implemented" is indistinguishable from a real zero, and
-// this project has already been bitten by exactly that (di_cruise_state and the
-// blinker flags were structurally zero on this build for months).
+// v2 (20 B). The tracker, the GPS layer and the policy now RUN — camera_task.cpp
+// instantiates them — so the fields that were deliberately absent in v1 exist.
+// Bytes 0..11 keep their exact v1 meaning, so a reader that ignores the version
+// and parses the first 12 is still correct; the bump is for length-strict
+// clients, which is what this version number was split off for.
 //
-//   [0]     protocol version
-//   [1]     flags: bit0 autonomy enabled (operator intent, persisted)
-//                  bit1 supervised drive right now
-//                  bit2 camera database loaded
-//   [2]     FsdSupVerdict — which gate is refusing (0 = none)
-//   [3]     OpMode
-//   [4..7]  cameras in the database, LE32
-//   [8..11] database build time, Unix seconds LE32 (0 = unknown/old file)
+// 20 B is the ceiling a default 23-byte ATT MTU carries, the same limit State
+// already respects.
+//
+// Everything here is OBSERVED, not commanded. The policy's decision is
+// published and never acted on: this firmware has no path from a decision to a
+// CAN frame — see camera_task.h.
+//
+//   [0]      protocol version (2)
+//   [1]      flags: bit0 autonomy enabled (operator intent, persisted)
+//                   bit1 supervised drive right now
+//                   bit2 camera database loaded
+//                   bit3 fsd_autonomy_allows() — the camera path's only door
+//                   bit4 policy suspended by DRIVER OVERRIDE (see below)
+//                   bit5 learning dirty — passes recorded, not yet written
+//                   bit6 0x3FD read-back fresh AND inside 0..3
+//                   bit7 learning writes are failing
+//   [2]      FsdSupVerdict — which supervision gate is refusing (0 = none)
+//   [3]      OpMode
+//   [4..7]   cameras in the database, LE32
+//   [8..11]  database build time, Unix seconds LE32 (0 = unknown/old file)
+//   [12]     FsdGpsVerdict — why there is no fix (0 = OK)
+//   [13]     FsdPolPhase bits0-2 | FsdPolAction bits3-4 | target profile bits5-6
+//   [14..15] metres to the nearest tracked camera, LE16 (0xFFFF = none)
+//   [16]     MCU_gpsAccuracy, raw 0.2 m units (0xFF = unknown)
+//   [17]     last decoded 0x3FD profile, RAW 0..7 (0xFF = never decoded)
+//   [18]     cameras with stored learning
+//   [19]     scans that came back full — possible truncation, saturating
+//
+// bit4 covers only HALF of suspension, on purpose. The other half —
+// fsd_pol_on_convergence_failed(), the 페일세이프 §5-E guard against an
+// unattended module retrying forever — has no caller anywhere in this firmware,
+// because there is no convergence machine to fail. Reporting it as if it could
+// fire would be the same "zero that means not implemented" mistake v1's comment
+// warned about.
+//
 // Its own version, not BLE_PROTO_VERSION. Sharing one constant meant that
 // bumping State to 2 also announced a CamStat change that never happened, and
 // an app checking the byte would have re-parsed for nothing. Two independent
 // wire formats need two independent version numbers.
-#define BLE_CAMSTAT_VERSION 1u
-#define BLE_CAMSTAT_LEN 12u
+#define BLE_CAMSTAT_VERSION 2u
+#define BLE_CAMSTAT_LEN 20u
 #define BLE_CAMSTAT_PERIOD_MS 1000u
 
 // ── Result codes (Result characteristic, byte 1) ─────────────────────────────

@@ -30,6 +30,7 @@
 #include "http_can_stream.h"
 #include "blackbox.h"
 #include "camera_store.h"
+#include "camera_task.h"
 #include "ble_server.h"
 #include "capability.h"
 #include "profile_match.h"
@@ -1265,6 +1266,14 @@ static void process_frame(CanBusId bus, const CanFrame &frame) {
         state_exit();
         return;
     }
+    // Car GPS (0x3D8 position, 0x2F8 heading/speed) and the drivetrain speed
+    // (0x257) that proves the position is not frozen. Read-only, and ABOVE the
+    // TX boundary on purpose: the freeze detector needs three consecutive
+    // position frames, and fsd_can_transmit() is false in OpMode_Autonomous —
+    // the exact mode this feature exists for. On builds without the camera core
+    // the shim returns false and this whole line folds away.
+    if (camera_task_observe(frame.id, frame.data, frame.dlc, millis())) return;
+
     if (frame.id == CAN_ID_ESP_STATUS) {
         uint32_t now_ms = millis();
         state_enter();
@@ -1279,6 +1288,20 @@ static void process_frame(CanBusId bus, const CanFrame &frame) {
         fsd_handle_steering_angle(&g_state, &frame);
         state_exit();
         return;
+    }
+
+    // Speed-profile read-back off 0x3FD. Non-returning — the AP-control handler
+    // below still needs this frame.
+    //
+    // Reads the ORIGINAL `frame`, never the copy the injection path works on:
+    // that copy is where our own writes go, and feeding it back would look like
+    // the car agreeing with us. FSDState.speed_profile cannot serve here either
+    // — it is write INTENT, derived from the follow-distance and stalk parsers,
+    // and it even takes the value 4. Feeding intent to the policy's never-raise
+    // clamp would be a lie in the one direction that matters.
+    if (frame.id == CAN_ID_AP_CONTROL) {
+        camera_task_observe_profile(hw_uses_hw4_das_status(das_state.hw_version),
+                                    frame.data, frame.dlc, millis());
     }
 
     // ── Beyond here only run when TX is allowed ───────────────────────────────
@@ -1584,6 +1607,9 @@ void setup() {
     // Absent on a fresh flash — the app uploads one over BLE.
     camera_store_init();
 #endif
+    // Instances + learning restore. After camera_store_init() (it needs the
+    // filesystem), before ble_server_init() (its packer reads the accessors).
+    camera_task_init(&g_state, &g_state_mux);
     capability_init(&g_state, &g_state_mux);  // tap capability checker (#125)
     ble_server_init(&g_state, &g_state_mux);  // GATT server for the phone app
     profile_match_init(&g_state, &g_state_mux);  // variant-profile auto-suggest (#126)
@@ -1755,6 +1781,22 @@ void loop() {
         last_status_ms = now;
     }
 
+    // ── Headroom, deliberately NOT gated on Active ────────────────────────────
+    // Neither number is sampled anywhere else in this firmware, and both became
+    // load-bearing with the camera core: ~12.2 KB of new .bss on this variant
+    // comes out of the same pool the black box asks ~175 KB of free heap for,
+    // and fsd_trk_update() puts a 24-entry scan buffer on the loop task's stack.
+    // A bring-up drive runs in Listen-Only, so gating this on Active — the way
+    // the line above is — would print it exactly when nobody is measuring.
+    static uint32_t last_mem_ms = 0;
+    if ((now - last_mem_ms) >= 60000u) {
+        Serial.printf("[MEM] heap:%lu min:%lu stack_free:%lu\n",
+                      (unsigned long)ESP.getFreeHeap(),
+                      (unsigned long)ESP.getMinFreeHeap(),
+                      (unsigned long)(uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t)));
+        last_mem_ms = now;
+    }
+
     // ── Periodic re-init when a CAN driver failed at boot ────────────────────
     for (uint8_t i = 0; i < CAN_ACTIVE_BUS_COUNT; i++) {
         if (!g_can_ok[i] && g_can[i] &&
@@ -1793,6 +1835,7 @@ void loop() {
     can_dump_tick(now);
     blackbox_tick(now);  // post-roll countdown + flush (#124)
     capability_tick(now);  // finalize the capability listen window (#125)
+    camera_task_tick(now); // 1 Hz camera judgement — reads only, never transmits
     ble_server_tick(now);  // push State notifications to the phone app
 
 #if defined(BOARD_LILYGO)

@@ -15,6 +15,24 @@
  *
  * The open database file is closed for the duration of an upload and reopened
  * afterwards, so a lookup never reads a file that is being replaced.
+ *
+ * TWO TASKS TOUCH THIS FILE
+ * -------------------------
+ * The upload path runs on the NimBLE host task; the judgement path (camera_task)
+ * runs on the Arduino loop task and reads the database once a second. That was
+ * harmless while nothing on the loop task did file I/O, and stopped being
+ * harmless the moment camera_task started calling fsd_cam_near().
+ *
+ * The sharp edge is not the upload itself but camera_store_upload_abort(): it is
+ * called from ServerCB::onDisconnect, so it runs on EVERY ordinary disconnect —
+ * the phone walking out of range, the app going to the background. It used to
+ * close and reopen the database file every time. A lookup in flight would have
+ * had the File closed underneath it, and fsd_cam_open() memsets the FsdCamDb
+ * while fsd_cam_near() is reading rec_offset out of it.
+ *
+ * So: an abort with nothing to abort now returns immediately, and the
+ * transitions that genuinely do replace the database take a mutex that the
+ * borrow API below also takes.
  */
 
 #include "../../fsd_logic/fsd_cam_track.h"
@@ -46,8 +64,24 @@ void camera_store_init(void);
 /** True when a valid database is open and can be queried. */
 bool camera_store_ready(void);
 
-/** The open database, or NULL. Borrowed — do not keep it across an upload. */
-const FsdCamDb* camera_store_db(void);
+/** Borrow the open database for ONE bounded read burst.
+ *
+ *  Takes an internal lock and holds it until the matching release. Returns NULL
+ *  — with the lock already given back — when there is no usable database or the
+ *  wait expired, so the contract is exactly:
+ *
+ *      const FsdCamDb* db = camera_store_db_acquire(10);
+ *      ... reads ...
+ *      if(db) camera_store_db_release();
+ *
+ *  Release if and only if it returned non-NULL. There is no hidden ownership
+ *  flag to get out of step with.
+ *
+ *  Do NOT cache the pointer across calls. close_db() clears FsdCamDb.ok, which
+ *  is the only self-check fsd_cam_near() makes, so a stale borrow degrades to
+ *  "no cameras anywhere" — quiet, plausible, and wrong. */
+const FsdCamDb* camera_store_db_acquire(uint32_t wait_ms);
+void camera_store_db_release(void);
 
 /** How many cameras are loaded (0 when none). */
 uint32_t camera_store_count(void);

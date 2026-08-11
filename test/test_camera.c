@@ -1156,6 +1156,152 @@ static void test_end_to_end(void) {
           "the pass was recorded for next time");
 }
 
+// ── what the firmware wiring leans on ────────────────────────────────────────
+// camera_task.cpp calls fsd_pol_abandon() on EVERY tick that refuses, which is
+// most of them when a fix is missing. That is only safe because abandon does not
+// spend the drive's budgets — true today by reading the code, and nothing else
+// stops a future edit from adding a budget reset there and silently defeating
+// FSD_POL_MAX_OVERRIDES. These assertions are what would notice.
+
+static void test_abandon_is_cheap_to_repeat(void) {
+    printf("\n-- abandon: drops the request, keeps the budgets --\n");
+
+    FsdPolicy p;
+    fsd_pol_init(&p);
+    fsd_pol_new_drive(&p);
+
+    // Spend one override so there is a budget to lose.
+    engage(&p, FSD_POL_PROFILE_HURRY);
+    fsd_pol_observe_profile(&p, FSD_POL_PROFILE_HURRY);
+    fsd_pol_observe_profile(&p, FSD_POL_PROFILE_CHILL);
+    CHECK(fsd_pol_observe_profile(&p, FSD_POL_PROFILE_HURRY), "one override spent");
+    const uint8_t spent = p.overrides;
+    CHECK(spent == 1, "overrides = %u", (unsigned)spent);
+
+    engage(&p, FSD_POL_PROFILE_HURRY);
+    CHECK(p.phase == FSD_POL_ACTIVE, "engaged again");
+
+    // The call the firmware makes on a refused tick.
+    for (int i = 0; i < 5; i++) fsd_pol_abandon(&p);
+
+    CHECK(p.phase == FSD_POL_IDLE, "phase cleared");
+    CHECK(!p.entry_valid, "entry profile forgotten");
+    CHECK(!p.has_target, "target dropped");
+    CHECK(!p.requested_valid, "request dropped");
+    CHECK(p.overrides == spent, "overrides untouched: %u", (unsigned)p.overrides);
+    CHECK(p.failures == 0, "failures untouched");
+    CHECK(!p.suspended, "suspension untouched");
+
+    // And the entry profile is recaptured from the CURRENT car, not restored
+    // from what it was before the refusal — the driver may have moved it while
+    // we were blind.
+    FsdPolTarget tg = target(9, 30, 50.0f);
+    FsdPolDecision d =
+        fsd_pol_tick(&p, &tg, FSD_POL_PROFILE_CHILL, 60.0f, 20.0f, 1.0f);
+    CHECK(d.action == FSD_POL_ACT_LOWER, "engages again after abandon");
+    CHECK(p.entry_profile == FSD_POL_PROFILE_CHILL,
+          "entry recaptured from the car now (%u), not from before",
+          (unsigned)p.entry_profile);
+}
+
+static void test_policy_out_of_range_readback(void) {
+    printf("\n-- an out-of-range read-back would defeat the clamp --\n");
+
+    // HW4 carries three bits, and a wrong mux or a wrong car decodes above
+    // Hurry. lower_only() compares the request against the observed value, and
+    // a request is never above 3 — so an observed 5 makes every clamp inert and
+    // the policy would happily RAISE the car next to a camera.
+    //
+    // This pins the reason camera_task_observe_profile() refuses to store such a
+    // value, which would otherwise live only in a comment.
+    FsdPolicy p;
+    fsd_pol_init(&p);
+    FsdPolTarget tg = target(1, 60, 50.0f);
+    FsdPolDecision d = fsd_pol_tick(&p, &tg, 5, 60.0f, 20.0f, 1.0f);
+    CHECK(d.action == FSD_POL_ACT_LOWER, "it does engage");
+    CHECK(d.target_profile == FSD_POL_PROFILE_STANDARD,
+          "and asks for Standard (%u) — above an observed 5 the clamp does nothing",
+          (unsigned)d.target_profile);
+}
+
+static void test_trk_reset_active(void) {
+    printf("\n-- reset_active: a gap must not forge a pass --\n");
+
+    FsdCamDb db;
+    MemSrc src = make_src();
+    fsd_cam_open(&db, mem_read, &src);
+
+    // Learn something first, so we can prove the reset does not touch it.
+    FsdTracker t;
+    fsd_trk_init(&t);
+    for (int i = 0; i < FSD_TRK_MIN_PASSES; i++) drive_past(&t, &db, 3.0, NULL);
+    FsdCamRecord seoul = {375000000, 1270000000, 30, 0};
+    const uint64_t key = fsd_trk_key(&seoul);
+    bool learned = false;
+    const float limit_before = fsd_trk_cpa_limit(&t, key, 0.0f, &learned);
+    CHECK(learned, "learning is in place before the reset");
+    const uint16_t passes_before = fsd_trk_passes(&t, key, 0.0f);
+
+    // Open a track, then reset.
+    FsdTrkEvent ev[4];
+    FsdCamFix f = at(37.5 - 400.0 / 111320.0, 127.0 + 3.0 / 88000.0, 0.0f, 72.0f);
+    fsd_trk_update(&t, &db, &f, ev, 4);
+    bool any_active = false;
+    for (int i = 0; i < FSD_TRK_ACTIVE_MAX; i++)
+        if (t.active[i].used) any_active = true;
+    CHECK(any_active, "a camera is being followed");
+
+    const bool dirty_before = t.dirty;
+    fsd_trk_reset_active(&t);
+    for (int i = 0; i < FSD_TRK_ACTIVE_MAX; i++)
+        CHECK(!t.active[i].used, "active[%d] cleared", i);
+    CHECK(t.dirty == dirty_before, "dirty untouched");
+    CHECK(fsd_trk_passes(&t, key, 0.0f) == passes_before, "pass count untouched");
+    bool learned2 = false;
+    CHECK(NEAR(fsd_trk_cpa_limit(&t, key, 0.0f, &learned2), limit_before, 0.001f) &&
+              learned2,
+          "the learned limit survives");
+}
+
+static void test_gap_forges_a_pass_without_a_reset(void) {
+    printf("\n-- the gap this exists for --\n");
+
+    FsdCamDb db;
+    MemSrc src = make_src();
+    fsd_cam_open(&db, mem_read, &src);
+
+    // Approach the Seoul camera, then jump 3 km up the same meridian — a tunnel,
+    // a reboot, a spell of refused fixes. The interpolation draws ONE chord
+    // across the whole gap, and that chord runs straight over the camera.
+    FsdTrkEvent ev[4];
+    FsdTracker t;
+    fsd_trk_init(&t);
+
+    FsdCamFix a = at(37.5 - 400.0 / 111320.0, 127.0 + 3.0 / 88000.0, 0.0f, 72.0f);
+    fsd_trk_update(&t, &db, &a, ev, 4);
+
+    FsdCamFix b = at(37.5 + 3000.0 / 111320.0, 127.0 + 3.0 / 88000.0, 0.0f, 72.0f);
+    int n = fsd_trk_update(&t, &db, &b, ev, 4);
+    bool forged = false;
+    for (int i = 0; i < n; i++)
+        if (ev[i].kind == FSD_TRK_PASS && ev[i].cam.lat_e7 == 375000000) forged = true;
+    // Documents the CURRENT behaviour, which is why the reset is needed. A car
+    // that was never there gets a pass recorded, and the pass NARROWS the limit.
+    CHECK(forged, "without a reset the gap is recorded as a pass");
+
+    // With the reset the track is gone, and at 3 km the camera is far outside
+    // FSD_TRK_SCAN_RADIUS_M, so nothing is picked up and nothing is learned.
+    fsd_trk_init(&t);
+    fsd_trk_update(&t, &db, &a, ev, 4);
+    fsd_trk_reset_active(&t);
+    n = fsd_trk_update(&t, &db, &b, ev, 4);
+    bool still = false;
+    for (int i = 0; i < n; i++)
+        if (ev[i].kind == FSD_TRK_PASS) still = true;
+    CHECK(!still, "with a reset the gap produces no pass");
+    CHECK(!t.dirty, "and nothing was learned from it");
+}
+
 // ── the chain, from CAN bytes ────────────────────────────────────────────────
 // Every test above starts from a hand-built FsdCamFix, which is fine for the
 // geometry but leaves the one question that actually blocked this feature
@@ -1267,6 +1413,10 @@ int main(void) {
     test_entry_does_not_survive_a_drive();
     test_end_to_end();
     test_gps_feeds_the_tracker();
+    test_abandon_is_cheap_to_repeat();
+    test_policy_out_of_range_readback();
+    test_trk_reset_active();
+    test_gap_forges_a_pass_without_a_reset();
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }

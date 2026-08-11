@@ -11,6 +11,11 @@
 
 #include <Arduino.h>
 #include <LittleFS.h>
+// Explicit rather than inherited through Arduino.h: this file's correctness now
+// depends on the mutex existing, and an include that arrives by accident is one
+// framework bump away from not arriving.
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 
 #define CAM_PATH "/camera.bin"
 #define CAM_TMP "/camera.tmp"
@@ -21,6 +26,17 @@ static bool g_fs_ok = false;
 static File g_db_file;    // held open so lookups are just seek + read
 static FsdCamDb g_db;
 static bool g_db_ok = false;
+
+/* Guards g_db_file and g_db against the two tasks that reach them: the upload
+ * path on the NimBLE host task and the judgement path on the loop task. A mutex
+ * rather than a binary semaphore, because the two tasks run at different
+ * priorities and this one wants priority inheritance. */
+static SemaphoreHandle_t g_db_lock = nullptr;
+
+/* Set while learning is being written. Both files live on the same LittleFS, and
+ * an upload arriving mid-save would interleave a multi-megabyte write with a
+ * rename; the upload is the one that can be told to come back later. */
+static volatile bool g_saving = false;
 
 static File g_up_file;
 static bool g_up_active = false;
@@ -54,6 +70,11 @@ static size_t db_read(void* ctx, uint32_t offset, void* buf, size_t len) {
 static void close_db() {
     if(g_db_file) g_db_file.close();
     g_db_ok = false;
+    /* Clear the struct's own flag too, not just ours. fsd_cam_near() checks
+     * db->ok once on entry (fsd_camera.c) and nothing else; a borrow that
+     * somehow outlived a close would otherwise go on seeking a released File
+     * instead of returning "no cameras". */
+    g_db.ok = false;
 }
 
 static bool open_db() {
@@ -70,6 +91,12 @@ static bool open_db() {
 }
 
 void camera_store_init(void) {
+    if(!g_db_lock) g_db_lock = xSemaphoreCreateMutex();
+    if(!g_db_lock) {
+        Serial.println("[CAM] mutex alloc failed — database disabled");
+        return; // g_fs_ok stays false: no lock, no shared file
+    }
+
     // begin(true) formats on failure. blackbox_init() usually mounts first;
     // calling again is harmless and removes the ordering dependency.
     g_fs_ok = LittleFS.begin(true);
@@ -79,6 +106,19 @@ void camera_store_init(void) {
     }
     // A leftover temp file means a previous upload died. It is not a database.
     if(LittleFS.exists(CAM_TMP)) LittleFS.remove(CAM_TMP);
+
+    /* Learning gets the opposite treatment, because it is not interchangeable
+     * with the database. learn.tmp is only ever a COMPLETE, CRC-covered file
+     * that was written and closed successfully — the save path removes it on
+     * any write failure — so a learn.tmp with no learn.bin means power vanished
+     * in the gap between the remove and the rename. That gap is a real hazard
+     * here: the accessory feed is switched and dies without warning. Finishing
+     * the rename recovers the whole file; deleting it would throw away every
+     * pass ever recorded. fsd_trk_load() still has to accept it. */
+    if(!LittleFS.exists(LEARN_PATH) && LittleFS.exists(LEARN_TMP)) {
+        if(LittleFS.rename(LEARN_TMP, LEARN_PATH))
+            Serial.println("[CAM] recovered learning from an interrupted save");
+    }
 
     if(open_db()) {
         Serial.printf("[CAM] %u cameras loaded (%u cells)\n",
@@ -92,8 +132,18 @@ bool camera_store_ready(void) {
     return g_db_ok && !g_up_active;
 }
 
-const FsdCamDb* camera_store_db(void) {
-    return camera_store_ready() ? &g_db : nullptr;
+const FsdCamDb* camera_store_db_acquire(uint32_t wait_ms) {
+    if(!g_db_lock) return nullptr;
+    if(xSemaphoreTake(g_db_lock, pdMS_TO_TICKS(wait_ms)) != pdTRUE) return nullptr;
+    if(!camera_store_ready()) {
+        xSemaphoreGive(g_db_lock); // give it straight back: nothing to borrow
+        return nullptr;
+    }
+    return &g_db;
+}
+
+void camera_store_db_release(void) {
+    if(g_db_lock) xSemaphoreGive(g_db_lock);
 }
 
 uint32_t camera_store_count(void) {
@@ -110,11 +160,17 @@ uint32_t camera_store_upload_progress(void) {
 
 uint8_t camera_store_upload_begin(uint32_t total) {
     if(g_up_active) return CAM_UP_BUSY;
+    if(g_saving) return CAM_UP_BUSY; // learning is being written to the same FS
     if(!g_fs_ok) return CAM_UP_NO_FS;
     if(total < FSD_CAM_HEADER_SIZE || total > CAM_MAX_BYTES) return CAM_UP_TOO_BIG;
 
-    // Stop serving lookups from a file we are about to replace.
+    // Stop serving lookups from a file we are about to replace. Under the lock:
+    // a lookup may be mid-read on the other task.
+    if(!g_db_lock) return CAM_UP_NO_FS;
+    if(xSemaphoreTake(g_db_lock, pdMS_TO_TICKS(200)) != pdTRUE) return CAM_UP_BUSY;
     close_db();
+    xSemaphoreGive(g_db_lock);
+
     LittleFS.remove(CAM_TMP);
     g_up_file = LittleFS.open(CAM_TMP, "w");
     if(!g_up_file) return CAM_UP_WRITE_FAIL;
@@ -130,6 +186,7 @@ uint8_t camera_store_upload_begin(uint32_t total) {
 
 uint8_t camera_store_upload_chunk(uint16_t seq, const uint8_t* data, size_t len) {
     if(!g_up_active) return CAM_UP_NOT_ACTIVE;
+    if(g_saving) return CAM_UP_BUSY;
     if(!data || len == 0) return CAM_UP_OK; // nothing to do, not an error
     // A gap would leave a hole we could never see again. Refuse and let the
     // app restart rather than storing a database with invisible damage.
@@ -191,9 +248,14 @@ uint8_t camera_store_upload_end(void) {
         }
     }
 
+    // Everything past here reopens the database, so it runs under the lock.
+    if(!g_db_lock) return CAM_UP_NO_FS;
+    if(xSemaphoreTake(g_db_lock, pdMS_TO_TICKS(200)) != pdTRUE) return CAM_UP_BUSY;
+
     if(err != CAM_UP_OK) {
         LittleFS.remove(CAM_TMP);
         open_db(); // put the previous database back into service
+        xSemaphoreGive(g_db_lock);
         Serial.printf("[CAM] upload rejected (%u)\n", err);
         return err;
     }
@@ -202,10 +264,13 @@ uint8_t camera_store_upload_end(void) {
     LittleFS.remove(CAM_PATH);
     if(!LittleFS.rename(CAM_TMP, CAM_PATH)) {
         LittleFS.remove(CAM_TMP);
+        xSemaphoreGive(g_db_lock);
         Serial.println("[CAM] rename failed — no database now");
         return CAM_UP_WRITE_FAIL;
     }
-    if(!open_db()) return CAM_UP_BAD_FORMAT;
+    bool opened = open_db();
+    xSemaphoreGive(g_db_lock);
+    if(!opened) return CAM_UP_BAD_FORMAT;
     Serial.printf("[CAM] upload OK — %u cameras\n", (unsigned)g_db.rec_count);
     return CAM_UP_OK;
 }
@@ -251,37 +316,62 @@ bool camera_store_load_learning(FsdTracker* t) {
 bool camera_store_save_learning(FsdTracker* t) {
     if(!t || !g_fs_ok) return false;
 
+    /* Announced for the whole call so an upload arriving on the other task is
+     * told to come back rather than interleaving with the rename below. */
+    g_saving = true;
+
     /* Same atomic replacement the database gets. A power cut mid-write must
      * leave the previous learning intact, not a truncated file that fails its
      * CRC and throws away every pass ever recorded. */
     LittleFS.remove(LEARN_TMP);
     File f = LittleFS.open(LEARN_TMP, "w");
-    if(!f) return false;
+    if(!f) { g_saving = false; return false; }
     bool ok = fsd_trk_save(t, learn_write, &f);
     f.close();
     if(!ok) {
         LittleFS.remove(LEARN_TMP);
         Serial.println("[CAM] learning write failed");
+        g_saving = false;
         return false;
     }
 
+    /* The gap. Between these two calls there is no learn.bin, only a complete
+     * learn.tmp — which is why camera_store_init() finishes the rename instead
+     * of deleting the leftover. */
     LittleFS.remove(LEARN_PATH); // rename() will not overwrite
     if(!LittleFS.rename(LEARN_TMP, LEARN_PATH)) {
-        LittleFS.remove(LEARN_TMP);
-        Serial.println("[CAM] learning rename failed");
+        /* Leave learn.tmp in place: it is the only complete copy left, and boot
+         * recovery will pick it up. Removing it here would turn a failed rename
+         * into permanent loss. */
+        Serial.println("[CAM] learning rename failed — tmp kept for recovery");
+        g_saving = false;
         return false;
     }
     t->dirty = false; // only now: the bytes are actually in place
+    g_saving = false;
     return true;
 }
 
 void camera_store_upload_abort(void) {
+    /* The load-bearing line. This is called from ServerCB::onDisconnect, so it
+     * runs on EVERY ordinary disconnect — the phone leaving, the app going to
+     * the background — not only when an upload is actually in flight. Without
+     * this it fell through to open_db() every time, closing the database file
+     * out from under a lookup running on the loop task and memsetting the
+     * FsdCamDb that lookup was reading. With nothing to abort there is nothing
+     * to do, and doing nothing touches no shared state at all. */
+    if(!g_up_active && !LittleFS.exists(CAM_TMP)) return;
+
     if(g_up_file) g_up_file.close();
     if(g_up_active) Serial.println("[CAM] upload aborted");
     g_up_active = false;
     g_up_written = 0;
     LittleFS.remove(CAM_TMP);
+
+    if(!g_db_lock) return;
+    if(xSemaphoreTake(g_db_lock, pdMS_TO_TICKS(200)) != pdTRUE) return; // skip the reopen
     open_db();
+    xSemaphoreGive(g_db_lock);
 }
 
 #endif  // BLE_SERVER_ENABLED
