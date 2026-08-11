@@ -33,13 +33,21 @@ GPS_SRC := test_gps.c $(ROOT)/fsd_logic/fsd_gps.c $(ROOT)/fsd_logic/fsd_camera.c
 test_gps: $(GPS_SRC) $(ROOT)/fsd_logic/fsd_gps.h $(ROOT)/fsd_logic/fsd_camera.h
 	$(CC) $(CFLAGS) -I$(ROOT)/fsd_logic $(GPS_SRC) -o $@ -lm
 
-check: test_fsd_core test_speed_profile test_camera test_gps
+# Body control: the authority axis plus the T1/T2 detectors. Standalone — none
+# of these files constructs a CAN frame, so there is nothing to link but them.
+BODY_SRC := test_body.c $(ROOT)/fsd_logic/fsd_body.c $(ROOT)/fsd_logic/fsd_body_t1.c $(ROOT)/fsd_logic/fsd_body_t2.c
+
+test_body: $(BODY_SRC) $(ROOT)/fsd_logic/fsd_body.h $(ROOT)/fsd_logic/fsd_body_t1.h $(ROOT)/fsd_logic/fsd_body_t2.h $(ROOT)/fsd_logic/fsd_autonomy.h
+	$(CC) $(CFLAGS) -I$(ROOT)/fsd_logic $(BODY_SRC) -o $@
+
+check: test_fsd_core test_speed_profile test_camera test_gps test_body
 	./test_fsd_core
 	./test_speed_profile
 	./test_camera
 	./test_gps
+	./test_body
 
 clean:
-	rm -rf test_fsd_core test_speed_profile test_camera test_gps *.dSYM
+	rm -rf test_fsd_core test_speed_profile test_camera test_gps test_body *.dSYM
 
 .PHONY: check clean
