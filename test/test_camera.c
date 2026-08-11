@@ -27,6 +27,7 @@
 #include "fsd_cam_policy.h"
 #include "fsd_cam_track.h"
 #include "fsd_camera.h"
+#include "fsd_gps.h"
 #include "fsd_speed_profile.h"
 
 static int g_pass = 0;
@@ -1155,6 +1156,90 @@ static void test_end_to_end(void) {
           "the pass was recorded for next time");
 }
 
+// ── the chain, from CAN bytes ────────────────────────────────────────────────
+// Every test above starts from a hand-built FsdCamFix, which is fine for the
+// geometry but leaves the one question that actually blocked this feature
+// unanswered: nothing had ever PRODUCED a fix, so the tracker, the learning
+// store and the policy were all unreachable on a car. This drive starts from
+// raw 0x3D8 / 0x2F8 / 0x257 frames instead.
+
+static void gps_pos_frame(uint8_t* d, double lat_deg, double lon_deg) {
+    const uint64_t lat = (uint64_t)((uint32_t)(int32_t)llround(lat_deg * 1e6) & 0x0FFFFFFFu);
+    const uint64_t lon = (uint64_t)((uint32_t)(int32_t)llround(lon_deg * 1e6) & 0x1FFFFFFFu);
+    const uint64_t w = lat | (lon << 28) | ((uint64_t)15u << 57); // 3.0 m accuracy
+    for (int i = 0; i < 8; i++) d[i] = (uint8_t)((w >> (8 * i)) & 0xFFu);
+}
+
+static void gps_vel_frame(uint8_t* d, float heading_deg, float kph) {
+    const uint16_t h = (uint16_t)lrintf(heading_deg / 0.0078125f);
+    const uint16_t s = (uint16_t)lrintf(kph / 0.00390625f);
+    memset(d, 0, 8);
+    d[0] = 10; // HDOP 1.0
+    d[1] = (uint8_t)(h & 0xFFu);
+    d[2] = (uint8_t)(h >> 8);
+    d[3] = (uint8_t)(s & 0xFFu);
+    d[4] = (uint8_t)(s >> 8);
+}
+
+static void di_speed_frame(uint8_t* d, float kph) {
+    const uint16_t raw = (uint16_t)lrintf((kph + 40.0f) / 0.08f);
+    memset(d, 0, 8);
+    d[1] = (uint8_t)((raw & 0x0Fu) << 4);
+    d[2] = (uint8_t)(raw >> 4);
+}
+
+static void test_gps_feeds_the_tracker(void) {
+    printf("\n-- the chain: CAN bytes -> fix -> tracker -> learning --\n");
+
+    FsdCamDb db;
+    MemSrc src = make_src();
+    CHECK(fsd_cam_open(&db, mem_read, &src), "database opens");
+
+    FsdTracker t;
+    FsdGps g;
+    fsd_trk_init(&t);
+    fsd_gps_init(&g);
+
+    // North along the 127.0 meridian past the Seoul camera at 37.5, 3 m to the
+    // side — our own lane. Same geometry as drive_past(), but the fixes come
+    // out of the decoder rather than being written by hand.
+    bool approached = false, passed = false;
+    int fixes = 0, pass_count = 0;
+    uint32_t now = 1000;
+    for (int m = -410; m <= 210; m += 20, now += 1000) {
+        uint8_t d[8];
+        gps_pos_frame(d, 37.5 + (double)m / 111320.0, 127.0 + 3.0 / 88000.0);
+        fsd_gps_observe_position(&g, d, 8, now);
+        gps_vel_frame(d, 0.0f, 72.0f);
+        fsd_gps_observe_velocity(&g, d, 8, now);
+        di_speed_frame(d, 72.0f);
+        fsd_gps_observe_di_speed(&g, d, 8, now);
+
+        FsdCamFix f;
+        if (!fsd_gps_fix(&g, now, &f)) continue;
+        fixes++;
+
+        FsdTrkEvent ev[4];
+        const int n = fsd_trk_update(&t, &db, &f, ev, 4);
+        for (int i = 0; i < n; i++) {
+            if (ev[i].cam.lat_e7 != 375000000 || ev[i].cam.lon_e7 != 1270000000) continue;
+            if (ev[i].kind == FSD_TRK_APPROACH) approached = true;
+            if (ev[i].kind == FSD_TRK_PASS) {
+                passed = true;
+                pass_count = (int)ev[i].passes;
+            }
+        }
+    }
+
+    CHECK(fixes >= 30, "the decoder produced usable fixes, got %d", fixes);
+    CHECK(approached, "the camera was picked up from decoded frames");
+    CHECK(passed, "and the pass was measured");
+    CHECK(pass_count == 1, "one drive past is one pass, got %d", pass_count);
+    // The point of the whole exercise: learning now has something to persist.
+    // Before this producer existed, `dirty` could never become true on a car.
+    CHECK(t.dirty, "the pass reached the learning store");
+}
+
 int main(void) {
     printf("test_camera\n");
     test_open();
@@ -1181,6 +1266,7 @@ int main(void) {
     test_session_budgets();
     test_entry_does_not_survive_a_drive();
     test_end_to_end();
+    test_gps_feeds_the_tracker();
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }
