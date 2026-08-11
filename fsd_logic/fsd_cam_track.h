@@ -189,6 +189,41 @@ bool fsd_trk_nearest(const FsdTracker* t, FsdCamRecord* cam_out, uint64_t* key_o
 /** Passes recorded for a camera in this direction (0 when unknown). */
 uint16_t fsd_trk_passes(const FsdTracker* t, uint64_t key, float bearing_deg);
 
+// ── persistence ──────────────────────────────────────────────────────────────
+// Learning that does not survive a power cycle is decorative: the car sleeps
+// between every drive, so every drive would start back at the wide default and
+// warn on the opposite carriageway again. The value of this layer is entirely
+// in the repetition, which means it has to be written down.
+//
+// Streamed through callbacks rather than a buffer, for the same reason the
+// database reader is: a few kilobytes of scratch is a lot on this part, and the
+// firmware wants to go straight to a file. Values are stored as fixed-point
+// integers so no float layout assumption crosses the wire — closest approaches
+// in centimetres, headings in hundredths of a degree.
+
+#define FSD_TRK_MAGIC 0x4E524C54u /* "TLRN" little-endian */
+#define FSD_TRK_FORMAT_VERSION 1u
+#define FSD_TRK_HEADER_SIZE 16u
+#define FSD_TRK_REC_SIZE (8u + (2u + 2u + 1u + 1u + 2u * FSD_TRK_SAMPLES) * FSD_TRK_DIRS)
+
+/** Returns bytes actually written; anything short is a failure. */
+typedef size_t (*FsdTrkWriteFn)(void* ctx, const void* buf, size_t len);
+/** Returns bytes actually read; anything short ends the load. */
+typedef size_t (*FsdTrkReadFn)(void* ctx, void* buf, size_t len);
+
+/** Write the learning out. Only cameras that have actually been passed are
+ *  stored, so a fresh module writes a 20-byte file rather than 7 KB of zeros.
+ *  Does not clear `dirty` — the caller owns that, because only the caller knows
+ *  whether the bytes reached the flash. */
+bool fsd_trk_save(const FsdTracker* t, FsdTrkWriteFn write, void* ctx);
+
+/** Read it back, replacing whatever is in `t`. On ANY problem — bad magic,
+ *  wrong version, geometry from a different build, truncation, CRC mismatch —
+ *  the tracker is left empty rather than half-filled. Starting over is cheap;
+ *  trusting a corrupt limit is not, because a too-narrow one silently stops
+ *  warning about a camera that is genuinely ours. */
+bool fsd_trk_load(FsdTracker* t, FsdTrkReadFn read, void* ctx);
+
 #ifdef __cplusplus
 }
 #endif

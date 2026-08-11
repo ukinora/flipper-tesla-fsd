@@ -10,6 +10,10 @@
 
 #include "fsd_speed_profile.h"
 
+// Header-only inline (tesla_read_mux); adds no translation unit, so this file
+// still links on its own.
+#include "fsd_can_ops.h"
+
 #include <string.h>
 
 // Provisional. `verified = false` is what actually gates transmission — see
@@ -125,6 +129,23 @@ FsdSpError fsd_sp_request(FsdSpeedProfile* sp, const FsdSpInputs* in,
         sp->phase = FSD_SP_STEP;
     }
     return FSD_SP_OK;
+}
+
+bool fsd_sp_decode_profile(const uint8_t* data, uint8_t dlc, bool hw4, uint8_t* out) {
+    if(!data || !out || dlc == 0) return false;
+
+    // Mux is byte 0 bits [2:0] — same accessor the write path uses, and it is a
+    // header-only inline, so this file stays standalone (see test/Makefile).
+    uint8_t mux = tesla_read_mux(data);
+
+    if(hw4) {
+        if(mux != 2u || dlc < 8u) return false;
+        *out = (uint8_t)((data[7] >> 5) & 0x07u);
+        return true;
+    }
+    if(mux != 0u || dlc < 7u) return false;
+    *out = (uint8_t)((data[6] >> 1) & 0x03u);
+    return true;
 }
 
 void fsd_sp_observe(FsdSpeedProfile* sp, uint8_t profile, uint32_t now_ms) {

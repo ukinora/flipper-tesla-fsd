@@ -17,6 +17,7 @@
  * afterwards, so a lookup never reads a file that is being replaced.
  */
 
+#include "../../fsd_logic/fsd_cam_track.h"
 #include "../../fsd_logic/fsd_camera.h"
 
 #include <stdbool.h>
@@ -72,3 +73,18 @@ bool camera_store_uploading(void);
 
 /** Bytes received so far — for progress reporting. */
 uint32_t camera_store_upload_progress(void);
+
+// ── Learned lane discrimination (fsd_cam_track.h) ───────────────────────────
+// Kept next to the database because it is the same kind of thing: a file the
+// judgement core needs and cannot rebuild by itself. Without it the module
+// forgets every pass when the car sleeps, so each drive restarts at the wide
+// default limit and warns on the opposite carriageway all over again.
+
+/** Read learning back at boot. Leaves the tracker empty when there is no file
+ *  or it does not check out — see fsd_trk_load(). */
+bool camera_store_load_learning(FsdTracker* t);
+
+/** Write it out, atomically. Cheap enough to call at the end of a drive; do not
+ *  call it on every pass, since it rewrites the whole file. Clears t->dirty
+ *  only when the bytes are actually in place. */
+bool camera_store_save_learning(FsdTracker* t);

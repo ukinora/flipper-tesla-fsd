@@ -168,6 +168,25 @@ bool fsd_sp_encoding_ok(const FsdSpEncoding* e);
 FsdSpError fsd_sp_request(FsdSpeedProfile* sp, const FsdSpInputs* in,
                           uint8_t target, uint32_t now_ms);
 
+/** Pull the speed profile out of a 0x3FD DAS_autopilotControl frame.
+ *
+ *  This is not guesswork and never needed a capture: the WRITE path in
+ *  fsd_handler.c has been putting the value in these exact bits for as long as
+ *  the project has existed, so reading the same bits is symmetric with code
+ *  that is already known to work on this car.
+ *
+ *    HW3   mux 0, byte 6 bits [2:1]  (2 bits, 0..3)
+ *    HW4   mux 2, byte 7 bits [7:5]  (3 bits, 0..7)
+ *
+ *  What DOES need measuring is which value carries which name (is 0 Sloth?)
+ *  and which scroll direction raises it. Neither is needed here: the
+ *  convergence loop only compares values, and the direction lives in
+ *  FsdSpEncoding behind its own `verified` flag.
+ *
+ *  Returns false — leaving *out untouched — when the frame is the wrong mux or
+ *  too short to hold the field. */
+bool fsd_sp_decode_profile(const uint8_t* data, uint8_t dlc, bool hw4, uint8_t* out);
+
 /** Feed a profile value decoded from 0x3FD. Cheap; call on every frame. */
 void fsd_sp_observe(FsdSpeedProfile* sp, uint8_t profile, uint32_t now_ms);
 
