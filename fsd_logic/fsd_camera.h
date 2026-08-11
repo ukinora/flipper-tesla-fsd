@@ -66,6 +66,17 @@ typedef struct {
     uint32_t rec_count;
     uint32_t rec_offset; // byte offset of the record array
     uint32_t crc;
+    /* Unix seconds when pack.py built the file; 0 when unknown.
+     *
+     * A stale database fails quietly. Warning at a camera that was removed is
+     * the safe direction, but a database for the wrong region finds nothing at
+     * all and is indistinguishable from working correctly. The source data is
+     * republished twice a year, so age has to be visible.
+     *
+     * Written into what used to be reserved bytes, WITHOUT a version bump: the
+     * reader below never looked past byte 25, so old firmware ignores it and
+     * new firmware reads an old file as 0 — which is exactly true. */
+    uint32_t built_at;
     bool ok;
 } FsdCamDb;
 

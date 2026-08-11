@@ -40,7 +40,30 @@
 #define BLE_CMD_DUMP_STOP    0x31u
 #define BLE_CMD_UPLOAD_ABORT 0x33u  // give up on an in-flight camera.bin upload
 #define BLE_CMD_CAP_RECHECK  0x40u  // re-run the capability listen window
+#define BLE_CMD_SET_AUTONOMY 0x41u  // arg: 0/1 — operator intent, persisted
 #define BLE_CMD_PING         0x50u
+
+// ── Camera / autonomy status (read + notify) ─────────────────────────────────
+// A separate characteristic rather than more bytes in State: State is a fixed
+// 20 and full, and widening it would bump the wire version for every client.
+//
+// It reports ONLY what the firmware actually knows today. The tracker and
+// policy are compiled but not instantiated — nothing feeds them a position yet
+// — so their fields are absent rather than present-and-always-zero. Sending a
+// zero that means "not implemented" is indistinguishable from a real zero, and
+// this project has already been bitten by exactly that (di_cruise_state and the
+// blinker flags were structurally zero on this build for months).
+//
+//   [0]     protocol version
+//   [1]     flags: bit0 autonomy enabled (operator intent, persisted)
+//                  bit1 supervised drive right now
+//                  bit2 camera database loaded
+//   [2]     FsdSupVerdict — which gate is refusing (0 = none)
+//   [3]     OpMode
+//   [4..7]  cameras in the database, LE32
+//   [8..11] database build time, Unix seconds LE32 (0 = unknown/old file)
+#define BLE_CAMSTAT_LEN 12u
+#define BLE_CAMSTAT_PERIOD_MS 1000u
 
 // ── Result codes (Result characteristic, byte 1) ─────────────────────────────
 #define BLE_RES_OK          0u

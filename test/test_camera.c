@@ -90,6 +90,26 @@ static void test_open(void) {
     CHECK(db.rec_count == 4, "records=%u exp 4", db.rec_count);
     CHECK(db.rec_offset == 32 + 2 * FSD_CAM_CELL_SIZE,
           "rec_offset=%u exp %u", db.rec_offset, 32 + 2 * FSD_CAM_CELL_SIZE);
+
+    // built_at went into what used to be reserved bytes, with NO version bump.
+    // This fixture predates the field, so reading it must give 0 — "unknown",
+    // which is exactly true — rather than failing to open or reporting noise.
+    CHECK(db.built_at == 0, "pre-timestamp file reads as unknown, got %u",
+          db.built_at);
+
+    // And a file that does carry one is read back intact. Written at offset 26,
+    // so every byte an older reader looks at is untouched.
+    unsigned char stamped[sizeof(FIXTURE)];
+    memcpy(stamped, FIXTURE, sizeof(stamped));
+    const uint32_t WHEN = 1754870400u;
+    for (int i = 0; i < 4; i++)
+        stamped[26 + i] = (unsigned char)((WHEN >> (8 * i)) & 0xFFu);
+    MemSrc s2 = {stamped, sizeof(stamped), 0};
+    FsdCamDb db2;
+    CHECK(fsd_cam_open(&db2, mem_read, &s2), "stamped file still opens");
+    CHECK(db2.built_at == WHEN, "built_at=%u exp %u", db2.built_at, WHEN);
+    CHECK(db2.crc == db.crc && db2.rec_count == db.rec_count,
+          "the fields an older reader uses are unchanged");
 }
 
 static void test_open_rejects_garbage(void) {

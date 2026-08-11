@@ -105,6 +105,29 @@ bool fsd_supervised_drive(const FSDState* state, uint32_t now_ms);
 /** Human-readable verdict, for logs and the BLE Result characteristic. */
 const char* fsd_sup_verdict_str(FsdSupVerdict v);
 
+// ── operating mode floor ─────────────────────────────────────────────────────
+
+/** The lowest mode this module may sit in when nothing else has raised it.
+ *
+ *  Used in two places that used to hardcode Listen-Only: the boot default, and
+ *  the point where a dropped BLE link hands Active back. Both now land on
+ *  Autonomous when the operator has enabled it, which is what "the module keeps
+ *  working when the phone is left behind" actually means in code.
+ *
+ *  Falling to Autonomous is not a weakening of either guard. It grants no
+ *  general TX — fsd_can_transmit() is false there — and the camera path still
+ *  has to satisfy fsd_supervised_drive(). A car sitting in a garage at 3 a.m.
+ *  reaches exactly the same place it did before: unable to transmit anything. */
+OpMode fsd_autonomy_floor(const FSDState* state);
+
+/** The camera path's only door. Everything it needs, in one predicate:
+ *  the operator enabled it, the mode allows it, and a person is driving.
+ *
+ *  Active is accepted alongside Autonomous so a phone-connected drive behaves
+ *  the same way — otherwise connecting the app would silently switch the
+ *  feature off, which is the opposite of what a user would expect. */
+bool fsd_autonomy_allows(const FSDState* state, uint32_t now_ms);
+
 #ifdef __cplusplus
 }
 #endif

@@ -29,6 +29,15 @@ void fsd_drive_observe_gear(FSDState* state, const CANFRAME* frame, uint32_t now
     state->di_gear = (uint8_t)((frame->buffer[GEAR_BYTE] >> GEAR_SHIFT) & GEAR_MASK);
     state->di_gear_ms = now_ms;
     state->di_gear_seen = true;
+
+    /* DI_cruiseState, bit 12|3 little-endian -> byte 1 bits [6:4].
+     *
+     * Not needed by the gate. It is here because on the ESP32 this is the ONLY
+     * parser for 0x286 — that build does not compile fsd_logic/fsd_handler.c —
+     * so di_cruise_state has been going out over BLE as a structural zero.
+     * A field that is always zero for a reason nobody can see costs more to
+     * debug later than it costs to fill now. */
+    if(frame->data_lenght > 1) state->di_cruise_state = (frame->buffer[1] >> 4) & 0x07u;
 }
 
 void fsd_drive_observe_belt(FSDState* state, const CANFRAME* frame, uint32_t now_ms) {
@@ -38,6 +47,20 @@ void fsd_drive_observe_belt(FSDState* state, const CANFRAME* frame, uint32_t now
     state->ui_buckle_status = ((frame->buffer[BELT_BYTE] >> BELT_SHIFT) & 0x01u) != 0u;
     state->belt_seen_ms = now_ms;
     state->belt_seen = true;
+
+    /* Same reasoning as the cruise state above: the blinker bits ride in this
+     * frame, this is the ESP32's only parser for it, and the BLE State packet
+     * has been reporting both of them as zero regardless of the stalk.
+     *   leftBlinkerOn  bit 22|1 big-endian -> byte 2 bit 6
+     *   rightBlinkerOn bit 23|1 big-endian -> byte 2 bit 7
+     *   anyDoorOpen    bit 28|1 big-endian -> byte 3 bit 4 */
+    if(frame->data_lenght > 2) {
+        state->ui_left_blinker = ((frame->buffer[2] >> 6) & 0x01u) != 0u;
+        state->ui_right_blinker = ((frame->buffer[2] >> 7) & 0x01u) != 0u;
+    }
+    if(frame->data_lenght > 3)
+        state->ui_any_door_open = ((frame->buffer[3] >> 4) & 0x01u) != 0u;
+    state->ui_warning_seen = true;
 }
 
 /* Unsigned subtraction so the millisecond clock wrapping past 2^32 (~49 days of
@@ -73,6 +96,18 @@ FsdSupVerdict fsd_supervised_drive_why(const FSDState* state, uint32_t now_ms) {
 
 bool fsd_supervised_drive(const FSDState* state, uint32_t now_ms) {
     return fsd_supervised_drive_why(state, now_ms) == FSD_SUP_OK;
+}
+
+OpMode fsd_autonomy_floor(const FSDState* state) {
+    if(!state || !state->autonomy_enabled) return OpMode_ListenOnly;
+    return OpMode_Autonomous;
+}
+
+bool fsd_autonomy_allows(const FSDState* state, uint32_t now_ms) {
+    if(!state || !state->autonomy_enabled) return false;
+    if(state->op_mode != OpMode_Autonomous && state->op_mode != OpMode_Active)
+        return false;
+    return fsd_supervised_drive(state, now_ms);
 }
 
 const char* fsd_sup_verdict_str(FsdSupVerdict v) {

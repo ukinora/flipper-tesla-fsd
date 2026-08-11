@@ -104,6 +104,12 @@ typedef struct FSDState {
     uint32_t belt_seen_ms;       // ms clock at the last 0x311 parse (buckle freshness)
     bool     belt_seen;
 
+    // Operator intent, persisted in NVS. This is the ONE thing about autonomy
+    // that survives a power cycle, and it can be persisted precisely because it
+    // grants nothing on its own: without supervised_drive it produces no TX at
+    // all. op_mode itself is still never restored from NVS — see prefs.h.
+    bool autonomy_enabled;
+
     // --- AP-first mode (2026.14.x compatibility) ---
     bool ap_first;               // delay 0x3FD/0x3EE injection until AP is engaged AND stable
     bool ap_first_edge;          // experimental "Instant Engage": inject as soon as AP is
