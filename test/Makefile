@@ -21,9 +21,9 @@ test_speed_profile: $(SP_SRC) $(ROOT)/fsd_logic/fsd_speed_profile.h
 # On-module camera database + approach judgement. Reads a real camera.bin
 # produced by camera-db/pack.py, so this doubles as a format compatibility
 # check between the Python writer and the C reader.
-CAM_SRC := test_camera.c $(ROOT)/fsd_logic/fsd_camera.c
+CAM_SRC := test_camera.c $(ROOT)/fsd_logic/fsd_camera.c $(ROOT)/fsd_logic/fsd_cam_track.c $(ROOT)/fsd_logic/fsd_cam_policy.c
 
-test_camera: $(CAM_SRC) $(ROOT)/fsd_logic/fsd_camera.h
+test_camera: $(CAM_SRC) $(ROOT)/fsd_logic/fsd_camera.h $(ROOT)/fsd_logic/fsd_cam_track.h $(ROOT)/fsd_logic/fsd_cam_policy.h
 	$(CC) $(CFLAGS) -I$(ROOT)/fsd_logic $(CAM_SRC) -o $@ -lm
 
 check: test_fsd_core test_speed_profile test_camera
