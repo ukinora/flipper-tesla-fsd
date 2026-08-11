@@ -33,6 +33,7 @@
 #include "camera_task.h"
 #include "body_task.h"
 #include "ble_server.h"
+#include "ble_central.h"
 #include "capability.h"
 #include "profile_match.h"
 #include "../../fsd_logic/fsd_events.h"
@@ -115,7 +116,9 @@ static bool serial_cmd_equals(const char *cmd, const char *expected) {
 }
 
 static void serial_command_tick() {
-    static char buf[24];
+    // 24 was too small the moment a command took an argument: "btnbind" plus a
+    // 17-character BLE address is 25, and the terminator needs one more.
+    static char buf[40];
     static uint8_t len = 0;
 
     while (Serial.available() > 0) {
@@ -127,10 +130,24 @@ static void serial_command_tick() {
 
             if (serial_cmd_equals(buf, "ip") || serial_cmd_equals(buf, "wifi")) {
                 wifi_print_status();
+            } else if (serial_cmd_equals(buf, "btnscan")) {
+                // Bring-up: look before writing a parser for a device nobody has.
+                if (!ble_central_scan(5)) Serial.println("[SER] scan already running");
+            } else if (strncmp(buf, "btnbind", 7) == 0) {
+                const char *arg = buf + 7;
+                while (*arg == ' ') arg++;
+                ble_central_bind(arg); // empty argument forgets the button
+            } else if (serial_cmd_equals(buf, "btnstat")) {
+                Serial.printf("[BTN] bound:%s connected:%s notifies:%u short:%u long:%u\n",
+                              ble_central_bound_addr()[0] ? ble_central_bound_addr() : "(none)",
+                              ble_central_connected() ? "yes" : "no",
+                              (unsigned)ble_central_notify_count(),
+                              (unsigned)ble_central_short_presses(),
+                              (unsigned)ble_central_long_presses());
             } else if (serial_cmd_equals(buf, "help") || serial_cmd_equals(buf, "?")) {
-                Serial.println("[SER] Commands: ip");
+                Serial.println("[SER] Commands: ip | btnscan | btnbind <addr> | btnstat");
             } else {
-                Serial.println("[SER] Unknown command. Type: ip");
+                Serial.println("[SER] Unknown command. Type: help");
             }
             continue;
         }
@@ -1640,6 +1657,9 @@ void setup() {
     body_task_init(&g_state, &g_state_mux);   // T1/T2 detectors — read-only
     capability_init(&g_state, &g_state_mux);  // tap capability checker (#125)
     ble_server_init(&g_state, &g_state_mux);  // GATT server for the phone app
+    // Client role, for a generic button. AFTER the server: NimBLEDevice::init()
+    // happens there and must not be called twice.
+    ble_central_init();
     profile_match_init(&g_state, &g_state_mux);  // variant-profile auto-suggest (#126)
 
 #if defined(BOARD_LILYGO)
@@ -1879,6 +1899,7 @@ void loop() {
     }
     body_task_tick(now);   // T1/T2 detectors — measures, logs, sends nothing
     ble_server_tick(now);  // push State notifications to the phone app
+    ble_central_tick(now); // button link + press classification — no TX
 
 #if defined(BOARD_LILYGO)
     sleep_tick(now);
