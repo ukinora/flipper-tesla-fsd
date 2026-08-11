@@ -28,15 +28,6 @@
 #include <NimBLEDevice.h>
 #include <string.h>
 
-// The app-facing names and the pure layer's must not drift apart. They are
-// separate constants because ble_server.h is the protocol's public face and
-// fsd_wire.h is what the host tests compile against.
-static_assert(BLE_STATE_LEN == FSD_WIRE_STATE_LEN, "State length drifted");
-static_assert(BLE_CAMSTAT_LEN == FSD_WIRE_CAMSTAT_LEN, "CamStat length drifted");
-static_assert(BLE_RESULT_LEN == FSD_WIRE_RESULT_LEN, "Result length drifted");
-static_assert(BLE_PROTO_VERSION == FSD_WIRE_STATE_VERSION, "State version drifted");
-static_assert(BLE_CAMSTAT_VERSION == FSD_WIRE_CAMSTAT_VERSION, "CamStat version drifted");
-
 // ── UUIDs ────────────────────────────────────────────────────────────────────
 // Custom 128-bit base; the 3rd..4th nibble group carries the characteristic id.
 #define BLE_UUID_SERVICE "6b1a0000-4b53-4d4f-4432-43414e000001"
@@ -51,6 +42,16 @@ static_assert(BLE_CAMSTAT_VERSION == FSD_WIRE_CAMSTAT_VERSION, "CamStat version 
 #define BLE_STATE_LEN  20u
 #define BLE_RESULT_LEN 4u
 #define BLE_BULK_HDR   2u   // seq prefix on every bulk frame
+
+// These and fsd_wire.h's must not drift apart. Two sets exist because
+// ble_server is the protocol's public face while fsd_wire.h is what the host
+// tests and the fixture generator compile against — so the compiler checks that
+// the two agree rather than a reviewer having to.
+static_assert(BLE_STATE_LEN == FSD_WIRE_STATE_LEN, "State length drifted");
+static_assert(BLE_CAMSTAT_LEN == FSD_WIRE_CAMSTAT_LEN, "CamStat length drifted");
+static_assert(BLE_RESULT_LEN == FSD_WIRE_RESULT_LEN, "Result length drifted");
+static_assert(BLE_PROTO_VERSION == FSD_WIRE_STATE_VERSION, "State version drifted");
+static_assert(BLE_CAMSTAT_VERSION == FSD_WIRE_CAMSTAT_VERSION, "CamStat version drifted");
 
 static FSDState     *g_state = nullptr;
 static portMUX_TYPE *g_mux   = nullptr;
