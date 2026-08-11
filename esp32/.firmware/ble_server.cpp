@@ -399,8 +399,7 @@ class CommandCB : public NimBLECharacteristicCallbacks {
             FSDState snap = *g_state;
             portEXIT_CRITICAL(g_mux);
             prefs_save(&snap);
-            Serial.printf("[BLE] autonomy -> %s
-", on ? "ON" : "OFF");
+            Serial.printf("[BLE] autonomy -> %s\n", on ? "ON" : "OFF");
             ble_send_result(cmd, BLE_RES_OK, (uint16_t)snap.op_mode);
             break;
         }
