@@ -24,6 +24,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "fsd_cam_policy.h"
+#include "fsd_cam_track.h"
 #include "fsd_camera.h"
 
 static int g_pass = 0;
@@ -261,6 +263,357 @@ static void test_evaluate(void) {
     CHECK(!fsd_cam_evaluate(&fix, &cam, NULL), "NULL out refused");
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Tracking + learning (fsd_cam_track.c)
+// ─────────────────────────────────────────────────────────────────────────────
+
+static FsdCamFix at(double lat, double lon, float bearing, float kph) {
+    FsdCamFix f;
+    memset(&f, 0, sizeof(f));
+    f.lat_e7 = (int32_t)(lat * 1e7);
+    f.lon_e7 = (int32_t)(lon * 1e7);
+    f.bearing_deg = bearing;
+    f.speed_kph = kph;
+    return f;
+}
+
+// Drive north along the 127.0 meridian past the Seoul camera at 37.5, holding a
+// constant lateral offset. Returns the PASS event's measured closest approach,
+// or -1 if no pass was reported.
+static float drive_past(FsdTracker* t, const FsdCamDb* db, double offset_m,
+                        int* passes_out) {
+    float measured = -1.0f;
+    if (passes_out) *passes_out = 0;
+    // 20 m steps — 1 Hz at 72 km/h. Deliberately offset by 10 m so no sample
+    // lands on the camera's latitude: the nearest fixes are then 10 m either
+    // side, point-to-point says 10.4 m, and only segment interpolation recovers
+    // the real 3 m. A grid that happened to line up would pass this test
+    // without the interpolation working at all.
+    for (int m = -410; m <= 210; m += 20) {
+        double lat = 37.5 + (double)m / 111320.0;
+        double lon = 127.0 + offset_m / 88000.0;
+        FsdCamFix f = at(lat, lon, 0.0f, 72.0f);
+        FsdTrkEvent ev[4];
+        int n = fsd_trk_update(t, db, &f, ev, 4);
+        for (int i = 0; i < n; i++) {
+            if (ev[i].kind == FSD_TRK_PASS && ev[i].cam.lat_e7 == 375000000 &&
+                ev[i].cam.lon_e7 == 1270000000) {
+                measured = ev[i].cpa_m;
+                if (passes_out) *passes_out = (int)ev[i].passes;
+            }
+        }
+    }
+    return measured;
+}
+
+static void test_track_pass_and_learn(void) {
+    printf("\n-- tracking: pass detection and learning --\n");
+
+    FsdCamDb db;
+    MemSrc src = make_src();
+    CHECK(fsd_cam_open(&db, mem_read, &src), "fixture opens");
+
+    FsdTracker t;
+    fsd_trk_init(&t);
+
+    FsdCamRecord seoul = {375000000, 1270000000, 30, 0};
+    uint64_t key = fsd_trk_key(&seoul);
+
+    bool learned = true;
+    CHECK(NEAR(fsd_trk_cpa_limit(&t, key, 0.0f, &learned), FSD_CAM_DEFAULT_CPA_M,
+               0.01f),
+          "an unlearned camera uses the wide default");
+    CHECK(!learned, "and reports that it is not learned");
+
+    // Same lane: 3 m to the side.
+    int passes = 0;
+    float measured = drive_past(&t, &db, 3.0, &passes);
+    CHECK(measured >= 0.0f, "a pass was reported");
+    // Fixes are 20 m apart and the camera sits between two of them, so only
+    // segment interpolation recovers a 3 m approach. Nearest-sample would say
+    // about 10 m — wider than a lane, which is the quantity being measured.
+    CHECK(NEAR(measured, 3.0f, 2.0f), "measured %.1f m, expected ~3",
+          (double)measured);
+    CHECK(passes == 1, "one pass recorded");
+    CHECK(t.dirty, "learning marked dirty for the caller to persist");
+
+    CHECK(NEAR(fsd_trk_cpa_limit(&t, key, 0.0f, &learned), FSD_CAM_DEFAULT_CPA_M,
+               0.01f),
+          "one pass could be a fluke, so the default still applies");
+    CHECK(!learned, "not trusted after one pass");
+
+    measured = drive_past(&t, &db, 3.0, &passes);
+    CHECK(passes == 2, "two passes recorded");
+    float lim = fsd_trk_cpa_limit(&t, key, 0.0f, &learned);
+    CHECK(learned, "trusted after two passes");
+    CHECK(lim < FSD_CAM_DEFAULT_CPA_M, "learned limit %.1f m narrows the default",
+          (double)lim);
+    // The point of the whole layer: 11 m is the opposite carriageway, and after
+    // learning it must no longer count as ours.
+    CHECK(lim < 11.0f, "learned limit %.1f m excludes the opposite carriageway",
+          (double)lim);
+}
+
+static void test_track_direction_is_separate(void) {
+    printf("\n-- tracking: directions stay separate --\n");
+
+    FsdCamDb db;
+    MemSrc src = make_src();
+    fsd_cam_open(&db, mem_read, &src);
+
+    FsdTracker t;
+    fsd_trk_init(&t);
+    FsdCamRecord seoul = {375000000, 1270000000, 30, 0};
+    uint64_t key = fsd_trk_key(&seoul);
+
+    drive_past(&t, &db, 3.0, NULL);
+    drive_past(&t, &db, 3.0, NULL);
+
+    bool learned = false;
+    CHECK(fsd_trk_cpa_limit(&t, key, 0.0f, &learned) < 11.0f && learned,
+          "northbound is learned");
+
+    // The other carriageway is a different road surface and starts from scratch.
+    CHECK(NEAR(fsd_trk_cpa_limit(&t, key, 180.0f, &learned), FSD_CAM_DEFAULT_CPA_M,
+               0.01f),
+          "southbound falls back to the default");
+    CHECK(!learned, "southbound learns nothing from northbound passes");
+
+    CHECK(fsd_trk_cpa_limit(&t, key, 20.0f, &learned) < 11.0f && learned,
+          "20 deg off counts as the same approach");
+    CHECK(NEAR(fsd_trk_cpa_limit(&t, key, 80.0f, &learned), FSD_CAM_DEFAULT_CPA_M,
+               0.01f),
+          "80 deg off does not");
+}
+
+static void test_track_key(void) {
+    printf("\n-- tracking: camera identity --\n");
+    FsdCamRecord a = {375000000, 1270000000, 30, 0};
+    FsdCamRecord b = {375000001, 1270000000, 30, 0};
+    FsdCamRecord c = {375000000, 1270000000, 60, 1}; // same place, other fields
+    CHECK(fsd_trk_key(&a) != fsd_trk_key(&b),
+          "1e-7 deg apart are different cameras");
+    CHECK(fsd_trk_key(&a) == fsd_trk_key(&c), "identity is the position");
+
+    // Negative coordinates sign-extend if cast straight to uint64_t, which would
+    // collapse every southern/western camera onto one high half.
+    FsdCamRecord s1 = {-375000000, -1270000000, 30, 0};
+    FsdCamRecord s2 = {-375000000, -1270000001, 30, 0};
+    CHECK(fsd_trk_key(&s1) != fsd_trk_key(&s2),
+          "negative coordinates do not collide");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Policy (fsd_cam_policy.c)
+// ─────────────────────────────────────────────────────────────────────────────
+
+static FsdPolTarget target(uint64_t key, uint8_t limit, float dist) {
+    FsdPolTarget t;
+    memset(&t, 0, sizeof(t));
+    t.valid = true;
+    t.key = key;
+    t.limit_kph = limit;
+    t.distance_m = dist;
+    return t;
+}
+
+static void test_policy_lead(void) {
+    printf("\n-- policy: lead distance and profile table --\n");
+    // 12 seconds of travel, clamped at both ends.
+    CHECK(NEAR(fsd_pol_lead_distance_m(30.0f), 100.0f, 0.5f), "30 km/h -> 100 m");
+    CHECK(NEAR(fsd_pol_lead_distance_m(60.0f), 200.0f, 0.5f), "60 km/h -> 200 m");
+    CHECK(NEAR(fsd_pol_lead_distance_m(10.0f), FSD_POL_MIN_LEAD_M, 0.5f),
+          "floor at low speed");
+    CHECK(NEAR(fsd_pol_lead_distance_m(200.0f), FSD_POL_MAX_LEAD_M, 0.5f),
+          "ceiling at high speed");
+    CHECK(NEAR(fsd_pol_lead_distance_m(-5.0f), FSD_POL_MIN_LEAD_M, 0.5f),
+          "a negative speed does not produce a negative lead");
+
+    // A camera has to be findable before it is actionable.
+    CHECK(FSD_TRK_SCAN_RADIUS_M > FSD_POL_MAX_LEAD_M,
+          "scan radius covers the longest lead distance");
+
+    CHECK(fsd_pol_profile_for_limit(30) == FSD_POL_PROFILE_CHILL, "30 -> Chill");
+    CHECK(fsd_pol_profile_for_limit(50) == FSD_POL_PROFILE_STANDARD, "50 -> Standard");
+    CHECK(fsd_pol_profile_for_limit(110) == FSD_POL_PROFILE_STANDARD,
+          "110 -> Standard, never higher");
+}
+
+static void test_policy_never_raises(void) {
+    printf("\n-- policy: never raises the profile --\n");
+
+    FsdPolicy p;
+    fsd_pol_init(&p);
+
+    // Driver is in Sloth and a 60 km/h camera maps to Standard, which is
+    // FASTER. The prototype returned Standard here — speeding the car up next
+    // to a speed camera is a defect, not a trade-off.
+    FsdPolTarget tg = target(1, 60, 50.0f);
+    FsdPolDecision d =
+        fsd_pol_tick(&p, &tg, FSD_POL_PROFILE_SLOTH, 60.0f, 20.0f, 1.0f);
+    CHECK(d.action == FSD_POL_ACT_LOWER, "engaged");
+    CHECK(d.target_profile == FSD_POL_PROFILE_SLOTH,
+          "clamped to Sloth rather than raised to Standard");
+
+    // From Hurry the same camera genuinely lowers.
+    fsd_pol_init(&p);
+    d = fsd_pol_tick(&p, &tg, FSD_POL_PROFILE_HURRY, 60.0f, 20.0f, 1.0f);
+    CHECK(d.target_profile == FSD_POL_PROFILE_STANDARD, "Hurry -> Standard");
+}
+
+static void test_policy_arc(void) {
+    printf("\n-- policy: approach, hold, restore --\n");
+
+    FsdPolicy p;
+    fsd_pol_init(&p);
+    const uint8_t entry = FSD_POL_PROFILE_HURRY;
+    uint8_t observed = entry;
+
+    // 60 km/h means a 200 m trigger, so 350 m is armed but silent.
+    FsdPolTarget tg = target(7, 30, 350.0f);
+    FsdPolDecision d = fsd_pol_tick(&p, &tg, observed, 60.0f, 20.0f, 1.0f);
+    CHECK(d.phase == FSD_POL_ARMED, "armed while still far off");
+    CHECK(d.action == FSD_POL_ACT_NONE, "asking for nothing yet");
+    CHECK(NEAR(d.trigger_m, 200.0f, 1.0f), "trigger distance reported");
+
+    tg = target(7, 30, 180.0f);
+    d = fsd_pol_tick(&p, &tg, observed, 60.0f, 20.0f, 1.0f);
+    CHECK(d.phase == FSD_POL_ACTIVE, "engaged inside the trigger");
+    CHECK(d.action == FSD_POL_ACT_LOWER && d.target_profile == FSD_POL_PROFILE_CHILL,
+          "a 30 km/h camera asks for Chill");
+    observed = d.target_profile; // the car complies
+
+    // Passed. Release is not immediate — every camera is assumed to shoot the
+    // rear plate, because the public data does not say which ones do.
+    fsd_pol_on_pass(&p, 7);
+    d = fsd_pol_tick(&p, NULL, observed, 60.0f, 20.0f, 1.0f);
+    CHECK(d.phase == FSD_POL_HOLDING, "holding past the camera");
+    CHECK(d.action == FSD_POL_ACT_LOWER, "still lowered");
+
+    // 20 m per tick, 120 m to release: six ticks in total.
+    for (int i = 0; i < 4; i++) {
+        d = fsd_pol_tick(&p, NULL, observed, 60.0f, 20.0f, 1.0f);
+        CHECK(d.action == FSD_POL_ACT_LOWER, "still holding at tick %d", i);
+    }
+    d = fsd_pol_tick(&p, NULL, observed, 60.0f, 20.0f, 1.0f);
+    CHECK(d.phase == FSD_POL_RESTORING, "released after 120 m");
+    CHECK(d.action == FSD_POL_ACT_RESTORE && d.target_profile == entry,
+          "asks for the driver's original profile back");
+
+    // The request is a level, not an edge: a caller that misses one tick does
+    // not lose the restore.
+    d = fsd_pol_tick(&p, NULL, observed, 60.0f, 20.0f, 1.0f);
+    CHECK(d.action == FSD_POL_ACT_RESTORE, "restore request repeats");
+
+    observed = entry; // the car arrives
+    d = fsd_pol_tick(&p, NULL, observed, 60.0f, 20.0f, 1.0f);
+    CHECK(d.phase == FSD_POL_IDLE && d.action == FSD_POL_ACT_NONE,
+          "finished once the car is back");
+}
+
+static void test_policy_hold_is_not_interrupted(void) {
+    printf("\n-- policy: a new camera cannot cut the hold short --\n");
+
+    FsdPolicy p;
+    fsd_pol_init(&p);
+    uint8_t observed = FSD_POL_PROFILE_HURRY;
+
+    FsdPolTarget a = target(1, 30, 100.0f);
+    FsdPolDecision d = fsd_pol_tick(&p, &a, observed, 60.0f, 20.0f, 1.0f);
+    CHECK(d.phase == FSD_POL_ACTIVE, "engaged on the first camera");
+    observed = d.target_profile;
+
+    fsd_pol_on_pass(&p, 1);
+
+    // The prototype adopted the new camera here and left HOLDING, releasing the
+    // profile while still inside the first camera's rear-facing range — exactly
+    // what the hold exists to prevent.
+    FsdPolTarget b = target(2, 60, 300.0f);
+    d = fsd_pol_tick(&p, &b, observed, 60.0f, 20.0f, 1.0f);
+    CHECK(d.phase == FSD_POL_HOLDING, "still holding, not re-armed on the new one");
+    CHECK(d.action == FSD_POL_ACT_LOWER, "profile stays down");
+}
+
+static void test_policy_entry_does_not_ratchet(void) {
+    printf("\n-- policy: cameras in sequence keep one original --\n");
+
+    FsdPolicy p;
+    fsd_pol_init(&p);
+    const uint8_t entry = FSD_POL_PROFILE_HURRY;
+    uint8_t observed = entry;
+
+    // Camera A: engage, pass, run the hold out, begin restoring.
+    FsdPolTarget a = target(1, 30, 100.0f);
+    FsdPolDecision d = fsd_pol_tick(&p, &a, observed, 60.0f, 20.0f, 1.0f);
+    observed = d.target_profile;
+    fsd_pol_on_pass(&p, 1);
+    for (int i = 0; i < 7; i++)
+        d = fsd_pol_tick(&p, NULL, observed, 60.0f, 20.0f, 1.0f);
+    CHECK(d.phase == FSD_POL_RESTORING, "restoring after A");
+
+    // B arrives before the car has climbed back.
+    FsdPolTarget b = target(2, 30, 100.0f);
+    d = fsd_pol_tick(&p, &b, observed, 60.0f, 20.0f, 1.0f);
+    CHECK(d.phase == FSD_POL_ACTIVE, "engaged on B");
+
+    fsd_pol_on_pass(&p, 2);
+    for (int i = 0; i < 7; i++)
+        d = fsd_pol_tick(&p, NULL, observed, 60.0f, 20.0f, 1.0f);
+    CHECK(d.phase == FSD_POL_RESTORING, "restoring after B");
+    // The guarded bug: B captures the profile WE set for A as the "original",
+    // so a road with cameras in a row ratchets it down every time and the car
+    // ends the drive slow with nothing left to restore towards.
+    CHECK(d.target_profile == entry, "restores the driver's value, not ours");
+}
+
+static void test_policy_abandon(void) {
+    printf("\n-- policy: abandon does not restore --\n");
+
+    FsdPolicy p;
+    fsd_pol_init(&p);
+    uint8_t observed = FSD_POL_PROFILE_HURRY;
+    FsdPolTarget tg = target(1, 30, 100.0f);
+    FsdPolDecision d = fsd_pol_tick(&p, &tg, observed, 60.0f, 20.0f, 1.0f);
+    CHECK(d.phase == FSD_POL_ACTIVE, "engaged");
+    observed = d.target_profile;
+
+    // Driver override, or authority withdrawn. Forcing the old value back would
+    // be overruling someone who has just told us otherwise.
+    fsd_pol_abandon(&p);
+    d = fsd_pol_tick(&p, NULL, observed, 60.0f, 20.0f, 1.0f);
+    CHECK(d.phase == FSD_POL_IDLE, "idle after abandon");
+    CHECK(d.action == FSD_POL_ACT_NONE, "asks for nothing, restore included");
+
+    // A later camera may still engage — abandoning is not a permanent stop.
+    d = fsd_pol_tick(&p, &tg, observed, 60.0f, 20.0f, 1.0f);
+    CHECK(d.phase == FSD_POL_ACTIVE, "a fresh engagement is still allowed");
+}
+
+static void test_policy_standstill(void) {
+    printf("\n-- policy: standstill and null safety --\n");
+
+    FsdPolicy p;
+    fsd_pol_init(&p);
+    uint8_t observed = FSD_POL_PROFILE_HURRY;
+
+    FsdPolTarget tg = target(1, 30, 100.0f);
+    FsdPolDecision d = fsd_pol_tick(&p, &tg, observed, 0.0f, 0.0f, 1.0f);
+    CHECK(d.action == FSD_POL_ACT_NONE, "stopped and not engaged: no decision");
+
+    d = fsd_pol_tick(&p, &tg, observed, 60.0f, 20.0f, 1.0f);
+    CHECK(d.phase == FSD_POL_ACTIVE, "engaged while moving");
+    observed = d.target_profile;
+    // A queue at a school-zone camera is the last place to let the profile up.
+    d = fsd_pol_tick(&p, &tg, observed, 0.0f, 0.0f, 1.0f);
+    CHECK(d.action == FSD_POL_ACT_LOWER, "stays lowered while stopped");
+
+    CHECK(fsd_pol_phase_str(FSD_POL_HOLDING) != NULL, "phase names exist");
+    fsd_pol_tick(NULL, NULL, 0, 0.0f, 0.0f, 0.0f); // must not crash
+    fsd_pol_abandon(NULL);
+    fsd_trk_init(NULL);
+    CHECK(fsd_trk_key(NULL) == 0, "a NULL record has no key");
+}
+
 int main(void) {
     printf("test_camera\n");
     test_open();
@@ -270,6 +623,16 @@ int main(void) {
     test_geometry();
     test_segment_distance();
     test_evaluate();
+    test_track_pass_and_learn();
+    test_track_direction_is_separate();
+    test_track_key();
+    test_policy_lead();
+    test_policy_never_raises();
+    test_policy_arc();
+    test_policy_hold_is_not_interrupted();
+    test_policy_entry_does_not_ratchet();
+    test_policy_abandon();
+    test_policy_standstill();
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }
