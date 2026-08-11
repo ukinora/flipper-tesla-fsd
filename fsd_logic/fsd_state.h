@@ -88,6 +88,22 @@ typedef struct FSDState {
     bool speed_seen;             // true once we've parsed at least one 0x257
     uint32_t last_speed_tick_ms; // ms clock when the last 0x257 was seen (TX interlock freshness)
 
+    // --- Supervision inputs (fsd_autonomy.h) ---
+    // "Is a person driving right now?" Answered from the car, not from whether
+    // a phone happens to be connected: a phone can be at home, in a pocket, or
+    // left switched on in an empty car, whereas a gear of D with the belt
+    // latched is direct evidence of someone in the driver's seat.
+    //
+    // Each value carries its own stamp and its own seen flag. Reusing an
+    // existing *_seen flag would be ambiguous, because the upstream parsers set
+    // those without stamping a time — "seen but never timed" and "seen at t=0"
+    // would be indistinguishable, and this gate must fail closed.
+    uint8_t  di_gear;            // 0x286 DI_gear: 0=INVALID 1=P 2=R 3=N 4=D 7=SNA
+    uint32_t di_gear_ms;         // ms clock at the last 0x286 parse
+    bool     di_gear_seen;
+    uint32_t belt_seen_ms;       // ms clock at the last 0x311 parse (buckle freshness)
+    bool     belt_seen;
+
     // --- AP-first mode (2026.14.x compatibility) ---
     bool ap_first;               // delay 0x3FD/0x3EE injection until AP is engaged AND stable
     bool ap_first_edge;          // experimental "Instant Engage": inject as soon as AP is

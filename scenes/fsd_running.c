@@ -1,6 +1,7 @@
 #include "../tesla_fsd_app.h"
 #include "../scenes_config/app_scene_functions.h"
 #include "../fsd_logic/fsd_capture.h"  // shared candump-ASCII formatter
+#include "../fsd_logic/fsd_autonomy.h" // supervision gate inputs (gear, belt)
 #include <stdio.h>
 
 #define FSD_DISPLAY_REFRESH_MS 250
@@ -390,12 +391,20 @@ static int32_t fsd_running_worker(void* context) {
                 }
                 else if(frame.canId == CAN_ID_DI_STATE) {
                     fsd_handle_di_state(&state, &frame);
+                    // Gear, for the supervision gate. Separate from the parser
+                    // above because that one is not compiled into the ESP32
+                    // build; keeping the gate's inputs in fsd_autonomy.c is what
+                    // lets both platforms answer the question the same way.
+                    fsd_drive_observe_gear(&state, &frame, furi_get_tick());
                 }
                 else if(frame.canId == CAN_ID_DI_TORQUE) {
                     fsd_handle_di_torque(&state, &frame);
                 }
                 else if(frame.canId == CAN_ID_UI_WARNING) {
                     fsd_handle_ui_warning(&state, &frame);
+                    // Belt freshness. Writes the same buckle bit the parser
+                    // above does, and agrees with it — see fsd_autonomy.c.
+                    fsd_drive_observe_belt(&state, &frame, furi_get_tick());
                 }
                 else if(frame.canId == CAN_ID_STEER_ANGLE) {
                     fsd_handle_steering_angle(&state, &frame);
