@@ -84,6 +84,16 @@ bool     camera_task_save_failing(void);     // writes are failing, not silent
 uint16_t camera_task_learned_count(void);
 uint16_t camera_task_scan_full_count(void);
 
+/** The DRIVETRAIN speed, off 0x257 — the one named source in this firmware.
+ *
+ *  Named and exported so that nothing wires an interlock to GPS velocity by
+ *  mistake: UI_gpsVehicleSpeed freezes in a tunnel along with the position,
+ *  which is the whole reason fsd_gps.c requires this frame in the first place.
+ *  Anything asking "is the car moving" for a safety decision asks here. */
+bool camera_task_ref_speed_seen(void);
+float camera_task_ref_speed_kph(void);
+uint32_t camera_task_ref_speed_ms(void);
+
 #else  // no camera core on this variant — no-op shims so main.cpp needs no #ifdef
 
 static inline void camera_task_init(FSDState*, portMUX_TYPE*) {}
@@ -104,5 +114,8 @@ static inline bool     camera_task_learning_dirty(void) { return false; }
 static inline bool     camera_task_save_failing(void) { return false; }
 static inline uint16_t camera_task_learned_count(void) { return 0; }
 static inline uint16_t camera_task_scan_full_count(void) { return 0; }
+static inline bool     camera_task_ref_speed_seen(void) { return false; }
+static inline float    camera_task_ref_speed_kph(void) { return 0.0f; }
+static inline uint32_t camera_task_ref_speed_ms(void) { return 0; }
 
 #endif

@@ -31,6 +31,7 @@
 #include "blackbox.h"
 #include "camera_store.h"
 #include "camera_task.h"
+#include "body_task.h"
 #include "ble_server.h"
 #include "capability.h"
 #include "profile_match.h"
@@ -180,6 +181,17 @@ static CanDriver *can_for_bus(CanBusId bus) {
 }
 
 static bool send_on_bus(CanBusId bus, const CanFrame &frame) {
+    // Body-control IDs never leave this module, in any mode, under any flag.
+    // Nothing constructs one — there is no emitter in the whole feature — so
+    // this is a backstop against a future call site, not a policy that can be
+    // switched. It sits at the single chokepoint because the eight gates that
+    // guard TX live at the CALL sites, and a ninth call site could forget one.
+    if (body_task_tx_refused(frame.id)) {
+        Serial.printf("[BODY] refused TX of 0x%03X — this firmware sends no body frames\n",
+                      (unsigned)frame.id);
+        return false;
+    }
+
     CanDriver *driver = can_for_bus(bus);
     bool ok = driver ? driver->send(frame) : false;
     // Single TX chokepoint: every injected/modified frame (0x3EE, 0x3FD, the
@@ -1283,6 +1295,12 @@ static void process_frame(CanBusId bus, const CanFrame &frame) {
     // the shim returns false and this whole line folds away.
     if (camera_task_observe(frame.id, frame.data, frame.dlc, millis())) return;
 
+    // Body detectors (0x102, 0x103, 0x3C2). NON-RETURNING on purpose: 0x3C2 is
+    // shared with the scroll path and the door frames may gain other readers,
+    // so this offers the frame and gets out of the way. Read-only — the whole
+    // feature has no emitter, and send_on_bus() refuses these IDs outright.
+    (void)body_task_observe(frame.id, frame.data, frame.dlc, millis());
+
     if (frame.id == CAN_ID_ESP_STATUS) {
         uint32_t now_ms = millis();
         state_enter();
@@ -1619,6 +1637,7 @@ void setup() {
     // Instances + learning restore. After camera_store_init() (it needs the
     // filesystem), before ble_server_init() (its packer reads the accessors).
     camera_task_init(&g_state, &g_state_mux);
+    body_task_init(&g_state, &g_state_mux);   // T1/T2 detectors — read-only
     capability_init(&g_state, &g_state_mux);  // tap capability checker (#125)
     ble_server_init(&g_state, &g_state_mux);  // GATT server for the phone app
     profile_match_init(&g_state, &g_state_mux);  // variant-profile auto-suggest (#126)
@@ -1849,6 +1868,16 @@ void loop() {
     blackbox_tick(now);  // post-roll countdown + flush (#124)
     capability_tick(now);  // finalize the capability listen window (#125)
     camera_task_tick(now); // 1 Hz camera judgement — reads only, never transmits
+    // The body detectors need to know whether the transceiver could transmit at
+    // all; only main.cpp owns the drivers. Fail-closed: any doubt reports shut.
+    {
+        bool tx_open = false;
+        for (uint8_t i = 0; i < CAN_ACTIVE_BUS_COUNT; i++) {
+            if (g_can_ok[i] && g_can[i] && !g_can[i]->isListenOnly()) tx_open = true;
+        }
+        body_task_set_bus_tx_open(tx_open);
+    }
+    body_task_tick(now);   // T1/T2 detectors — measures, logs, sends nothing
     ble_server_tick(now);  // push State notifications to the phone app
 
 #if defined(BOARD_LILYGO)

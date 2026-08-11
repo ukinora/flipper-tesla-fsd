@@ -360,6 +360,10 @@ bool camera_task_profile_fresh(void) {
     return g_prof_seen && (uint32_t)(millis() - g_prof_ms) < CAMERA_PROFILE_FRESH_MS;
 }
 
+bool camera_task_ref_speed_seen(void) { return g_gps.ref_seen; }
+float camera_task_ref_speed_kph(void) { return g_gps.ref_speed_kph; }
+uint32_t camera_task_ref_speed_ms(void) { return g_gps.ref_ms; }
+
 uint16_t camera_task_learned_count(void) {
     uint16_t n = 0;
     for(int i = 0; i < FSD_TRK_CAM_MAX; i++)
