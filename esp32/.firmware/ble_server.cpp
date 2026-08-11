@@ -18,6 +18,7 @@
 #ifdef BLE_SERVER_ENABLED
 
 #include "blackbox.h"
+#include "camera_store.h"
 #include "capability.h"
 #include "config.h"
 #include <NimBLEDevice.h>
@@ -31,6 +32,7 @@
 #define BLE_UUID_RESULT  "6b1a0003-4b53-4d4f-4432-43414e000001"
 #define BLE_UUID_CAPAB   "6b1a0005-4b53-4d4f-4432-43414e000001"
 #define BLE_UUID_BULK    "6b1a0006-4b53-4d4f-4432-43414e000001"
+#define BLE_UUID_UPLOAD  "6b1a0007-4b53-4d4f-4432-43414e000001"
 
 #define BLE_STATE_LEN  20u
 #define BLE_RESULT_LEN 4u
@@ -44,6 +46,7 @@ static NimBLECharacteristic *g_ch_state = nullptr;
 static NimBLECharacteristic *g_ch_result = nullptr;
 static NimBLECharacteristic *g_ch_cap    = nullptr;
 static NimBLECharacteristic *g_ch_bulk   = nullptr;
+static NimBLECharacteristic *g_ch_upload = nullptr;
 
 static volatile bool g_connected = false;
 static volatile bool g_state_subscribed = false;  // client enabled State notifications
@@ -65,6 +68,8 @@ static bool     g_bulk_json   = false;
 // independent authorities and a BLE disconnect must not override them.
 static volatile bool     g_active_by_ble = false;
 static volatile uint32_t g_link_down_ms  = 0;  // 0 = link up or nothing to undo
+// Declared size of the camera.bin currently being uploaded (0 = none).
+static volatile uint32_t g_upload_expect = 0;
 static char     g_bulk_name[40] = {};
 static size_t   g_bulk_offset = 0;
 static uint16_t g_bulk_seq    = 0;
@@ -252,6 +257,51 @@ static void ble_revoke_active_if_stale(uint32_t now_ms) {
     }
 }
 
+// ── camera.bin upload (phone -> module) ─────────────────────────────────────
+// Writes land on the BLE task. Each chunk is a bounded LittleFS append, which
+// is fast enough not to stall the stack; nothing here waits on loop().
+class UploadCB : public NimBLECharacteristicCallbacks {
+    void onWrite(NimBLECharacteristic *ch, NimBLEConnInfo &info) override {
+        std::string v = ch->getValue();
+        if (v.size() < BLE_UPLOAD_HDR) return;
+        if (!info.isEncrypted()) return;  // same bar as Command
+
+        uint16_t seq = (uint8_t)v[0] | ((uint16_t)(uint8_t)v[1] << 8);
+        const uint8_t *body = (const uint8_t *)v.data() + BLE_UPLOAD_HDR;
+        size_t n = v.size() - BLE_UPLOAD_HDR;
+
+        uint8_t res;
+        if (seq == 0) {
+            // Header frame: total size, so the module knows when it is done.
+            if (n < 4) { ble_send_result(BLE_CMD_UPLOAD_ABORT, BLE_RES_REJECTED, 0); return; }
+            uint32_t total = (uint32_t)body[0] | ((uint32_t)body[1] << 8) |
+                             ((uint32_t)body[2] << 16) | ((uint32_t)body[3] << 24);
+            res = camera_store_upload_begin(total);
+            // Remember the declared size — completion is implicit, so without
+            // this the transfer would never be finalised.
+            g_upload_expect = (res == CAM_UP_OK) ? total : 0;
+            ble_send_result(BLE_CMD_UPLOAD_ABORT, res == CAM_UP_OK ? BLE_RES_OK : BLE_RES_REJECTED, res);
+            return;
+        }
+
+        res = camera_store_upload_chunk(seq, body, n);
+        if (res != CAM_UP_OK) {
+            // Report once and stop; the app restarts rather than sending into
+            // a transfer that is already broken.
+            camera_store_upload_abort();
+            ble_send_result(BLE_CMD_UPLOAD_ABORT, BLE_RES_REJECTED, res);
+            return;
+        }
+        // Completion is implicit — the declared byte count arriving ends it.
+        if (camera_store_upload_progress() >= g_upload_expect && g_upload_expect > 0) {
+            uint8_t fin = camera_store_upload_end();
+            g_upload_expect = 0;
+            ble_send_result(BLE_CMD_UPLOAD_ABORT,
+                            fin == CAM_UP_OK ? BLE_RES_OK : BLE_RES_REJECTED, fin);
+        }
+    }
+};
+
 // ── Command handling ─────────────────────────────────────────────────────────
 class CommandCB : public NimBLECharacteristicCallbacks {
     void onWrite(NimBLECharacteristic *ch, NimBLEConnInfo &info) override {
@@ -312,6 +362,12 @@ class CommandCB : public NimBLECharacteristicCallbacks {
             ble_send_result(cmd, BLE_RES_OK, 0);
             break;
 
+        case BLE_CMD_UPLOAD_ABORT:
+            camera_store_upload_abort();
+            g_upload_expect = 0;
+            ble_send_result(cmd, BLE_RES_OK, 0);
+            break;
+
         default:
             ble_send_result(cmd, BLE_RES_UNSUPPORTED, 0);
             break;
@@ -348,6 +404,8 @@ class ServerCB : public NimBLEServerCallbacks {
         g_state_subscribed = false;  // subscriptions die with the link
         g_bulk_subscribed  = false;
         g_bulk_active      = false;  // a half-sent capture is not resumable
+        camera_store_upload_abort(); // half-written database is worse than none
+        g_upload_expect    = 0;
         g_mtu              = 23;     // next peer renegotiates from the default
         // Start the grace timer only if there is something to take back. millis()
         // can return 0 exactly once at boot, which would read as "no timer" — so
@@ -410,6 +468,11 @@ void ble_server_init(FSDState *state, portMUX_TYPE *state_mux) {
     // data, and the pairing requirement already gates the link.
     g_ch_bulk = svc->createCharacteristic(BLE_UUID_BULK, NIMBLE_PROPERTY::NOTIFY);
     g_ch_bulk->setCallbacks(new BulkCB());
+
+    // Upload: write-only, no response. The phone pushes camera.bin here.
+    g_ch_upload = svc->createCharacteristic(
+        BLE_UUID_UPLOAD, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
+    g_ch_upload->setCallbacks(new UploadCB());
 
     // NimBLE 2.x: services start with the server, not individually.
     g_server->start();

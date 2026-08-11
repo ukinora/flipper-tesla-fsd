@@ -1,0 +1,220 @@
+/*
+ * camera_store.cpp — see camera_store.h.
+ */
+
+#include "camera_store.h"
+
+// Only the T-2CAN build carries the camera core (see platformio.ini
+// build_src_filter). Guarding the whole file keeps the other variants linking
+// and their flash footprint unchanged — the same approach ble_server.cpp uses.
+#ifdef BLE_SERVER_ENABLED
+
+#include <Arduino.h>
+#include <LittleFS.h>
+
+#define CAM_PATH "/camera.bin"
+#define CAM_TMP "/camera.tmp"
+
+static bool g_fs_ok = false;
+static File g_db_file;    // held open so lookups are just seek + read
+static FsdCamDb g_db;
+static bool g_db_ok = false;
+
+static File g_up_file;
+static bool g_up_active = false;
+static uint32_t g_up_total = 0;
+static uint32_t g_up_written = 0;
+static uint16_t g_up_next_seq = 1; // seq 0 is the header frame
+static uint32_t g_up_crc = 0;      // over the body, header excluded
+
+// zlib-compatible CRC-32. Bitwise so there is no 1 KB table to carry; a 163 KB
+// upload is a one-off, and it is computed while the bytes stream past anyway.
+static uint32_t crc32_update(uint32_t crc, const uint8_t* d, size_t n) {
+    crc = ~crc;
+    while(n--) {
+        crc ^= *d++;
+        for(int k = 0; k < 8; k++) {
+            crc = (crc >> 1) ^ (0xEDB88320u & (uint32_t)(-(int32_t)(crc & 1u)));
+        }
+    }
+    return ~crc;
+}
+
+/** Reader handed to fsd_camera. The file stays open; a lookup is seek + read. */
+static size_t db_read(void* ctx, uint32_t offset, void* buf, size_t len) {
+    (void)ctx;
+    if(!g_db_file) return 0;
+    if(!g_db_file.seek(offset)) return 0;
+    int n = g_db_file.read((uint8_t*)buf, len);
+    return n > 0 ? (size_t)n : 0;
+}
+
+static void close_db() {
+    if(g_db_file) g_db_file.close();
+    g_db_ok = false;
+}
+
+static bool open_db() {
+    close_db();
+    if(!g_fs_ok || !LittleFS.exists(CAM_PATH)) return false;
+    g_db_file = LittleFS.open(CAM_PATH, "r");
+    if(!g_db_file) return false;
+    g_db_ok = fsd_cam_open(&g_db, db_read, nullptr);
+    if(!g_db_ok) {
+        Serial.println("[CAM] camera.bin present but unreadable");
+        g_db_file.close();
+    }
+    return g_db_ok;
+}
+
+void camera_store_init(void) {
+    // begin(true) formats on failure. blackbox_init() usually mounts first;
+    // calling again is harmless and removes the ordering dependency.
+    g_fs_ok = LittleFS.begin(true);
+    if(!g_fs_ok) {
+        Serial.println("[CAM] LittleFS mount failed");
+        return;
+    }
+    // A leftover temp file means a previous upload died. It is not a database.
+    if(LittleFS.exists(CAM_TMP)) LittleFS.remove(CAM_TMP);
+
+    if(open_db()) {
+        Serial.printf("[CAM] %u cameras loaded (%u cells)\n",
+                      (unsigned)g_db.rec_count, (unsigned)g_db.cell_count);
+    } else {
+        Serial.println("[CAM] no camera database — upload one from the app");
+    }
+}
+
+bool camera_store_ready(void) {
+    return g_db_ok && !g_up_active;
+}
+
+const FsdCamDb* camera_store_db(void) {
+    return camera_store_ready() ? &g_db : nullptr;
+}
+
+uint32_t camera_store_count(void) {
+    return g_db_ok ? g_db.rec_count : 0;
+}
+
+bool camera_store_uploading(void) {
+    return g_up_active;
+}
+
+uint32_t camera_store_upload_progress(void) {
+    return g_up_written;
+}
+
+uint8_t camera_store_upload_begin(uint32_t total) {
+    if(g_up_active) return CAM_UP_BUSY;
+    if(!g_fs_ok) return CAM_UP_NO_FS;
+    if(total < FSD_CAM_HEADER_SIZE || total > CAM_MAX_BYTES) return CAM_UP_TOO_BIG;
+
+    // Stop serving lookups from a file we are about to replace.
+    close_db();
+    LittleFS.remove(CAM_TMP);
+    g_up_file = LittleFS.open(CAM_TMP, "w");
+    if(!g_up_file) return CAM_UP_WRITE_FAIL;
+
+    g_up_total = total;
+    g_up_written = 0;
+    g_up_next_seq = 1;
+    g_up_crc = 0;
+    g_up_active = true;
+    Serial.printf("[CAM] upload started, %u B\n", (unsigned)total);
+    return CAM_UP_OK;
+}
+
+uint8_t camera_store_upload_chunk(uint16_t seq, const uint8_t* data, size_t len) {
+    if(!g_up_active) return CAM_UP_NOT_ACTIVE;
+    if(!data || len == 0) return CAM_UP_OK; // nothing to do, not an error
+    // A gap would leave a hole we could never see again. Refuse and let the
+    // app restart rather than storing a database with invisible damage.
+    if(seq != g_up_next_seq) return CAM_UP_BAD_SEQ;
+    if(g_up_written + len > g_up_total) return CAM_UP_SIZE_MISMATCH;
+
+    if(g_up_file.write(data, len) != len) {
+        camera_store_upload_abort();
+        return CAM_UP_WRITE_FAIL;
+    }
+
+    // CRC covers the body only — the header carries the expected value, so it
+    // cannot cover itself.
+    if(g_up_written + len > FSD_CAM_HEADER_SIZE) {
+        size_t skip = (g_up_written < FSD_CAM_HEADER_SIZE)
+                          ? (size_t)(FSD_CAM_HEADER_SIZE - g_up_written)
+                          : 0;
+        g_up_crc = crc32_update(g_up_crc, data + skip, len - skip);
+    }
+
+    g_up_written += (uint32_t)len;
+    g_up_next_seq++;
+    return CAM_UP_OK;
+}
+
+uint8_t camera_store_upload_end(void) {
+    if(!g_up_active) return CAM_UP_NOT_ACTIVE;
+    g_up_file.close();
+    g_up_active = false;
+
+    uint8_t err = CAM_UP_OK;
+    if(g_up_written != g_up_total) {
+        err = CAM_UP_SIZE_MISMATCH;
+    } else {
+        // Re-read the header from flash rather than trusting what was sent —
+        // this also proves the file is actually readable back.
+        File f = LittleFS.open(CAM_TMP, "r");
+        if(!f) {
+            err = CAM_UP_WRITE_FAIL;
+        } else {
+            uint8_t h[FSD_CAM_HEADER_SIZE];
+            bool read_ok = f.read(h, sizeof(h)) == (int)sizeof(h);
+            f.close();
+            if(!read_ok) {
+                err = CAM_UP_WRITE_FAIL;
+            } else {
+                uint32_t magic = (uint32_t)h[0] | ((uint32_t)h[1] << 8) |
+                                 ((uint32_t)h[2] << 16) | ((uint32_t)h[3] << 24);
+                uint32_t want = (uint32_t)h[22] | ((uint32_t)h[23] << 8) |
+                                ((uint32_t)h[24] << 16) | ((uint32_t)h[25] << 24);
+                if(magic != FSD_CAM_MAGIC || h[4] != FSD_CAM_VERSION) {
+                    err = CAM_UP_BAD_FORMAT;
+                } else if(want != g_up_crc) {
+                    Serial.printf("[CAM] CRC %08X != %08X\n",
+                                  (unsigned)g_up_crc, (unsigned)want);
+                    err = CAM_UP_BAD_CRC;
+                }
+            }
+        }
+    }
+
+    if(err != CAM_UP_OK) {
+        LittleFS.remove(CAM_TMP);
+        open_db(); // put the previous database back into service
+        Serial.printf("[CAM] upload rejected (%u)\n", err);
+        return err;
+    }
+
+    // Swap. Removing first is required — rename() will not overwrite.
+    LittleFS.remove(CAM_PATH);
+    if(!LittleFS.rename(CAM_TMP, CAM_PATH)) {
+        LittleFS.remove(CAM_TMP);
+        Serial.println("[CAM] rename failed — no database now");
+        return CAM_UP_WRITE_FAIL;
+    }
+    if(!open_db()) return CAM_UP_BAD_FORMAT;
+    Serial.printf("[CAM] upload OK — %u cameras\n", (unsigned)g_db.rec_count);
+    return CAM_UP_OK;
+}
+
+void camera_store_upload_abort(void) {
+    if(g_up_file) g_up_file.close();
+    if(g_up_active) Serial.println("[CAM] upload aborted");
+    g_up_active = false;
+    g_up_written = 0;
+    LittleFS.remove(CAM_TMP);
+    open_db();
+}
+
+#endif  // BLE_SERVER_ENABLED
