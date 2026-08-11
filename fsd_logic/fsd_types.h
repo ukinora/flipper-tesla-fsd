@@ -49,4 +49,15 @@ typedef enum {
     OpMode_ListenOnly = 0,  // pure passive sniff, no TX at all
     OpMode_Active,          // RX + TX, normal operation
     OpMode_Service,         // unrestricted, gates aggressive features (Flipper)
+    // Single-purpose mode for unattended speed-camera response, added for the
+    // car-resident build. NOT a superset of Active and not "more permissive
+    // because the number is bigger": fsd_can_transmit() returns FALSE here, so
+    // every general TX path is as closed as it is in Listen-Only. Only the
+    // camera path has its own door (fsd_autonomy.h), and that door additionally
+    // requires evidence that a person is driving.
+    //
+    // Active is a blanket permission — nag killer, GTW overrides, body control,
+    // hazards. Handing that to a module with nobody in the car, to get one
+    // scroll detent, is far more than the job needs.
+    OpMode_Autonomous,
 } OpMode;

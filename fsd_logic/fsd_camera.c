@@ -56,6 +56,7 @@ bool fsd_cam_open(FsdCamDb* db, FsdCamReadFn read, void* ctx) {
     db->rec_count = rd32(h + 14);
     db->rec_offset = rd32(h + 18);
     db->crc = rd32(h + 22);
+    db->built_at = rd32(h + 26); // 0 on files written before this field existed
     // A zero grid would divide by zero in every lookup; treat as corrupt.
     db->ok = (db->grid_e6 > 0) && (db->cell_count > 0) &&
              (db->rec_offset >= FSD_CAM_HEADER_SIZE);

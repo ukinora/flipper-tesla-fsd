@@ -17,10 +17,12 @@
 
 #ifdef BLE_SERVER_ENABLED
 
+#include "../../fsd_logic/fsd_autonomy.h"
 #include "blackbox.h"
 #include "camera_store.h"
 #include "capability.h"
 #include "config.h"
+#include "prefs.h"
 #include <NimBLEDevice.h>
 #include <string.h>
 
@@ -33,6 +35,7 @@
 #define BLE_UUID_CAPAB   "6b1a0005-4b53-4d4f-4432-43414e000001"
 #define BLE_UUID_BULK    "6b1a0006-4b53-4d4f-4432-43414e000001"
 #define BLE_UUID_UPLOAD  "6b1a0007-4b53-4d4f-4432-43414e000001"
+#define BLE_UUID_CAMSTAT "6b1a0008-4b53-4d4f-4432-43414e000001"
 
 #define BLE_STATE_LEN  20u
 #define BLE_RESULT_LEN 4u
@@ -47,12 +50,14 @@ static NimBLECharacteristic *g_ch_result = nullptr;
 static NimBLECharacteristic *g_ch_cap    = nullptr;
 static NimBLECharacteristic *g_ch_bulk   = nullptr;
 static NimBLECharacteristic *g_ch_upload = nullptr;
+static NimBLECharacteristic *g_ch_camstat = nullptr;
 
 static volatile bool g_connected = false;
 static volatile bool g_state_subscribed = false;  // client enabled State notifications
 static volatile bool g_bulk_subscribed  = false;
 static volatile uint16_t g_mtu = 23;              // until the peer negotiates up
 static uint32_t      g_last_state_ms = 0;
+static uint32_t      g_last_camstat_ms = 0;
 
 // ── Bulk transfer state ──────────────────────────────────────────────────────
 // Owned by loop() via ble_server_tick(); the BLE task only sets g_bulk_active
@@ -138,6 +143,38 @@ static void ble_pack_state(uint8_t *out) {
     out[17] = (uint8_t)((up >> 8) & 0xFFu);
     out[18] = (uint8_t)((up >> 16) & 0xFFu);
     out[19] = (uint8_t)((up >> 24) & 0xFFu);
+}
+
+// ── camera / autonomy status ─────────────────────────────────────────────────
+// Reports only what this build actually knows. The tracker and policy compile
+// but are not instantiated — nothing feeds them a position yet — so their
+// fields are absent rather than present-and-always-zero.
+static void ble_pack_camstat(uint8_t *out, uint32_t now_ms) {
+    FSDState s;
+    portENTER_CRITICAL(g_mux);
+    s = *g_state;
+    portEXIT_CRITICAL(g_mux);
+
+    FsdSupVerdict v = fsd_supervised_drive_why(&s, now_ms);
+    const FsdCamDb *db = camera_store_db();
+
+    uint8_t flags = 0;
+    if (s.autonomy_enabled)  flags |= (1u << 0);
+    if (v == FSD_SUP_OK)     flags |= (1u << 1);
+    if (db != nullptr)       flags |= (1u << 2);
+
+    memset(out, 0, BLE_CAMSTAT_LEN);
+    out[0] = BLE_PROTO_VERSION;
+    out[1] = flags;
+    out[2] = (uint8_t)v;
+    out[3] = (uint8_t)s.op_mode;
+
+    uint32_t n = camera_store_count();
+    uint32_t built = db ? db->built_at : 0u;
+    for (int i = 0; i < 4; i++) {
+        out[4 + i]  = (uint8_t)((n >> (8 * i)) & 0xFFu);
+        out[8 + i]  = (uint8_t)((built >> (8 * i)) & 0xFFu);
+    }
 }
 
 // ── frames/s, derived the same way the dashboard does ────────────────────────
@@ -248,12 +285,19 @@ static void ble_revoke_active_if_stale(uint32_t now_ms) {
 
     portENTER_CRITICAL(g_mux);
     bool was_active = (g_state->op_mode == OpMode_Active);
-    if (was_active) g_state->op_mode = OpMode_ListenOnly;
+    // Not Listen-Only unconditionally any more. The phone leaving withdraws the
+    // GENERAL transmit permission it granted, but it is not a reason to stop
+    // responding to speed cameras — a phone left at home is the exact case this
+    // module exists to cover. The floor grants no general TX either way, and
+    // the camera path still has to see a person driving.
+    OpMode floor = fsd_autonomy_floor(g_state);
+    if (was_active) g_state->op_mode = floor;
     portEXIT_CRITICAL(g_mux);
 
     if (was_active) {
-        Serial.printf("[BLE] no phone for %u s — reverting to Listen-Only\n",
-                      (unsigned)(BLE_ACTIVE_GRACE_MS / 1000u));
+        Serial.printf("[BLE] no phone for %u s — falling back to %s\n",
+                      (unsigned)(BLE_ACTIVE_GRACE_MS / 1000u),
+                      floor == OpMode_Autonomous ? "Autonomous" : "Listen-Only");
     }
 }
 
@@ -341,6 +385,24 @@ class CommandCB : public NimBLECharacteristicCallbacks {
             capability_start(millis());
             ble_send_result(cmd, BLE_RES_OK, 0);
             break;
+
+        case BLE_CMD_SET_AUTONOMY: {
+            bool on = (arg != 0);
+            portENTER_CRITICAL(g_mux);
+            g_state->autonomy_enabled = on;
+            // Re-derive the floor now. Turning autonomy off while sitting in
+            // Autonomous has to drop the module out of it immediately;
+            // otherwise the switch would appear to do nothing until a reboot.
+            if (g_state->op_mode == OpMode_Autonomous ||
+                g_state->op_mode == OpMode_ListenOnly)
+                g_state->op_mode = fsd_autonomy_floor(g_state);
+            FSDState snap = *g_state;
+            portEXIT_CRITICAL(g_mux);
+            prefs_save(&snap);
+            Serial.printf("[BLE] autonomy -> %s\n", on ? "ON" : "OFF");
+            ble_send_result(cmd, BLE_RES_OK, (uint16_t)snap.op_mode);
+            break;
+        }
 
         case BLE_CMD_SET_PROFILE:
         case BLE_CMD_PROFILE_STEP:
@@ -474,6 +536,12 @@ void ble_server_init(FSDState *state, portMUX_TYPE *state_mux) {
         BLE_UUID_UPLOAD, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
     g_ch_upload->setCallbacks(new UploadCB());
 
+    // Camera / autonomy status. Readable so the app can ask once on connect,
+    // and notified at 1 Hz because the supervision verdict changes with the
+    // gear and the belt.
+    g_ch_camstat = svc->createCharacteristic(
+        BLE_UUID_CAMSTAT, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
+
     // NimBLE 2.x: services start with the server, not individually.
     g_server->start();
 
@@ -507,6 +575,14 @@ void ble_server_tick(uint32_t now_ms) {
 
     g_ch_state->setValue(buf, sizeof(buf));
     g_ch_state->notify();
+
+    if (g_ch_camstat && now_ms - g_last_camstat_ms >= BLE_CAMSTAT_PERIOD_MS) {
+        g_last_camstat_ms = now_ms;
+        uint8_t cs[BLE_CAMSTAT_LEN];
+        ble_pack_camstat(cs, now_ms);
+        g_ch_camstat->setValue(cs, sizeof(cs));
+        g_ch_camstat->notify();
+    }
 }
 
 bool ble_server_connected(void) { return g_connected; }

@@ -37,6 +37,11 @@ void prefs_load(FSDState *state) {
     state->bms_output               = g_prefs.getBool("bms",    false);
     state->firmware_14x_warning     = g_prefs.getBool("14x",    true);
     state->blackbox_enabled         = g_prefs.getBool("bbx",    BLACKBOX_DEFAULT_ENABLED);
+    // Operator intent for unattended camera response. Persisted BECAUSE it
+    // grants nothing by itself: without a gear of D and a latched belt it
+    // produces no transmission at all. op_mode remains unrestored — see the
+    // PERSIST_OP_MODE note below.
+    state->autonomy_enabled         = g_prefs.getBool("auton",  false);
 #if defined(BOARD_TTGO_DISPLAY)
     state->display_enabled          = g_prefs.getBool("disp",   true);
     state->display_brightness       = g_prefs.getUChar("disp_br", 50);
@@ -118,6 +123,7 @@ void prefs_save(const FSDState *state) {
     g_prefs.putBool("bms",    state->bms_output);
     g_prefs.putBool("14x",    state->firmware_14x_warning);
     g_prefs.putBool("bbx",    state->blackbox_enabled);
+    g_prefs.putBool("auton",  state->autonomy_enabled);
 #if defined(BOARD_TTGO_DISPLAY)
     g_prefs.putBool("disp",   state->display_enabled);
     g_prefs.putUChar("disp_br", state->display_brightness);

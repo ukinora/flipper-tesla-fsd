@@ -2416,6 +2416,95 @@ static void test_supervised_drive(void) {
     CHECK(!fsd_supervised_drive(NULL, 10000), "NULL state is not supervised");
 }
 
+// ── autonomy floor and the narrow door ───────────────────────────────────────
+static void test_autonomy_mode(void) {
+    printf("\n-- autonomy: floor and gate --\n");
+
+    FSDState s;
+    fsd_state_init(&s, TeslaHW_HW3);
+
+    CHECK(fsd_autonomy_floor(&s) == OpMode_ListenOnly, "floor is Listen-Only by default");
+    s.autonomy_enabled = true;
+    CHECK(fsd_autonomy_floor(&s) == OpMode_Autonomous, "enabled -> floor is Autonomous");
+    CHECK(fsd_autonomy_floor(NULL) == OpMode_ListenOnly, "NULL floors to Listen-Only");
+
+    // The whole point of a separate mode: it must not carry general TX. A car
+    // waking at 3 a.m. in Autonomous has to be as mute as one in Listen-Only.
+    s.rx_count = 1;
+    s.last_rx_ms = 1000;
+    s.rx_stale = false;
+    s.op_mode = OpMode_Autonomous;
+    CHECK(!fsd_can_transmit(&s), "Autonomous grants no general TX");
+    CHECK(!fsd_profile_tx_allowed(&s, 1000), "nor profile replay");
+
+    // The camera door. Enabled + right mode is still not enough on its own.
+    CHECK(!fsd_autonomy_allows(&s, 1000), "enabled and Autonomous, but nobody driving");
+
+    s.di_gear = FSD_GEAR_D;
+    s.di_gear_ms = 1000;
+    s.di_gear_seen = true;
+    s.belt_seen = true;
+    s.belt_seen_ms = 1000;
+    s.ui_buckle_status = true;
+    CHECK(fsd_autonomy_allows(&s, 1000), "driving, enabled, Autonomous -> allowed");
+
+    // Connecting the phone must not silently switch the feature off.
+    s.op_mode = OpMode_Active;
+    CHECK(fsd_autonomy_allows(&s, 1000), "Active is accepted too");
+
+    s.op_mode = OpMode_ListenOnly;
+    CHECK(!fsd_autonomy_allows(&s, 1000), "Listen-Only means listen only");
+
+    s.op_mode = OpMode_Autonomous;
+    s.autonomy_enabled = false;
+    CHECK(!fsd_autonomy_allows(&s, 1000), "the operator switch is decisive");
+
+    // Losing supervision withdraws it on the same call, with no grace period —
+    // a belt coming undone at speed is not a transient the way a screen blank is.
+    s.autonomy_enabled = true;
+    CHECK(fsd_autonomy_allows(&s, 1000), "allowed again");
+    s.ui_buckle_status = false;
+    CHECK(!fsd_autonomy_allows(&s, 1000), "belt off -> immediately refused");
+
+    CHECK(!fsd_autonomy_allows(NULL, 1000), "NULL is never allowed");
+}
+
+// ── fields that used to be structurally zero on the ESP32 ────────────────────
+static void test_observer_extra_fields(void) {
+    printf("\n-- observers: the fields nothing else parses --\n");
+
+    FSDState s;
+    fsd_state_init(&s, TeslaHW_HW3);
+    CANFRAME f;
+
+    // DI_cruiseState, bit 12|3 LE -> byte 1 bits [6:4].
+    memset(&f, 0, sizeof(f));
+    f.canId = CAN_ID_DI_STATE;
+    f.data_lenght = 8;
+    f.buffer[1] = (uint8_t)(0x05u << 4) | 0x8Fu; // value 5, neighbours set
+    fsd_drive_observe_gear(&s, &f, 100);
+    CHECK(s.di_cruise_state == 5, "cruise state %u decoded as 5", s.di_cruise_state);
+
+    // Blinkers and door, from 0x311.
+    memset(&f, 0, sizeof(f));
+    f.canId = CAN_ID_UI_WARNING;
+    f.data_lenght = 8;
+    f.buffer[2] = (uint8_t)(1u << 6);
+    fsd_drive_observe_belt(&s, &f, 200);
+    CHECK(s.ui_left_blinker && !s.ui_right_blinker, "left blinker only");
+    f.buffer[2] = (uint8_t)(1u << 7);
+    fsd_drive_observe_belt(&s, &f, 200);
+    CHECK(!s.ui_left_blinker && s.ui_right_blinker, "right blinker only");
+    f.buffer[2] = 0x3F; // everything except the two blinker bits
+    fsd_drive_observe_belt(&s, &f, 200);
+    CHECK(!s.ui_left_blinker && !s.ui_right_blinker, "neighbours do not fake a blinker");
+
+    f.buffer[3] = (uint8_t)(1u << 4);
+    fsd_drive_observe_belt(&s, &f, 200);
+    CHECK(s.ui_any_door_open, "door open");
+    CHECK(s.ui_warning_seen, "ui_warning_seen set");
+}
+
 int main(void) {
     printf("test_fsd_core: Tesla FSD protocol core host tests\n");
     test_set_bit();
@@ -2468,6 +2557,8 @@ int main(void) {
     test_tx_allowlist();
     test_drive_observers();
     test_supervised_drive();
+    test_autonomy_mode();
+    test_observer_extra_fields();
 
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

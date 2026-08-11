@@ -1528,7 +1528,9 @@ void setup() {
 #endif
 
     fsd_state_init(&g_state, TeslaHW_Unknown);
-    // Explicit safe defaults — will be overridden after HW auto-detect
+    // Explicit safe defaults — will be overridden after HW auto-detect.
+    // Listen-Only until prefs are loaded; the floor is applied afterwards,
+    // once autonomy_enabled is actually known.
     g_state.op_mode               = OpMode_ListenOnly;
     g_state.nag_killer            = true;
     g_state.suppress_speed_chime  = true;
@@ -1541,6 +1543,14 @@ void setup() {
     g_state.blackbox_enabled      = BLACKBOX_DEFAULT_ENABLED;  // ON on LittleFS/SD, OFF on volatile RAM (#124)
 
     prefs_load(&g_state);
+    // Now that autonomy_enabled is known, settle where the module sits with
+    // nothing else raising it. op_mode itself is still never read from NVS
+    // (PERSIST_OP_MODE); this is derived from the operator's intent, and
+    // Autonomous transmits nothing on its own — the camera path additionally
+    // needs a gear of D and a latched belt.
+    g_state.op_mode = fsd_autonomy_floor(&g_state);
+    if (g_state.op_mode == OpMode_Autonomous)
+        Serial.println("[MODE] Autonomous — camera response only, no general TX");
     // Apply a saved manual HW selection immediately (#110) so the correct
     // handlers are live from the first frame, without waiting on detection.
     if (g_state.hw_override != TeslaHW_Unknown) {
