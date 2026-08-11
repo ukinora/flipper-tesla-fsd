@@ -18,6 +18,7 @@
 #ifdef BLE_SERVER_ENABLED
 
 #include "../../fsd_logic/fsd_autonomy.h"
+#include "../../fsd_logic/fsd_wire.h"
 #include "blackbox.h"
 #include "camera_store.h"
 #include "camera_task.h"
@@ -41,6 +42,16 @@
 #define BLE_STATE_LEN  20u
 #define BLE_RESULT_LEN 4u
 #define BLE_BULK_HDR   2u   // seq prefix on every bulk frame
+
+// These and fsd_wire.h's must not drift apart. Two sets exist because
+// ble_server is the protocol's public face while fsd_wire.h is what the host
+// tests and the fixture generator compile against — so the compiler checks that
+// the two agree rather than a reviewer having to.
+static_assert(BLE_STATE_LEN == FSD_WIRE_STATE_LEN, "State length drifted");
+static_assert(BLE_CAMSTAT_LEN == FSD_WIRE_CAMSTAT_LEN, "CamStat length drifted");
+static_assert(BLE_RESULT_LEN == FSD_WIRE_RESULT_LEN, "Result length drifted");
+static_assert(BLE_PROTO_VERSION == FSD_WIRE_STATE_VERSION, "State version drifted");
+static_assert(BLE_CAMSTAT_VERSION == FSD_WIRE_CAMSTAT_VERSION, "CamStat version drifted");
 
 static FSDState     *g_state = nullptr;
 static portMUX_TYPE *g_mux   = nullptr;
@@ -85,69 +96,38 @@ static uint16_t g_bulk_seq    = 0;
 
 // ── State serialisation (20 B, little-endian) ────────────────────────────────
 // Layout is fixed; the app parses by offset. Bump BLE_PROTO_VERSION on change.
-static void ble_pack_state(uint8_t *out) {
+// GATHERS ONLY. Every clamp, scale and byte position lives in
+// fsd_logic/fsd_wire.c, which is pure C and host-tested — this file cannot be
+// compiled on a host, so anything left here would be untestable on both sides
+// of the link. `rx_fps` comes in as an argument because its counter lives here.
+static void ble_pack_state(uint8_t *out, uint16_t rx_fps) {
     FSDState s;
     portENTER_CRITICAL(g_mux);
     s = *g_state;
     portEXIT_CRITICAL(g_mux);
 
-    uint8_t flags = 0;
+    FsdWireState w;
+    memset(&w, 0, sizeof(w));
     // rx_count is the same wiring-sanity signal the red LED uses.
-    if (s.rx_count > 0)             flags |= (1u << 0);  // CAN traffic seen
-    if (s.tesla_ota_in_progress)    flags |= (1u << 1);
-    if (s.ui_left_blinker)          flags |= (1u << 2);
-    if (s.ui_right_blinker)         flags |= (1u << 3);
-    // bits 4/5 (blind spot L/R) intentionally unset: DAS_sideCollisionWarning is
-    // not extracted on the ESP32 path yet, and its bit position is only confirmed
-    // for 0x39B (HW4/Highland) — see CLAUDE.md. Left 0 rather than guessed.
-    if (s.driver_brake_applied)     flags |= (1u << 6);
-    // bit 7 (profile change in progress) is set by the SET_PROFILE closed loop.
+    w.rx_seen          = (s.rx_count > 0);
+    w.ota_in_progress  = s.tesla_ota_in_progress;
+    w.blinker_left     = s.ui_left_blinker;
+    w.blinker_right    = s.ui_right_blinker;
+    w.brake_applied    = s.driver_brake_applied;
+    w.op_mode          = (uint8_t)s.op_mode;
+    w.hw_version       = (uint8_t)s.hw_version;
+    w.speed_profile    = s.speed_profile;
+    w.ap_state         = s.das_ap_state;
+    w.speed_kph        = s.vehicle_speed_kph;
+    w.soc_percent      = s.soc_percent;
+    w.gear             = s.di_gear;
+    w.speed_limit_seen = s.speed_limit_seen;
+    w.speed_limit_kph  = s.speed_limit_kph;
+    w.rx_fps           = rx_fps;
+    w.crc_err_count    = s.crc_err_count;
+    w.uptime_s         = millis() / 1000u;
 
-    int prof = s.speed_profile;
-    if (prof < 0) prof = 0;
-    if (prof > 3) prof = 3;   // FSD v14 Lite: Sloth/Chill/Standard/Hurry
-
-    float soc = s.soc_percent;
-    if (soc < 0.0f)   soc = 0.0f;
-    if (soc > 100.0f) soc = 100.0f;
-
-    float kph = s.vehicle_speed_kph;
-    if (kph < 0.0f) kph = 0.0f;
-    uint32_t kph10 = (uint32_t)(kph * 10.0f + 0.5f);
-    if (kph10 > 0xFFFFu) kph10 = 0xFFFFu;
-
-    uint32_t lim = (uint32_t)(s.speed_limit_seen ? s.speed_limit_kph + 0.5f : 0.0f);
-    if (lim > 0xFFFFu) lim = 0xFFFFu;
-
-    uint32_t crc = s.crc_err_count;
-    if (crc > 0xFFFFu) crc = 0xFFFFu;
-
-    memset(out, 0, BLE_STATE_LEN);
-    out[0]  = BLE_PROTO_VERSION;
-    out[1]  = flags;
-    out[2]  = (uint8_t)s.op_mode;
-    out[3]  = (uint8_t)s.hw_version;
-    out[4]  = (uint8_t)prof;
-    out[5]  = s.das_ap_state;
-    out[6]  = (uint8_t)(kph10 & 0xFFu);
-    out[7]  = (uint8_t)(kph10 >> 8);
-    out[8]  = (uint8_t)(soc + 0.5f);
-    // Gear, as originally specified. This byte carried the cruise state as a
-    // placeholder while the ESP32 had no PRND parser — the protocol note said
-    // to put it back once one existed, and fsd_autonomy.c now provides one.
-    // Values are the DBC's: 0=INVALID 1=P 2=R 3=N 4=D 7=SNA.
-    // Wire meaning changed, so BLE_PROTO_VERSION goes to 2.
-    out[9]  = s.di_gear;
-    out[10] = (uint8_t)(lim & 0xFFu);
-    out[11] = (uint8_t)(lim >> 8);
-    // out[12..13] rx_fps — filled by the caller-side counter below.
-    out[14] = (uint8_t)(crc & 0xFFu);
-    out[15] = (uint8_t)(crc >> 8);
-    uint32_t up = millis() / 1000u;
-    out[16] = (uint8_t)(up & 0xFFu);
-    out[17] = (uint8_t)((up >> 8) & 0xFFu);
-    out[18] = (uint8_t)((up >> 16) & 0xFFu);
-    out[19] = (uint8_t)((up >> 24) & 0xFFu);
+    fsd_wire_pack_state(&w, out);
 }
 
 // ── camera / autonomy status ─────────────────────────────────────────────────
@@ -177,46 +157,32 @@ static void ble_pack_camstat(uint8_t *out, uint32_t now_ms) {
     bool have_db = (db != nullptr);
     if (db) camera_store_db_release();
 
-    uint8_t flags = 0;
-    if (s.autonomy_enabled)             flags |= (1u << 0);
-    if (v == FSD_SUP_OK)                flags |= (1u << 1);
-    if (have_db)                        flags |= (1u << 2);
-    if (fsd_autonomy_allows(&s, now_ms)) flags |= (1u << 3);
-    if (camera_task_pol_suspended())    flags |= (1u << 4);
-    if (camera_task_learning_dirty())   flags |= (1u << 5);
-    if (camera_task_profile_fresh())    flags |= (1u << 6);
-    if (camera_task_save_failing())     flags |= (1u << 7);
+    // GATHERS ONLY — the layout is in fsd_logic/fsd_wire.c. See ble_pack_state.
+    FsdWireCamStat w;
+    memset(&w, 0, sizeof(w));
+    w.autonomy_enabled = s.autonomy_enabled;
+    w.supervised_ok    = (v == FSD_SUP_OK);
+    w.db_loaded        = have_db;
+    w.autonomy_allows  = fsd_autonomy_allows(&s, now_ms);
+    w.pol_suspended    = camera_task_pol_suspended();
+    w.learning_dirty   = camera_task_learning_dirty();
+    w.profile_fresh    = camera_task_profile_fresh();
+    w.save_failing     = camera_task_save_failing();
+    w.sup_verdict      = (uint8_t)v;
+    w.op_mode          = (uint8_t)s.op_mode;
+    w.camera_count     = camera_store_count();
+    w.built_at         = built;
+    w.gps_verdict      = camera_task_gps_verdict();
+    w.pol_phase        = camera_task_pol_phase();
+    w.pol_action       = camera_task_pol_action();
+    w.pol_target       = camera_task_pol_target();
+    w.nearest_m        = camera_task_nearest_m();
+    w.gps_accuracy_raw = camera_task_gps_accuracy_raw();
+    w.raw_profile      = camera_task_raw_profile();
+    w.learned_count    = camera_task_learned_count();
+    w.scan_full_count  = camera_task_scan_full_count();
 
-    memset(out, 0, BLE_CAMSTAT_LEN);
-    out[0] = BLE_CAMSTAT_VERSION;
-    out[1] = flags;
-    out[2] = (uint8_t)v;
-    out[3] = (uint8_t)s.op_mode;
-
-    uint32_t n = camera_store_count();
-    for (int i = 0; i < 4; i++) {
-        out[4 + i]  = (uint8_t)((n >> (8 * i)) & 0xFFu);
-        out[8 + i]  = (uint8_t)((built >> (8 * i)) & 0xFFu);
-    }
-
-    out[12] = camera_task_gps_verdict();
-    out[13] = (uint8_t)((camera_task_pol_phase()  & 0x07u) |
-                        ((camera_task_pol_action() & 0x03u) << 3) |
-                        ((camera_task_pol_target() & 0x03u) << 5));
-
-    uint16_t near_m = camera_task_nearest_m();
-    out[14] = (uint8_t)(near_m & 0xFFu);
-    out[15] = (uint8_t)(near_m >> 8);
-
-    out[16] = camera_task_gps_accuracy_raw();
-    // RAW, before camera_task's range check, so a bring-up drive can tell a
-    // mis-decode ("it says 5") from an absent frame ("it says 0xFF").
-    out[17] = camera_task_raw_profile();
-
-    uint16_t learned = camera_task_learned_count();
-    out[18] = (learned > 255u) ? 255u : (uint8_t)learned;
-    uint16_t full = camera_task_scan_full_count();
-    out[19] = (full > 255u) ? 255u : (uint8_t)full;
+    fsd_wire_pack_camstat(&w, out);
 }
 
 // ── frames/s, derived the same way the dashboard does ────────────────────────
@@ -237,9 +203,8 @@ static void ble_update_fps(uint32_t now) {
 
 static void ble_send_result(uint8_t cmd, uint8_t res, uint16_t extra) {
     if (!g_ch_result) return;
-    uint8_t b[BLE_RESULT_LEN] = {
-        cmd, res, (uint8_t)(extra & 0xFFu), (uint8_t)(extra >> 8)
-    };
+    uint8_t b[BLE_RESULT_LEN];
+    fsd_wire_pack_result(cmd, res, extra, b);
     g_ch_result->setValue(b, sizeof(b));
     g_ch_result->indicate();  // ACKed: a lost command result would desync the app
 }
@@ -643,10 +608,11 @@ void ble_server_tick(uint32_t now_ms) {
     // Nothing subscribed -> skip the pack entirely; keep the loop cheap.
     if (!g_connected || !g_state_subscribed) return;
 
+    // rx_fps goes in through the packer now rather than being poked into bytes
+    // 12-13 afterwards: the whole payload comes from one place, so the fixture
+    // the app tests against covers every byte.
     uint8_t buf[BLE_STATE_LEN];
-    ble_pack_state(buf);
-    buf[12] = (uint8_t)(g_fps & 0xFFu);
-    buf[13] = (uint8_t)(g_fps >> 8);
+    ble_pack_state(buf, g_fps);
 
     g_ch_state->setValue(buf, sizeof(buf));
     g_ch_state->notify();

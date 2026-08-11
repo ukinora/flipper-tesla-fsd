@@ -47,15 +47,24 @@ BTN_SRC := test_button.c $(ROOT)/fsd_logic/fsd_button.c
 test_button: $(BTN_SRC) $(ROOT)/fsd_logic/fsd_button.h
 	$(CC) $(CFLAGS) -I$(ROOT)/fsd_logic $(BTN_SRC) -o $@
 
-check: test_fsd_core test_speed_profile test_camera test_gps test_body test_button
+# BLE payload packing. Also GENERATES fixtures/wire_vectors.json, which the
+# Android app's JVM tests parse — so the two implementations check each other
+# instead of both checking the prose in BLE-GATT-프로토콜.md.
+WIRE_SRC := test_wire.c $(ROOT)/fsd_logic/fsd_wire.c
+
+test_wire: $(WIRE_SRC) $(ROOT)/fsd_logic/fsd_wire.h
+	$(CC) $(CFLAGS) -I$(ROOT)/fsd_logic $(WIRE_SRC) -o $@
+
+check: test_fsd_core test_speed_profile test_camera test_gps test_body test_button test_wire
 	./test_fsd_core
 	./test_speed_profile
 	./test_camera
 	./test_gps
 	./test_body
 	./test_button
+	./test_wire
 
 clean:
-	rm -rf test_fsd_core test_speed_profile test_camera test_gps test_body test_button *.dSYM
+	rm -rf test_fsd_core test_speed_profile test_camera test_gps test_body test_button test_wire *.dSYM
 
 .PHONY: check clean

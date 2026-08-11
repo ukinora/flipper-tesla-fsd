@@ -1,0 +1,29 @@
+{
+  "_generated_by": "test/test_wire.c — do not hand-edit",
+  "state_version": 2,
+  "camstat_version": 2,
+  "state_len": 20,
+  "camstat_len": 20,
+  "state": [
+    { "name": "zeroed", "hex": "0200000000000000000000000000000000000000", "fields": { "ver": 2, "flags": 0, "op_mode": 0, "hw": 0, "speed_profile": 0, "ap_state": 0, "speed_kph_x10": 0, "soc": 0, "gear": 0, "speed_limit": 0, "rx_fps": 0, "crc_err": 0, "uptime_s": 0 } },
+    { "name": "driving_hw3", "hex": "0249010202067a024e043c00b004030080510100", "fields": { "ver": 2, "flags": 73, "op_mode": 1, "hw": 2, "speed_profile": 2, "ap_state": 6, "speed_kph_x10": 634, "soc": 78, "gear": 4, "speed_limit": 60, "rx_fps": 1200, "crc_err": 3, "uptime_s": 86400 } },
+    { "name": "parked_listen_only", "hex": "020100020000000038010000d40300002a000000", "fields": { "ver": 2, "flags": 1, "op_mode": 0, "hw": 2, "speed_profile": 0, "ap_state": 0, "speed_kph_x10": 0, "soc": 56, "gear": 1, "speed_limit": 0, "rx_fps": 980, "crc_err": 0, "uptime_s": 42 } },
+    { "name": "autonomous_no_phone", "hex": "02010302010078031f0464007e040000100e0000", "fields": { "ver": 2, "flags": 1, "op_mode": 3, "hw": 2, "speed_profile": 1, "ap_state": 0, "speed_kph_x10": 888, "soc": 31, "gear": 4, "speed_limit": 100, "rx_fps": 1150, "crc_err": 0, "uptime_s": 3600 } },
+    { "name": "clamped_extremes", "hex": "020000000300ffff640000000000ffffffffffff", "fields": { "ver": 2, "flags": 0, "op_mode": 0, "hw": 0, "speed_profile": 3, "ap_state": 0, "speed_kph_x10": 65535, "soc": 100, "gear": 0, "speed_limit": 0, "rx_fps": 0, "crc_err": 65535, "uptime_s": 4294967295 } },
+    { "name": "ota_running", "hex": "020300020000000000010000e803000000000000", "fields": { "ver": 2, "flags": 3, "op_mode": 0, "hw": 2, "speed_profile": 0, "ap_state": 0, "speed_kph_x10": 0, "soc": 0, "gear": 1, "speed_limit": 0, "rx_fps": 1000, "crc_err": 0, "uptime_s": 0 } }
+  ],
+  "camstat": [
+    { "name": "zeroed", "hex": "0200000000000000000000000000000000000000", "fields": { "ver": 2, "flags": 0, "sup_verdict": 0, "op_mode": 0, "camera_count": 0, "built_at": 0, "gps_verdict": 0, "pol_phase": 0, "pol_action": 0, "pol_target": 0, "nearest_m": 0, "gps_accuracy_raw": 0, "raw_profile": 0, "learned_count": 0, "scan_full_count": 0 } },
+    { "name": "no_gps_yet", "hex": "02050103bb1f0000803299680100ffffffff0000", "fields": { "ver": 2, "flags": 5, "sup_verdict": 1, "op_mode": 3, "camera_count": 8123, "built_at": 1754870400, "gps_verdict": 1, "pol_phase": 0, "pol_action": 0, "pol_target": 0, "nearest_m": 65535, "gps_accuracy_raw": 255, "raw_profile": 255, "learned_count": 0, "scan_full_count": 0 } },
+    { "name": "lowering_for_camera", "hex": "026f0003bb1f000080329968002a8f000f032a00", "fields": { "ver": 2, "flags": 111, "sup_verdict": 0, "op_mode": 3, "camera_count": 8123, "built_at": 1754870400, "gps_verdict": 0, "pol_phase": 2, "pol_action": 1, "pol_target": 1, "nearest_m": 143, "gps_accuracy_raw": 15, "raw_profile": 3, "learned_count": 42, "scan_full_count": 0 } },
+    { "name": "gps_frozen_in_tunnel", "hex": "024f0003bb1f0000000000000700ffff0a020000", "fields": { "ver": 2, "flags": 79, "sup_verdict": 0, "op_mode": 3, "camera_count": 8123, "built_at": 0, "gps_verdict": 7, "pol_phase": 0, "pol_action": 0, "pol_target": 0, "nearest_m": 65535, "gps_accuracy_raw": 10, "raw_profile": 2, "learned_count": 0, "scan_full_count": 0 } },
+    { "name": "save_failing", "hex": "02a5060300000000000000000600ffffffffffff", "fields": { "ver": 2, "flags": 165, "sup_verdict": 6, "op_mode": 3, "camera_count": 0, "built_at": 0, "gps_verdict": 6, "pol_phase": 0, "pol_action": 0, "pol_target": 0, "nearest_m": 65535, "gps_accuracy_raw": 255, "raw_profile": 255, "learned_count": 255, "scan_full_count": 255 } },
+    { "name": "field_maxima", "hex": "02000000ffffffffffffffff007fffffffff0000", "fields": { "ver": 2, "flags": 0, "sup_verdict": 0, "op_mode": 0, "camera_count": 4294967295, "built_at": 4294967295, "gps_verdict": 0, "pol_phase": 7, "pol_action": 3, "pol_target": 3, "nearest_m": 65535, "gps_accuracy_raw": 255, "raw_profile": 255, "learned_count": 0, "scan_full_count": 0 } }
+  ],
+  "result": [
+    { "name": "set_mode_ok", "hex": "01000000", "fields": { "cmd": 1, "result": 0, "extra": 0 } },
+    { "name": "set_profile_unsupported", "hex": "10030000", "fields": { "cmd": 16, "result": 3, "extra": 0 } },
+    { "name": "dump_not_found", "hex": "30050000", "fields": { "cmd": 48, "result": 5, "extra": 0 } },
+    { "name": "ping_ok_extra", "hex": "5000ffff", "fields": { "cmd": 80, "result": 0, "extra": 65535 } }
+  ]
+}
