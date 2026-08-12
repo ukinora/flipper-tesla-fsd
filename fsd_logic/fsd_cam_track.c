@@ -462,11 +462,32 @@ bool fsd_trk_save(const FsdTracker* t, FsdTrkWriteFn write, void* ctx) {
     /* CRC covers the records only, and rides at the END of the file — it cannot
      * be in the header, because writing it there would mean buffering
      * everything first, which is exactly what streaming avoids. */
+    /* Written least-recently-used FIRST, so file order IS recency order.
+     *
+     * The record has no room for last_used and bumping the format for it is not
+     * worth it, so the order carries it instead. Without this, everything comes
+     * back at last_used = 0 and the first evictions after a reboot take
+     * whatever sits lowest in the array -- which, on a drive long enough to
+     * pass more than FSD_TRK_CAM_MAX cameras, throws away the daily commute to
+     * make room for a road driven once.
+     *
+     * Selection rather than a sort: no scratch array of pointers, and n is at
+     * most FSD_TRK_CAM_MAX. */
+    uint8_t written[FSD_TRK_CAM_MAX];
+    memset(written, 0, sizeof(written));
+
     uint32_t crc = 0;
-    for(int i = 0; i < FSD_TRK_CAM_MAX; i++) {
-        if(!t->mem[i].used || t->mem[i].dir_count == 0) continue;
+    for(uint16_t out = 0; out < n; out++) {
+        int pick = -1;
+        for(int i = 0; i < FSD_TRK_CAM_MAX; i++) {
+            if(written[i] || !t->mem[i].used || t->mem[i].dir_count == 0) continue;
+            if(pick < 0 || t->mem[i].last_used < t->mem[pick].last_used) pick = i;
+        }
+        if(pick < 0) return false; // n counted more than we can find: refuse
+
+        written[pick] = 1;
         uint8_t rec[FSD_TRK_REC_SIZE];
-        pack_record(&t->mem[i], rec);
+        pack_record(&t->mem[pick], rec);
         crc = crc32_update(crc, rec, sizeof(rec));
         if(write(ctx, rec, sizeof(rec)) != sizeof(rec)) return false;
     }
@@ -499,6 +520,12 @@ bool fsd_trk_load(FsdTracker* t, FsdTrkReadFn read, void* ctx) {
         }
         crc = crc32_update(crc, rec, sizeof(rec));
         unpack_record(&t->mem[i], rec);
+        /* fsd_trk_save() wrote least-recently-used first, so the index IS the
+         * recency rank. Restoring it here is what keeps eviction sane across a
+         * reboot; leaving every entry at 0 makes the loop in claim_cam() pick
+         * whatever sits lowest in the array instead of what was used longest
+         * ago. +1 so no loaded camera shares tick 0 with "never used". */
+        t->mem[i].last_used = (uint32_t)i + 1u;
     }
 
     uint8_t tail[4];
@@ -509,6 +536,11 @@ bool fsd_trk_load(FsdTracker* t, FsdTrkReadFn read, void* ctx) {
         fsd_trk_init(t);
         return false;
     }
+
+    /* Start the counter above every restored rank. Otherwise a camera used
+     * right after boot would be stamped with a smaller number than one restored
+     * from the file, and would look like the OLDER of the two. */
+    t->tick = (uint32_t)n + 1u;
     return true;
 }
 
