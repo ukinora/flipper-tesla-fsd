@@ -359,9 +359,12 @@ class CommandCB : public NimBLECharacteristicCallbacks {
         std::string v = ch->getValue();
         if (v.empty()) return;
 
-        // Only a bonded/authenticated peer may drive the module. The Command
-        // characteristic is declared WRITE_AUTHEN, but re-check: this path can
-        // enable CAN transmission.
+        // Only a bonded peer may drive the module. The characteristic is
+        // declared WRITE_ENC so the ATT layer should already have refused an
+        // unencrypted write, but re-check: this path can enable CAN
+        // transmission, and the declaration and this check have disagreed
+        // before (WRITE_AUTHEN made the ATT layer stricter than this branch,
+        // and the difference was invisible until it was traced by hand).
         if (!info.isEncrypted()) {
             ble_send_result(v[0], BLE_RES_REJECTED, 0);
             return;
@@ -512,8 +515,26 @@ void ble_server_init(FSDState *state, portMUX_TYPE *state_mux) {
 
     NimBLEDevice::init(name);
     NimBLEDevice::setPower(ESP_PWR_LVL_P9);
-    // Bonding + MITM: pairing is required before commands are accepted.
-    NimBLEDevice::setSecurityAuth(true, true, true);
+
+    // Bonding + Secure Connections, MITM deliberately OFF.
+    //
+    // The MITM bit used to be set here, and it made the module unusable: this
+    // board has no display and no keypad, so NimBLE's default IO capability is
+    // BLE_HS_IO_NO_INPUT_OUTPUT. That row of the Secure Connections pairing
+    // table (ble_sm_sc.c, ble_sm_sc_resp_ioa[3]) is IOACT_NONE for every peer
+    // capability, which selects Just Works, which never sets
+    // BLE_SM_PROC_F_AUTHENTICATED. Asking for MITM with no way to prove it
+    // does not get you MITM; it gets you an unauthenticated link that the
+    // Command characteristic then refuses (see below).
+    //
+    // Getting real MITM back would need a passkey the operator can read off
+    // the device. A hardcoded one is theatre in a public repository, and a
+    // generated one has to be displayed somewhere. Owner's decision
+    // (2026-08-13): pair without a code. The link is still encrypted and still
+    // bonded, so only a phone that has paired can drive the module; what is
+    // given up is protection against an attacker who is beside the car during
+    // the one pairing exchange.
+    NimBLEDevice::setSecurityAuth(true, false, true);
 
     g_server = NimBLEDevice::createServer();
     g_server->setCallbacks(&g_srv_cb);
@@ -524,8 +545,15 @@ void ble_server_init(FSDState *state, portMUX_TYPE *state_mux) {
         BLE_UUID_STATE, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
     g_ch_state->setCallbacks(&g_state_cb);
 
+    // WRITE_ENC, not WRITE_AUTHEN. AUTHEN requires sec_state.authenticated,
+    // which Just Works pairing never produces (ble_att_svr.c: "if (authen &&
+    // !sec_state.authenticated) -> BLE_ATT_ERR_INSUFFICIENT_AUTHEN"). With
+    // AUTHEN declared here, every command was rejected inside the ATT layer
+    // before CommandCB::onWrite ran, so the module answered nothing at all --
+    // status kept streaming and the phone just timed out. ENC requires only
+    // sec_state.encrypted, which bonded Just Works does give us.
     NimBLECharacteristic *ch_cmd = svc->createCharacteristic(
-        BLE_UUID_COMMAND, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_AUTHEN);
+        BLE_UUID_COMMAND, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_ENC);
     ch_cmd->setCallbacks(&g_cmd_cb);
 
     g_ch_result = svc->createCharacteristic(
