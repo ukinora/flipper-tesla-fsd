@@ -131,6 +131,21 @@ static void test_open_rejects_garbage(void) {
     CHECK(!fsd_cam_open(&db, mem_read, &s3), "truncated header must be refused");
 
     CHECK(!fsd_cam_open(&db, NULL, &s), "NULL reader must be refused");
+
+    /* Counts that overflow the arithmetic downstream. Nothing bounded these,
+     * and both products are computed in uint32 -- a corrupt count wraps to a
+     * SMALL number, so "this file is enormous" becomes "this file is tiny".
+     * That is the wrong direction: fsd_cam_verify() would then check a few
+     * bytes instead of refusing outright. */
+    memcpy(bad, FIXTURE, sizeof(bad));
+    bad[14] = 0xFF; bad[15] = 0xFF; bad[16] = 0xFF; bad[17] = 0xFF; // rec_count
+    MemSrc s4 = {bad, sizeof(bad), 0};
+    CHECK(!fsd_cam_open(&db, mem_read, &s4), "a rec_count that overflows must be refused");
+
+    memcpy(bad, FIXTURE, sizeof(bad));
+    bad[10] = 0xFF; bad[11] = 0xFF; bad[12] = 0xFF; bad[13] = 0xFF; // cell_count
+    MemSrc s5 = {bad, sizeof(bad), 0};
+    CHECK(!fsd_cam_open(&db, mem_read, &s5), "a cell_count that overflows must be refused");
 }
 
 // ── whole-file check ────────────────────────────────────────────────────────
