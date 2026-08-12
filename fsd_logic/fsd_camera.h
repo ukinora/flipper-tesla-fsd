@@ -107,6 +107,42 @@ typedef struct {
 /** Read and validate the header. Does not read the body. */
 bool fsd_cam_open(FsdCamDb* db, FsdCamReadFn read, void* ctx);
 
+/**
+ * zlib-compatible CRC-32, streaming. Start `crc` at 0.
+ *
+ * Exported rather than kept private so the upload path and the boot check run
+ * the SAME function. Two copies could drift, and then a file that passed on
+ * upload would fail at boot -- or, far worse, the other way round.
+ */
+uint32_t fsd_cam_crc32(uint32_t crc, const void* data, size_t len);
+
+/**
+ * How large the header says the file is. 0 when the db is not open.
+ *
+ * The record array is last, so header + cells + records is the whole file.
+ */
+uint32_t fsd_cam_total_bytes(const FsdCamDb* db);
+
+/**
+ * Check the body against the CRC the header carries. Streams through the
+ * reader, so it needs no buffer proportional to the file.
+ *
+ * 🔴 Nothing did this at boot. The upload path CRCs while the bytes stream
+ * past, so a file that arrived over BLE was checked once -- and never again.
+ * Flash wear, a LittleFS fault, or power vanishing during a write can all
+ * leave a file whose header still reads perfectly. The header is 32 of
+ * 163,000 bytes; it is the part least likely to be the damaged one.
+ *
+ * A corrupt record array does not fail loudly. It decodes to coordinates
+ * somewhere on Earth, which means cameras that are not there (the car slows
+ * for nothing) and cameras that are there going missing. Both look like the
+ * feature simply working badly.
+ *
+ * Costs one full read of the file. That is boot-time only, and the alternative
+ * is trusting 163 KB because 32 bytes looked right.
+ */
+bool fsd_cam_verify(const FsdCamDb* db);
+
 /** Records within `radius_m`. Returns how many were written to `out`, or -1.
  *  Never allocates; stops at `max`. */
 int fsd_cam_near(const FsdCamDb* db, int32_t lat_e7, int32_t lon_e7,

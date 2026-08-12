@@ -133,6 +133,88 @@ static void test_open_rejects_garbage(void) {
     CHECK(!fsd_cam_open(&db, NULL, &s), "NULL reader must be refused");
 }
 
+// ── whole-file check ────────────────────────────────────────────────────────
+//
+// 🔴 Nothing did this at boot. The upload path CRCs while the bytes stream
+// past, so a file that arrived over BLE was checked once -- and never again.
+// The header is 32 of 163,000 bytes; it is the part least likely to be the
+// damaged one, and it is the only part that was being looked at.
+//
+// A corrupt record array does not fail loudly. It decodes to coordinates
+// somewhere on Earth: cameras that are not there, and cameras that are there
+// going missing. Both look like the feature simply working badly.
+static void test_verify(void) {
+    MemSrc s = make_src();
+    FsdCamDb db;
+    CHECK(fsd_cam_open(&db, mem_read, &s), "fixture opens");
+
+    // The fixture is a real pack.py output, so this is also a check that the
+    // Python writer's CRC and the C reader's CRC are the same function.
+    CHECK(fsd_cam_verify(&db), "a genuine pack.py file must verify");
+    CHECK(fsd_cam_total_bytes(&db) == sizeof(FIXTURE),
+          "total=%u exp %u", fsd_cam_total_bytes(&db), (unsigned)sizeof(FIXTURE));
+
+    // One flipped bit anywhere in the body must be caught. Byte 60 sits in the
+    // record array -- the part a header check can never see.
+    unsigned char bad[sizeof(FIXTURE)];
+    memcpy(bad, FIXTURE, sizeof(bad));
+    bad[60] ^= 0x01;
+    MemSrc s2 = {bad, sizeof(bad), 0};
+    FsdCamDb db2;
+    CHECK(fsd_cam_open(&db2, mem_read, &s2), "damaged body still opens (header intact)");
+    CHECK(!fsd_cam_verify(&db2), "one flipped bit in the body must be caught");
+
+    // Damage inside the cell array too -- that one corrupts lookups rather
+    // than positions, so it fails in a different way and must also be caught.
+    memcpy(bad, FIXTURE, sizeof(bad));
+    bad[35] ^= 0x80;
+    MemSrc s3 = {bad, sizeof(bad), 0};
+    FsdCamDb db3;
+    CHECK(fsd_cam_open(&db3, mem_read, &s3), "damaged cells still open");
+    CHECK(!fsd_cam_verify(&db3), "damage in the cell array must be caught");
+
+    // Truncation. The bytes that ARE there could still sum correctly, so the
+    // short read has to be the failure, not the checksum.
+    MemSrc s4 = {FIXTURE, sizeof(FIXTURE) - 10, 0};
+    FsdCamDb db4;
+    CHECK(fsd_cam_open(&db4, mem_read, &s4), "truncated file still opens");
+    CHECK(!fsd_cam_verify(&db4), "a file shorter than its header claims must be refused");
+
+    // A header claiming the file ends inside itself. Treating that as "nothing
+    // to check" would pass it.
+    memcpy(bad, FIXTURE, sizeof(bad));
+    bad[14] = 0; bad[15] = 0; bad[16] = 0; bad[17] = 0; // rec_count = 0
+    bad[18] = 0; bad[19] = 0; bad[20] = 0; bad[21] = 0; // rec_offset = 0
+    MemSrc s5 = {bad, sizeof(bad), 0};
+    FsdCamDb db5;
+    if (fsd_cam_open(&db5, mem_read, &s5))
+        CHECK(!fsd_cam_verify(&db5), "an empty-by-header file must not verify");
+
+    CHECK(!fsd_cam_verify(NULL), "NULL must be refused");
+
+    FsdCamDb closed;
+    memset(&closed, 0, sizeof(closed));
+    CHECK(!fsd_cam_verify(&closed), "an unopened db must be refused");
+    CHECK(fsd_cam_total_bytes(&closed) == 0, "unopened db has no size");
+}
+
+// The CRC has to be zlib's, because camera-db/pack.py writes zlib's. A known
+// answer pins it: CRC-32("123456789") is 0xCBF43926 in every zlib.
+static void test_crc_is_zlib(void) {
+    CHECK(fsd_cam_crc32(0, "123456789", 9) == 0xCBF43926u,
+          "CRC-32(\"123456789\")=%08X exp CBF43926",
+          fsd_cam_crc32(0, "123456789", 9));
+
+    // Streaming in pieces must equal one shot -- the upload path feeds it a
+    // BLE frame at a time while the boot check feeds it 64 bytes at a time.
+    uint32_t whole = fsd_cam_crc32(0, FIXTURE, sizeof(FIXTURE));
+    uint32_t split = fsd_cam_crc32(0, FIXTURE, 30);
+    split = fsd_cam_crc32(split, FIXTURE + 30, sizeof(FIXTURE) - 30);
+    CHECK(whole == split, "streaming must equal one shot: %08X vs %08X", whole, split);
+
+    CHECK(fsd_cam_crc32(0, NULL, 0) == 0, "empty input is 0");
+}
+
 // ── lookup ──────────────────────────────────────────────────────────────────
 static void test_near(void) {
     MemSrc s = make_src();
@@ -1446,6 +1528,8 @@ int main(void) {
     printf("test_camera\n");
     test_open();
     test_open_rejects_garbage();
+    test_verify();
+    test_crc_is_zlib();
     test_near();
     test_near_respects_max();
     test_geometry();

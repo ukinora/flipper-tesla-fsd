@@ -45,18 +45,11 @@ static uint32_t g_up_written = 0;
 static uint16_t g_up_next_seq = 1; // seq 0 is the header frame
 static uint32_t g_up_crc = 0;      // over the body, header excluded
 
-// zlib-compatible CRC-32. Bitwise so there is no 1 KB table to carry; a 163 KB
-// upload is a one-off, and it is computed while the bytes stream past anyway.
-static uint32_t crc32_update(uint32_t crc, const uint8_t* d, size_t n) {
-    crc = ~crc;
-    while(n--) {
-        crc ^= *d++;
-        for(int k = 0; k < 8; k++) {
-            crc = (crc >> 1) ^ (0xEDB88320u & (uint32_t)(-(int32_t)(crc & 1u)));
-        }
-    }
-    return ~crc;
-}
+/* The CRC lives in fsd_camera.c now (fsd_cam_crc32). It is deliberately the
+ * same function the boot check runs: a private copy here could drift, and then
+ * a file that passed on upload would fail at boot -- or, far worse, the other
+ * way round. It is also host-tested against a known answer, which a static
+ * helper in a .cpp the tests never compile could not be. */
 
 /** Reader handed to fsd_camera. The file stays open; a lookup is seek + read. */
 static size_t db_read(void* ctx, uint32_t offset, void* buf, size_t len) {
@@ -86,8 +79,36 @@ static bool open_db() {
     if(!g_db_ok) {
         Serial.println("[CAM] camera.bin present but unreadable");
         g_db_file.close();
+        return false;
     }
-    return g_db_ok;
+
+    /* Whole-file checksum. fsd_cam_open() validates 32 bytes of header and
+     * trusts the other 163,000 for free -- and the header is the part least
+     * likely to be the damaged one.
+     *
+     * This covers both callers, which is why it lives here rather than in
+     * camera_store_init():
+     *
+     *   boot          nothing had ever re-checked a stored file
+     *   after upload  the upload's CRC covered the bytes as they ARRIVED over
+     *                 BLE, not as they landed on flash. This is the first read
+     *                 back, so it is also the only check on the write itself
+     *
+     * Refusing is the safe direction. A corrupt record array does not fail
+     * loudly: it decodes to coordinates somewhere on Earth, so the car slows
+     * for cameras that are not there while real ones go missing. No database
+     * at least says so, and the fix the app suggests -- upload one -- is the
+     * right fix for a damaged file too. */
+    uint32_t t0 = millis();
+    if(!fsd_cam_verify(&g_db)) {
+        Serial.printf("[CAM] camera.bin failed its checksum (%u B) — not using it\n",
+                      (unsigned)fsd_cam_total_bytes(&g_db));
+        close_db();
+        return false;
+    }
+    Serial.printf("[CAM] checksum OK, %u B in %u ms\n",
+                  (unsigned)fsd_cam_total_bytes(&g_db), (unsigned)(millis() - t0));
+    return true;
 }
 
 void camera_store_init(void) {
@@ -215,7 +236,7 @@ uint8_t camera_store_upload_chunk(uint16_t seq, const uint8_t* data, size_t len)
         size_t skip = (g_up_written < FSD_CAM_HEADER_SIZE)
                           ? (size_t)(FSD_CAM_HEADER_SIZE - g_up_written)
                           : 0;
-        g_up_crc = crc32_update(g_up_crc, data + skip, len - skip);
+        g_up_crc = fsd_cam_crc32(g_up_crc, data + skip, len - skip);
     }
 
     g_up_written += (uint32_t)len;
