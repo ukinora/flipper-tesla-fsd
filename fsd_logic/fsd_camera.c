@@ -63,6 +63,60 @@ bool fsd_cam_open(FsdCamDb* db, FsdCamReadFn read, void* ctx) {
     return db->ok;
 }
 
+/* Bitwise, so there is no 1 KB table to carry in flash. This runs once per
+ * boot over the whole file and once per upload as the bytes stream past;
+ * neither is in a loop that cares. */
+uint32_t fsd_cam_crc32(uint32_t crc, const void* data, size_t len) {
+    const uint8_t* d = (const uint8_t*)data;
+    crc = ~crc;
+    while(len--) {
+        crc ^= *d++;
+        for(int k = 0; k < 8; k++)
+            crc = (crc >> 1) ^ (0xEDB88320u & (uint32_t)(-(int32_t)(crc & 1u)));
+    }
+    return ~crc;
+}
+
+uint32_t fsd_cam_total_bytes(const FsdCamDb* db) {
+    if(!db || !db->ok) return 0;
+    return db->rec_offset + db->rec_count * FSD_CAM_REC_SIZE;
+}
+
+bool fsd_cam_verify(const FsdCamDb* db) {
+    if(!db || !db->ok || !db->rd.read) return false;
+
+    uint32_t total = fsd_cam_total_bytes(db);
+    /* A header claiming the file ends inside itself is corrupt on its face.
+     * Treating it as "nothing to check" would pass it. */
+    if(total <= FSD_CAM_HEADER_SIZE) return false;
+
+    uint32_t crc = 0;
+    uint32_t at = FSD_CAM_HEADER_SIZE; /* the header carries the expected value,
+                                        * so it cannot cover itself */
+
+    /* 256 is a compromise, not a measurement. A 163 KB file is 650 reads at
+     * this size and 2,600 at 64; but this also runs on the BLE host task
+     * (open_db() is reached from the upload paths), whose stack is smaller
+     * than the loop task's. The caller logs how long the pass took, so the
+     * first bench run replaces this guess with a number. */
+    uint8_t buf[256];
+    while(at < total) {
+        uint32_t want = total - at;
+        if(want > sizeof(buf)) want = sizeof(buf);
+
+        size_t got = db->rd.read(db->rd.ctx, at, buf, want);
+        /* A short read means the file is smaller than the header says. That is
+         * a truncated file, which is exactly the case a CRC alone would miss:
+         * the bytes that ARE there could still sum correctly. */
+        if(got != want) return false;
+
+        crc = fsd_cam_crc32(crc, buf, got);
+        at += (uint32_t)got;
+    }
+
+    return crc == db->crc;
+}
+
 /** Binary search the sorted cell array. Returns false when the cell is empty. */
 static bool find_cell(const FsdCamDb* db, uint32_t key, uint32_t* rec_index,
                       uint16_t* rec_count) {
