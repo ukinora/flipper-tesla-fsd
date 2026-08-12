@@ -747,6 +747,65 @@ static size_t st_read(void* ctx, void* buf, size_t len) {
     return n;
 }
 
+/* Eviction is by last_used, and last_used has no room in the record. Before
+ * this, everything came back at 0 and claim_cam() then evicted whatever sat
+ * lowest in the array -- so the first reboot threw away recency entirely. On a
+ * drive long enough to pass more than FSD_TRK_CAM_MAX cameras that means the
+ * daily commute gets discarded to make room for a road driven once.
+ *
+ * The order of the records carries what the record cannot: save writes
+ * least-recently-used first, load reads the index back as the rank. */
+static void test_learning_recency_survives(void) {
+    printf("\n-- persistence: eviction order survives a reboot --\n");
+
+    FsdTracker t;
+    fsd_trk_init(&t);
+
+    // dir_count > 0 or fsd_trk_save() skips the entry as having learned nothing.
+    for (int i = 0; i < 3; i++) {
+        t.mem[i].used = true;
+        t.mem[i].key = 1000u + (uint64_t)i;
+        t.mem[i].dir_count = 1;
+        t.mem[i].dir[0].bearing_deg = 0.0f;
+        t.mem[i].dir[0].passes = 1;
+        t.mem[i].dir[0].count = 1;
+        t.mem[i].dir[0].samples[0] = 5.0f;
+    }
+    // Array order is deliberately NOT recency order. Index 0 is the MOST
+    // recently used, so a save that just walks the array gets it backwards.
+    t.mem[0].last_used = 300;
+    t.mem[1].last_used = 100; // least recently used
+    t.mem[2].last_used = 200;
+    t.tick = 400;
+
+    Stream s;
+    memset(&s, 0, sizeof(s));
+    CHECK(fsd_trk_save(&t, st_write, &s), "save succeeds");
+
+    FsdTracker t2;
+    fsd_trk_init(&t2);
+    s.pos = 0;
+    CHECK(fsd_trk_load(&t2, st_read, &s), "load succeeds");
+
+    // Least recently used first, most recently used last.
+    CHECK(t2.mem[0].key == 1001, "LRU first, got key %u",
+          (unsigned)t2.mem[0].key);
+    CHECK(t2.mem[1].key == 1002, "middle second, got key %u",
+          (unsigned)t2.mem[1].key);
+    CHECK(t2.mem[2].key == 1000, "MRU last, got key %u", (unsigned)t2.mem[2].key);
+
+    // Ranks must be strictly increasing, and none may be 0 -- 0 is "never
+    // used", which is what the whole array used to come back as.
+    CHECK(t2.mem[0].last_used > 0, "restored rank is not zero");
+    CHECK(t2.mem[0].last_used < t2.mem[1].last_used, "ranks increase");
+    CHECK(t2.mem[1].last_used < t2.mem[2].last_used, "ranks increase");
+
+    // A camera used right after boot has to outrank everything restored,
+    // otherwise it looks like the oldest entry and gets evicted first.
+    CHECK(t2.tick > t2.mem[2].last_used, "tick %u must exceed every rank %u",
+          (unsigned)t2.tick, (unsigned)t2.mem[2].last_used);
+}
+
 static void test_learning_persistence(void) {
     printf("\n-- persistence: learning survives a power cycle --\n");
 
@@ -1545,6 +1604,7 @@ int main(void) {
     test_policy_entry_does_not_ratchet();
     test_policy_abandon();
     test_policy_standstill();
+    test_learning_recency_survives();
     test_learning_persistence();
     test_learning_rejects_damage();
     test_profile_decode();
