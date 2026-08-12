@@ -58,8 +58,22 @@ bool fsd_cam_open(FsdCamDb* db, FsdCamReadFn read, void* ctx) {
     db->crc = rd32(h + 22);
     db->built_at = rd32(h + 26); // 0 on files written before this field existed
     // A zero grid would divide by zero in every lookup; treat as corrupt.
-    db->ok = (db->grid_e6 > 0) && (db->cell_count > 0) &&
-             (db->rec_offset >= FSD_CAM_HEADER_SIZE);
+    bool sane = (db->grid_e6 > 0) && (db->cell_count > 0) &&
+                (db->rec_offset >= FSD_CAM_HEADER_SIZE);
+
+    /* Counts have to fit the arithmetic that uses them. Nothing bounded them
+     * before, and both products are computed in uint32: fsd_cam_total_bytes()
+     * does rec_offset + rec_count*10, and find_cell() does
+     * HEADER + index*10 with index < cell_count. A corrupt count wraps the
+     * product to a small number, which turns "this file is enormous" into
+     * "this file is tiny" — the wrong direction for a corruption check.
+     *
+     * These are exact overflow guards, not invented caps: refuse only what the
+     * later arithmetic could not represent. */
+    if(sane && db->rec_count > (UINT32_MAX - db->rec_offset) / FSD_CAM_REC_SIZE) sane = false;
+    if(sane && db->cell_count > (UINT32_MAX - FSD_CAM_HEADER_SIZE) / FSD_CAM_CELL_SIZE) sane = false;
+
+    db->ok = sane;
     return db->ok;
 }
 
