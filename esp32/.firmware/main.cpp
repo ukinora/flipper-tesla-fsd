@@ -180,6 +180,30 @@ static void serial_command_tick() {
 #else
                 wifi_print_status();
 #endif
+            } else if (serial_cmd_equals(buf, "bbon") ||
+                       serial_cmd_equals(buf, "bboff")) {
+                // 🔴 The recorder had no reachable switch at all: its only
+                // caller outside a self-guarded boot path was the web
+                // dashboard, removed in PR #28. Over USB is the right place for
+                // the fallback -- if BLE is the problem, a BLE-only switch is
+                // no switch.
+                bool on = serial_cmd_equals(buf, "bbon");
+                blackbox_set_enabled(on);
+                FSDState saved = state_snapshot();
+                prefs_save(&saved);
+                Serial.printf("[BB] serial: %s (actually: %s)\n",
+                              on ? "on" : "off",
+                              blackbox_is_enabled() ? "recording" : "off");
+            } else if (serial_cmd_equals(buf, "mark")) {
+                if (!blackbox_is_enabled()) {
+                    Serial.println("[BB] not recording — run 'bbon' first");
+                } else {
+                    uint32_t before = blackbox_capture_count();
+                    blackbox_mark(millis());
+                    Serial.printf("[BB] mark — captures %u -> %u\n",
+                                  (unsigned)before,
+                                  (unsigned)blackbox_capture_count());
+                }
             } else if (serial_cmd_equals(buf, "owner")) {
                 ble_owner_print();
             } else if (serial_cmd_equals(buf, "ownerclear")) {
@@ -205,6 +229,9 @@ static void serial_command_tick() {
                               (unsigned)ble_central_long_presses());
             } else if (serial_cmd_equals(buf, "help") || serial_cmd_equals(buf, "?")) {
                 Serial.println("[SER] Commands: ip | btnscan | btnbind <addr> | btnstat");
+                Serial.println("[SER]   bbon / bboff  — capture recorder on/off (persisted)");
+                Serial.println("[SER]   mark          — record a window around NOW");
+                Serial.println("[SER]   owner / ownerpair / ownerclear");
             } else {
                 Serial.println("[SER] Unknown command. Type: help");
             }
@@ -1738,7 +1765,7 @@ void setup() {
     g_state.force_fsd             = false;
     g_state.china_mode            = false;
     g_state.bms_output            = false;
-    g_state.blackbox_enabled      = BLACKBOX_DEFAULT_ENABLED;  // ON on LittleFS/SD, OFF on volatile RAM (#124)
+    g_state.blackbox_enabled      = BLACKBOX_DEFAULT_ENABLED;  // OFF everywhere; opt in with 'bbon' or BLE BB_ENABLE
 
     prefs_load(&g_state);
     // 지난 세션이 어떻게 끝났는지 읽어 판정을 찍는다. prefs_load() 뒤인 이유는

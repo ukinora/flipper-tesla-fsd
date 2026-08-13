@@ -100,6 +100,13 @@ static volatile uint32_t g_link_down_ms  = 0;  // 0 = link up or nothing to undo
 // the BLE task and read-and-cleared in one place, so no lock is needed.
 static volatile bool     g_mode_req_pending = false;
 static volatile uint8_t  g_mode_req         = 0;
+// Same deal for the recorder. blackbox_set_enabled() allocates a ~114 KB ring,
+// which must not happen on the BLE host task, and the heap guard can refuse --
+// so like SET_MODE these are applied from loop() and answered with what really
+// happened rather than with what was asked for.
+static volatile bool     g_bb_req_pending   = false;
+static volatile uint8_t  g_bb_req           = 0;
+static volatile bool     g_bb_mark_pending  = false;
 // Declared size of the camera.bin currently being uploaded (0 = none).
 static volatile uint32_t g_upload_expect = 0;
 static char     g_bulk_name[40] = {};
@@ -338,6 +345,51 @@ static void ble_apply_mode_request(void) {
                     (uint16_t)mode_current());
 }
 
+// Apply a recorder request parked by the BLE task. Runs from loop(), which is
+// where a 114 KB allocation belongs.
+static void ble_apply_blackbox_request(void) {
+    if (g_bb_req_pending) {
+        g_bb_req_pending = false;
+        bool want = (g_bb_req != 0);
+
+        blackbox_set_enabled(want);
+
+        // Report what IS, not what was asked. The heap guard can refuse an
+        // enable, and a phone told "OK" would then wait for captures that are
+        // never going to exist.
+        bool now_on = blackbox_is_enabled();
+        ble_send_result(BLE_CMD_BB_ENABLE,
+                        now_on == want ? BLE_RES_OK : BLE_RES_REJECTED,
+                        now_on ? 1u : 0u);
+        g_prefs_dirty = true;   // survive the reboot; loop() persists it
+    }
+
+    if (g_bb_mark_pending) {
+        g_bb_mark_pending = false;
+        uint32_t before = blackbox_capture_count();
+        blackbox_mark(millis());
+        // blackbox_mark() can be suppressed by the event cooldown, and silently
+        // doing nothing is exactly what the operator must not be told at the one
+        // moment that matters. The count is the honest answer.
+        ble_send_result(BLE_CMD_BB_MARK, BLE_RES_OK, (uint16_t)(before + 1u));
+    }
+}
+
+// Keep the Capability characteristic current. It used to be written once, in
+// ble_server_init(), before any frame had arrived -- so the probe's answer to
+// "which bus is which" never reached anybody, and CAP_RECHECK re-ran a probe
+// whose result went nowhere.
+static void ble_refresh_capability(void) {
+    static bool s_was_running = true;   // force one refresh after boot
+    bool running = capability_running();
+    if (running || !s_was_running) { s_was_running = running; return; }
+    s_was_running = running;
+    if (g_ch_cap) {
+        g_ch_cap->setValue(capability_status_json().c_str());
+        Serial.println("[CAP] listen window closed — Capability updated");
+    }
+}
+
 // Hand Active back once the phone has been gone for BLE_ACTIVE_GRACE_MS.
 // Runs from loop(), so g_state is touched on the same task as everything else.
 static void ble_revoke_active_if_stale(uint32_t now_ms) {
@@ -489,6 +541,23 @@ class CommandCB : public NimBLECharacteristicCallbacks {
         case BLE_CMD_CAP_RECHECK:
             capability_start(millis());
             ble_send_result(cmd, BLE_RES_OK, 0);
+            break;
+
+        case BLE_CMD_BB_ENABLE:
+            // Deferred: the enable path allocates the ring.
+            if (g_bb_req_pending) { ble_send_result(cmd, BLE_RES_BUSY, 0); break; }
+            g_bb_req         = arg ? 1u : 0u;
+            g_bb_req_pending = true;
+            break;
+
+        case BLE_CMD_BB_MARK:
+            // Cheap, but it snapshots FSDState and arms a flush, so it belongs
+            // on the same task as the rest of the recorder.
+            if (!blackbox_is_enabled()) {
+                ble_send_result(cmd, BLE_RES_REJECTED, 0);   // nothing is recording
+                break;
+            }
+            g_bb_mark_pending = true;
             break;
 
         case BLE_CMD_SET_AUTONOMY: {
@@ -730,6 +799,8 @@ void ble_server_tick(uint32_t now_ms) {
     // over 5 Hz chunks would take minutes.
     ble_bulk_pump();
     ble_apply_mode_request();      // answers only after the driver moved
+    ble_apply_blackbox_request();
+    ble_refresh_capability();
     ble_revoke_active_if_stale(now_ms);
 
     if (g_prefs_dirty) {

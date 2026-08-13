@@ -816,6 +816,8 @@ void blackbox_set_enabled(bool enabled) {
 
 // Reports true only when the ring is actually live, so a guard-refused enable
 // (or a persisted-ON boot before reconcile) shows as off on the dashboard.
+uint32_t blackbox_capture_count() { return g_captures; }
+
 bool blackbox_is_enabled() {
     return g_state != nullptr && g_state->blackbox_enabled && g_ring != nullptr;
 }

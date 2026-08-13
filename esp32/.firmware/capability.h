@@ -41,3 +41,14 @@ void capability_tick(uint32_t now_ms);
 
 // Dashboard payload: {"state":..,"ms_left":..,"hw":..,"buses":[{...}]}.
 String capability_status_json();
+
+/**
+ * True while the listen window is still counting.
+ *
+ * Exists so a caller can notice the window CLOSING. The BLE Capability
+ * characteristic used to be filled once in ble_server_init() -- at boot, before
+ * a single frame had arrived -- and never again, so CAP_RECHECK re-ran the
+ * probe and the result went nowhere. The dashboard had been rebuilding the JSON
+ * live; nothing replaced that when it was removed.
+ */
+bool capability_running(void);

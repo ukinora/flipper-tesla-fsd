@@ -52,9 +52,14 @@
 
 // Default enable state: OFF on every backend. A fresh flash must boot with the
 // recorder off so WiFi/dashboard always come up — the ~108 KB ring on a
-// no-PSRAM S3 can starve the WiFi/web stack if grabbed at boot (#124). The user
-// opts in from the dashboard, where the heap guard in blackbox_set_enabled()
-// protects the allocation.
+// no-PSRAM S3 can starve the WiFi/web stack if grabbed at boot (#124). The heap
+// guard in blackbox_set_enabled() protects the allocation.
+//
+// 🔴 "The user opts in from the dashboard" is what this used to say, and on
+// lilygo-t2can that stopped being true when the dashboard was removed (PR #28):
+// the only other caller of blackbox_set_enabled() is a boot path guarded by the
+// very flag it sets, so the recorder could only be switched on if it was
+// already on. Opting in now goes through BLE (BB_ENABLE) or serial (bbon).
 #define BLACKBOX_DEFAULT_ENABLED  false
 
 enum BBTrigger : uint8_t {
@@ -98,6 +103,12 @@ void blackbox_tick(uint32_t now_ms);
 // Enable/disable + persist; off stops recording and clears any armed capture.
 void blackbox_set_enabled(bool enabled);
 bool blackbox_is_enabled();
+
+/** Captures written since boot. The honest answer to "did my MARK take?" --
+ *  blackbox_mark() can be swallowed by the event cooldown, and at the one
+ *  moment that matters the operator must not be told it worked when it did
+ *  not. */
+uint32_t blackbox_capture_count();
 
 /** True when the storage this backend needs is mounted and usable.
  *

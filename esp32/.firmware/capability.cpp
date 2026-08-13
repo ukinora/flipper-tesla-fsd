@@ -68,6 +68,8 @@ void capability_record(CanBusId bus, const CanFrame& frame, uint32_t now_ms) {
     }
 }
 
+bool capability_running(void) { return g_cap_state == CAP_STATE_RUNNING; }
+
 void capability_tick(uint32_t now_ms) {
     if (g_cap_state == CAP_STATE_RUNNING && now_ms >= g_cap_deadline_ms)
         g_cap_state = CAP_STATE_DONE;
