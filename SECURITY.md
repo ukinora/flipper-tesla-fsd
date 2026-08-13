@@ -188,6 +188,7 @@ below first.
 | **Residue from that removal** | `libWiFi.a` was still on the link line and the default SSID/password were still in `.rodata` (PR #29). Neither was reachable, but both made "removed" only approximately true — and the credentials would have been waiting if anyone re-enabled the radio later. |
 | **Regression guard** | `esp32/ci_check_no_wifi.py` fails the build if excluded objects, WiFi archives, credentials or web strings reappear. Runs in CI on this variant only. |
 | **BLE pairing** | `WRITE_ENC` + bonding, no MITM requirement (PR #23). The board has no display or keypad, so demanding MITM produced `INSUFFICIENT_AUTHEN` on every command rather than any real protection. |
+| **Which phone may command** | Bonding alone restricts nothing — Just Works is the only pairing this hardware can do, so anyone in radio range of a parked car could pair and then open CAN transmit. The module now remembers **one owner** (PR #32): first phone to bond is enrolled, and a different phone needs a triple click on the physical button, which means being in the car. Commands and `camera.bin` upload are refused otherwise. |
 | **OTA accept** | The image is marked valid only after a self-test in `loop()` — every CAN controller up, storage mounted, BLE advertising — and rolls itself back on a definite failure (PRs #30, #31). Previously it cancelled rollback in `setup()`, before any of that existed. |
 
 There is no OTA **install** path on this variant: `/update` lived in the
@@ -224,6 +225,18 @@ protect. Worth revisiting before the permanent install.
 
 **A self-test filters a broken image. It does not authenticate a malicious
 one.** Those are different problems and only one of them is solved here.
+
+**Two things the owner check does not solve.** Both are consequences of a board
+with no display, and both are accepted rather than overlooked:
+
+- **An attacker present at the very moment of first pairing wins.** Trust on
+  first use is exactly that. With no display there is no out-of-band channel to
+  confirm a peer, so the first bond has to be taken on faith. The button covers
+  every pairing after it.
+- **A stranger who pairs occupies the single connection slot** until they leave
+  — `g_connected` is a bool, one peer at a time. They can command nothing, but
+  the owner cannot connect while they are there. Fighting this with an immediate
+  disconnect just invites a reconnect loop, so it is left alone.
 
 ### Preconditions if OTA is ever added back
 
