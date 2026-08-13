@@ -118,6 +118,11 @@
 #define BLE_RES_SAFETY      4u  // blocked by a safety gate (e.g. moving vehicle)
 #define BLE_RES_NOT_FOUND   5u  // nothing to download
 #define BLE_RES_BUSY        6u  // a transfer is already running
+// The link is encrypted and bonded, but this phone is not the one the module
+// was set up with. Distinct from REJECTED so the app can say so instead of
+// showing a generic failure — the fix is a button press in the car, which the
+// user has no way to guess from "rejected". See ble_owner.h.
+#define BLE_RES_NOT_OWNER   7u
 
 // ── Bulk framing (Bulk characteristic, notify) ───────────────────────────────
 // On a T-2CAN there is no SD card and we do not bring WiFi up, so this is the

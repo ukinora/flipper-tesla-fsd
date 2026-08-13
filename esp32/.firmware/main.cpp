@@ -40,6 +40,7 @@
 #include "camera_task.h"
 #include "body_task.h"
 #include "ble_server.h"
+#include "ble_owner.h"
 #include "ble_central.h"
 #include "capability.h"
 #include "profile_match.h"
@@ -160,6 +161,15 @@ static void serial_command_tick() {
 #else
                 wifi_print_status();
 #endif
+            } else if (serial_cmd_equals(buf, "owner")) {
+                ble_owner_print();
+            } else if (serial_cmd_equals(buf, "ownerclear")) {
+                // Deliberately reachable only over USB. A lost or replaced
+                // phone must not brick the module, and the recovery must need
+                // physical access — the same bar as the button.
+                ble_owner_forget();
+            } else if (serial_cmd_equals(buf, "ownerpair")) {
+                ble_owner_open_window(millis());
             } else if (serial_cmd_equals(buf, "btnscan")) {
                 // Bring-up: look before writing a parser for a device nobody has.
                 if (!ble_central_scan(5)) Serial.println("[SER] scan already running");
@@ -998,6 +1008,18 @@ static void dispatch_clicks(int n) {
         Serial.println(active ? "[BTN] → Active mode" : "[BTN] → Listen-Only mode");
         can_dump_log(active ? "MODE switched to Active — TX enabled" : "MODE switched to Listen-Only — TX disabled");
         prefs_save(&saved);
+#if defined(BLE_SERVER_ENABLED)
+    } else if (n == 3) {
+        // Let a DIFFERENT phone become the owner. Checked before the n >= 2
+        // branch below, which would otherwise swallow it. Compiled out on
+        // variants without BLE, so a triple click still toggles BMS there and
+        // their behaviour is unchanged.
+        //
+        // The button is the whole point: pairing on this board is Just Works,
+        // so the only thing the hardware can actually prove about a new phone
+        // is that somebody was sitting in the car when it was enrolled.
+        ble_owner_open_window(millis());
+#endif
     } else if (n >= 2) {
         // Toggle BMS serial output
         FSDState saved;
@@ -1651,6 +1673,7 @@ void setup() {
     // 지난 세션이 어떻게 끝났는지 읽어 판정을 찍는다. prefs_load() 뒤인 이유는
     // 없다 — 서로 다른 네임스페이스다. 부팅 배너 근처에 나오게 하려는 것뿐이다.
     power_log_init();
+    ble_owner_init();
     // Now that autonomy_enabled is known, settle where the module sits with
     // nothing else raising it. op_mode itself is still never read from NVS
     // (PERSIST_OP_MODE); this is derived from the operator's intent, and
@@ -2039,6 +2062,7 @@ void loop() {
     // 12V 가 스위치드인지 상시인지 기록한다. NVS 쓰기가 여기(loop)에서만
     // 일어나야 한다는 계약은 prefs.cpp 와 같다.
     power_log_tick(now, g_state.last_rx_ms, g_state.last_rx_ms != 0);
+    ble_owner_tick(now);   // owns the NVS write; see ble_owner.h
     // The body detectors need to know whether the transceiver could transmit at
     // all; only main.cpp owns the drivers. Fail-closed: any doubt reports shut.
     {
