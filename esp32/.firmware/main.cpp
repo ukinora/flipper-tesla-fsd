@@ -38,6 +38,7 @@
 #include "profile_match.h"
 #include "../../fsd_logic/fsd_events.h"
 #include "prefs.h"
+#include "power_log.h"
 #if defined(BOARD_TTGO_DISPLAY)
 #include "display.h"
 #endif
@@ -1610,6 +1611,9 @@ void setup() {
     g_state.blackbox_enabled      = BLACKBOX_DEFAULT_ENABLED;  // ON on LittleFS/SD, OFF on volatile RAM (#124)
 
     prefs_load(&g_state);
+    // 지난 세션이 어떻게 끝났는지 읽어 판정을 찍는다. prefs_load() 뒤인 이유는
+    // 없다 — 서로 다른 네임스페이스다. 부팅 배너 근처에 나오게 하려는 것뿐이다.
+    power_log_init();
     // Now that autonomy_enabled is known, settle where the module sits with
     // nothing else raising it. op_mode itself is still never read from NVS
     // (PERSIST_OP_MODE); this is derived from the operator's intent, and
@@ -1888,6 +1892,9 @@ void loop() {
     blackbox_tick(now);  // post-roll countdown + flush (#124)
     capability_tick(now);  // finalize the capability listen window (#125)
     camera_task_tick(now); // 1 Hz camera judgement — reads only, never transmits
+    // 12V 가 스위치드인지 상시인지 기록한다. NVS 쓰기가 여기(loop)에서만
+    // 일어나야 한다는 계약은 prefs.cpp 와 같다.
+    power_log_tick(now, g_state.last_rx_ms, g_state.last_rx_ms != 0);
     // The body detectors need to know whether the transceiver could transmit at
     // all; only main.cpp owns the drivers. Fail-closed: any doubt reports shut.
     {
