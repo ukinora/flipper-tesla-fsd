@@ -21,7 +21,14 @@
 // Explicit, not inherited through main.cpp's include order: this file needs
 // CAN_ID_DI_SPEED and CAN_ID_AP_CONTROL and must not depend on who included
 // what first.
-#include "../../fsd_logic/fsd_handler.h"
+//
+// config.h rather than fsd_logic/fsd_handler.h, which is what this used to
+// pull. Both define CAN IDs -- 21 of them in common -- and including the second
+// one produced 21 "macro redefined" warnings on every build of this file. A
+// build that is never warning-clean is a build where a NEW warning is invisible.
+// test/check_can_ids.py now guards the two lists against drifting apart, since
+// the warning was the only thing that had been comparing them.
+#include "config.h"
 #include "../../fsd_logic/fsd_speed_profile.h"
 #include "camera_store.h"
 

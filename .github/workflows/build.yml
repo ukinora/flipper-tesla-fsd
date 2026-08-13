@@ -23,6 +23,12 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build + run protocol-core tests
         run: make -C test check
+      # The two CAN ID lists used to be compared only by the compiler's
+      # "macro redefined" warning, which nobody read. The warning is gone now
+      # (the headers no longer collide), so this is the only thing left that
+      # notices when they drift.
+      - name: CAN IDs agree across both headers
+        run: python test/check_can_ids.py
 
   flipper-fap:
     name: Flipper .fap (ufbt)

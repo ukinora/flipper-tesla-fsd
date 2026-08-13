@@ -90,10 +90,7 @@ bool fsd_ap_first_allows(const FSDState* state, uint32_t now_ms);
  *  (soft_engage_latched=false) when AP drops (das_ap_state < DAS_APSTATE_ENGAGED). */
 bool fsd_soft_engage_allows(FSDState* state);
 
-// Abort Guard (#108): DAS_autopilotState values that mean the car is aborting an
-// engage — the moment linked to the steer-jerk in dunckencn's logs.
-#define DAS_APSTATE_ABORTING 8u
-#define DAS_APSTATE_ABORTED  9u
+// DAS_APSTATE_ABORTING / DAS_APSTATE_ABORTED moved to fsd_types.h — see there.
 
 /** Abort-Guard latch maintenance. Call once per RX frame (after das_ap_state is
  *  updated). When abort_guard is on: sets abort_guard_latched on an abort state

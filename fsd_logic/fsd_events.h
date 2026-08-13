@@ -28,7 +28,7 @@
  * per-instance state lives in FSDState.
  */
 
-#include "fsd_handler.h"  // DAS_APSTATE_ABORTING / DAS_APSTATE_ABORTED
+#include "fsd_types.h"    // DAS_APSTATE_ABORTING / DAS_APSTATE_ABORTED
 #include "fsd_state.h"    // FSDState (carries the per-instance event bookkeeping)
 #include <stdbool.h>
 #include <stdint.h>
