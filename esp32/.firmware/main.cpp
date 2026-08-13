@@ -22,6 +22,7 @@
 #include "can_signals.h"
 #include "fsd_handler.h"
 #include "../../fsd_logic/fsd_autonomy.h"
+#include "../../fsd_logic/fsd_selftest.h"
 #include "can_driver.h"
 #include "led.h"
 // FSD_NO_WIFI drops the radio, the dashboard and the HTTP CAN stream from the
@@ -64,20 +65,38 @@ static uint32_t   g_can_last_retry_ms[CAN_ACTIVE_BUS_COUNT] = {}; // periodic re
 #define CAN_REINIT_INTERVAL_MS  30000u
 
 // ── OTA self-test ────────────────────────────────────────────────────────────
+//
+// 🔴 THIS OVERRIDE IS WHAT MAKES THE REST OF THE FILE RUN AT ALL.
+//
+// Arduino-ESP32 decides the rollback itself, in initArduino(), BEFORE setup()
+// is ever called (cores/esp32/main.cpp: app_main -> initArduino, then loopTask
+// -> setup). esp32-hal-misc.c declares two weak hooks:
+//
+//     bool verifyOta()            __attribute__((weak)) { return true;  }
+//     bool verifyRollbackLater()  __attribute__((weak)) { return false; }
+//
+// and with the defaults it sees PENDING_VERIFY, asks verifyOta(), gets true,
+// and calls esp_ota_mark_app_valid_cancel_rollback() on the spot. By the time
+// setup() looks at the partition state it is already ESP_OTA_IMG_VALID, so
+// g_ota_pending_verify was never set and ota_selftest_tick() returned
+// immediately every time. The self-test below was dead code and SECURITY.md's
+// claim that images are "accepted only after a self-test" was not true of the
+// shipped binary.
+//
+// Returning true here tells the framework not to decide: the partition stays in
+// PENDING_VERIFY and the decision is ours. It is only reachable when the SDK
+// has CONFIG_APP_ROLLBACK_ENABLE, which this one does.
+#ifdef CONFIG_APP_ROLLBACK_ENABLE
+extern "C" bool verifyRollbackLater() { return true; }
+#endif
+
 // Set in setup() when we booted an image the bootloader has not accepted yet.
 // Cleared by ota_selftest_tick() once the image has proved it runs; until then
 // the previous firmware stays as the fallback and a reset restores it.
 static bool     g_ota_pending_verify  = false;
 static uint32_t g_ota_first_loop_ms   = 0;
 static uint32_t g_ota_loops           = 0;
-// Long enough to outlive a boot loop and a watchdog reset, short enough that
-// nobody sits waiting for it.
-#define OTA_SELFTEST_MS     20000u
-#define OTA_SELFTEST_LOOPS  1000u
-// When the self-test is still failing at this point, stop waiting and roll back
-// on purpose. Sized to give the 30 s CAN re-init retry about ten attempts, so a
-// controller that is merely slow is not mistaken for one that is broken.
-#define OTA_SELFTEST_DEADLINE_MS  300000u
+// Thresholds live in fsd_logic/fsd_selftest.h with the decision they belong to.
 static FSDState   g_state = {};
 static portMUX_TYPE g_state_mux = portMUX_INITIALIZER_UNLOCKED;
 
@@ -1904,12 +1923,29 @@ static void ota_selftest_tick(uint32_t now) {
     if (g_ota_loops < UINT32_MAX) g_ota_loops++;
 
     uint32_t elapsed = (uint32_t)(now - g_ota_first_loop_ms);
-    if (elapsed < OTA_SELFTEST_MS)       return;
-    if (g_ota_loops < OTA_SELFTEST_LOOPS) return;
-
     const char* why = ota_selftest_failure();
 
-    if (why == nullptr) {
+    // The ordering of the thresholds is in fsd_selftest.c, where a host test
+    // pins it down. It used to be three ifs here, and they were in the wrong
+    // order: the loop-count gate came before the deadline, so an image too
+    // broken to run its loop was never rolled back at all.
+    switch (fsd_selftest_decide(elapsed, g_ota_loops, why == nullptr)) {
+    case FSD_SELFTEST_WAIT: {
+        if (why == nullptr) return;   // just warming up; nothing to report
+        // A CAN controller can still come back on the 30 s re-init retry, so
+        // this is not a verdict -- but say it out loud, once a minute, because
+        // it is also what a real failure looks like on its way to the deadline.
+        static uint32_t s_last_warn_ms = 0;
+        if (s_last_warn_ms == 0 || (uint32_t)(now - s_last_warn_ms) >= 60000u) {
+            s_last_warn_ms = now;
+            Serial.printf("[OTA] self-test waiting: %s — image NOT accepted "
+                          "(%u s until rollback)\n",
+                          why, (unsigned)((FSD_SELFTEST_DEADLINE_MS - elapsed) / 1000u));
+        }
+        return;
+    }
+
+    case FSD_SELFTEST_ACCEPT:
         g_ota_pending_verify = false;
         if (esp_ota_mark_app_valid_cancel_rollback() == ESP_OK) {
             Serial.printf("[OTA] self-test passed (%u loops, %u ms) — firmware accepted\n",
@@ -1918,36 +1954,23 @@ static void ota_selftest_tick(uint32_t now) {
             Serial.println("[OTA] WARNING: self-test passed but could not mark firmware valid");
         }
         return;
-    }
 
-    // Still inside the window. A CAN controller can come back on the 30 s
-    // re-init retry, so this is not a verdict yet -- but say so out loud, once a
-    // minute, because it is also what a real failure looks like on its way to
-    // the deadline.
-    if (elapsed < OTA_SELFTEST_DEADLINE_MS) {
-        static uint32_t s_last_warn_ms = 0;
-        if (s_last_warn_ms == 0 || (uint32_t)(now - s_last_warn_ms) >= 60000u) {
-            s_last_warn_ms = now;
-            Serial.printf("[OTA] self-test waiting: %s — image NOT accepted "
-                          "(%u s until rollback)\n",
-                          why, (unsigned)((OTA_SELFTEST_DEADLINE_MS - elapsed) / 1000u));
-        }
+    case FSD_SELFTEST_ROLLBACK:
+        // Waiting forever is its own failure mode: the image runs indefinitely
+        // in PENDING_VERIFY, and the rollback then happens whenever something
+        // else reboots the board -- on a car that sleeps, possibly hours later,
+        // with nobody watching and no reason recorded.
+        Serial.printf("[OTA] self-test FAILED after %u s (%u loops): %s\n",
+                      (unsigned)(elapsed / 1000u), (unsigned)g_ota_loops,
+                      why ? why : "unknown");
+        Serial.println("[OTA] rolling back to the previous firmware and rebooting");
+        Serial.flush();
+        g_ota_pending_verify = false;      // do not retry if the call returns
+        esp_ota_mark_app_invalid_rollback_and_reboot();
+        // Only reached when there is no valid image to roll back to.
+        Serial.println("[OTA] WARNING: rollback refused — staying on this image");
         return;
     }
-
-    // Deadline. Waiting forever is its own failure mode: the image runs
-    // indefinitely in PENDING_VERIFY, and the rollback only happens whenever
-    // something else happens to reboot the board -- which on a car that sleeps
-    // could be hours later, with nobody watching and no reason recorded.
-    // ESP-IDF's guidance is to call this on a definite self-test failure.
-    Serial.printf("[OTA] self-test FAILED after %u s: %s\n",
-                  (unsigned)(elapsed / 1000u), why);
-    Serial.println("[OTA] rolling back to the previous firmware and rebooting");
-    Serial.flush();
-    g_ota_pending_verify = false;          // do not retry if the call returns
-    esp_ota_mark_app_invalid_rollback_and_reboot();
-    // Only reached when there is no valid image to roll back to.
-    Serial.println("[OTA] WARNING: rollback refused — staying on this image");
 }
 
 // ── loop ──────────────────────────────────────────────────────────────────────
