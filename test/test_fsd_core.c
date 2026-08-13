@@ -2339,9 +2339,23 @@ static void test_selftest_decide(void) {
     CHECK(fsd_selftest_decide(1000000u, L - 1u, false) == FSD_SELFTEST_ROLLBACK,
           "far past the deadline with a slow loop still rolls back");
 
-    // A healthy image at the deadline is accepted, not punished for being slow.
-    CHECK(fsd_selftest_decide(D, 0u, true) == FSD_SELFTEST_ACCEPT,
-          "deadline + healthy -> accept even with no loops counted");
+    // 🔴 These four used to be one line asserting the OPPOSITE, and that was
+    // worse than the bug: a test had pinned "healthy at the deadline is enough"
+    // as correct, so the suite would defend it against being fixed.
+    //
+    // `healthy` says CAN, storage and BLE came UP. That is a fact about
+    // initialisation and says nothing about whether the loop is still turning --
+    // which is the entire job of the loop counter. An image whose loop has all
+    // but stopped, but which initialised cleanly, must not be approved just
+    // because the clock ran out.
+    CHECK(fsd_selftest_decide(D, 0u, true) == FSD_SELFTEST_ROLLBACK,
+          "deadline + healthy + 0 loops -> rollback (no proof it is running)");
+    CHECK(fsd_selftest_decide(D, 1u, true) == FSD_SELFTEST_ROLLBACK,
+          "deadline + healthy + 1 loop -> rollback");
+    CHECK(fsd_selftest_decide(D, L - 1u, true) == FSD_SELFTEST_ROLLBACK,
+          "deadline + healthy + 999 loops -> rollback");
+    CHECK(fsd_selftest_decide(D, L, true) == FSD_SELFTEST_ACCEPT,
+          "deadline + healthy + 1000 loops -> accept");
 
     // Before the deadline, both warm-up gates apply. Neither alone is proof:
     // a hung loop still accumulates time, a fast one reaches 1000 iterations in

@@ -1919,7 +1919,29 @@ static const char* ota_selftest_failure(void) {
 static void ota_selftest_tick(uint32_t now) {
     if (!g_ota_pending_verify) return;
 
-    if (g_ota_first_loop_ms == 0) g_ota_first_loop_ms = now;
+    if (g_ota_first_loop_ms == 0) {
+        g_ota_first_loop_ms = now;
+        // 🔴 The deadline below lives inside loop(). If loop() stops entirely --
+        // hangs in a call that never returns -- nothing here runs, no clock
+        // advances, and the promised rollback never happens: the image sits in
+        // PENDING_VERIFY until something else reboots the board. A timer cannot
+        // fix that either; only a watchdog can.
+        //
+        // The Arduino core sets loopTaskWDTEnabled = false at startup, and the
+        // Task WDT watches CPU0's idle task while this loop runs on CPU1, so a
+        // hung loop was unwatched. enableLoopWDT() subscribes it; the core feeds
+        // it once per iteration, so a loop that stops panics and reboots in 5 s,
+        // and the bootloader rolls back because we never marked the image valid.
+        //
+        // ⚠️ ONLY while a self-test is pending, and switched off the moment it
+        // resolves. do_flush() writes a 15-second capture window to LittleFS in
+        // one blocking call -- on a busy bus that is hundreds of kilobytes and
+        // will exceed the 5 s timeout. An always-on loop WDT would reboot the
+        // module while it was saving the one-shot capture taken before the TSL
+        // comes out, which is a far worse outcome than the hang it guards.
+        enableLoopWDT();
+        Serial.println("[OTA] self-test armed — loop watchdog on for the duration");
+    }
     if (g_ota_loops < UINT32_MAX) g_ota_loops++;
 
     uint32_t elapsed = (uint32_t)(now - g_ota_first_loop_ms);
@@ -1947,6 +1969,7 @@ static void ota_selftest_tick(uint32_t now) {
 
     case FSD_SELFTEST_ACCEPT:
         g_ota_pending_verify = false;
+        disableLoopWDT();   // see the note where it was enabled
         if (esp_ota_mark_app_valid_cancel_rollback() == ESP_OK) {
             Serial.printf("[OTA] self-test passed (%u loops, %u ms) — firmware accepted\n",
                           (unsigned)g_ota_loops, (unsigned)elapsed);
@@ -1966,6 +1989,7 @@ static void ota_selftest_tick(uint32_t now) {
         Serial.println("[OTA] rolling back to the previous firmware and rebooting");
         Serial.flush();
         g_ota_pending_verify = false;      // do not retry if the call returns
+        disableLoopWDT();                  // the reboot below should be ours
         esp_ota_mark_app_invalid_rollback_and_reboot();
         // Only reached when there is no valid image to roll back to.
         Serial.println("[OTA] WARNING: rollback refused — staying on this image");

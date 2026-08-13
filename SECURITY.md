@@ -200,6 +200,22 @@ below first.
 > `ota_selftest_tick()` returned immediately forever. The self-test was dead
 > code and this document was describing an intention, not the firmware.
 >
+> **What "rolls itself back" does and does not cover** (PR #36):
+>
+> | the image… | what happens |
+> |---|---|
+> | initialises cleanly and keeps looping | accepted after 20 s **and** 1000 iterations |
+> | initialises, but the loop is pathologically slow | **rolled back** at 5 min — health is a fact about *initialisation*, not proof the loop is turning |
+> | a subsystem never comes up | rolled back at 5 min |
+> | the loop **stops entirely** | the loop watchdog panics in 5 s; still `PENDING_VERIFY`, so the bootloader rolls back |
+> | **`setup()` hangs** | not covered. `loop()` is never reached, so nothing arms. It stays `PENDING_VERIFY`, so the next power cycle rolls it back — on a switched 12 V feed that is the next time the car sleeps. A watchdog in `setup()` would false-trip: the camera-database checksum alone reads 167 KB. |
+>
+> The loop watchdog is on **only while a self-test is pending**. `do_flush()`
+> writes a 15-second capture window to LittleFS in one blocking call — hundreds
+> of kilobytes on a busy bus, well past the 5 s timeout. An always-on loop WDT
+> would reboot the module while it was saving the one-shot pre-removal capture,
+> which is worse than the hang it guards against.
+>
 > Fixed by overriding the weak hook. Verified in the ELF rather than assumed:
 >
 > ```
