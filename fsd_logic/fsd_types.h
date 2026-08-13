@@ -86,3 +86,16 @@ typedef enum {
 static inline bool fsd_mode_opens_tx(OpMode m) {
     return m == OpMode_Active || m == OpMode_Service;
 }
+
+// Abort Guard (#108): DAS_autopilotState values that mean the car is aborting an
+// engage — the moment linked to the steer-jerk in dunckencn's logs.
+//
+// These live here rather than in fsd_handler.h because fsd_events.h needs them
+// and nothing else from that header. Including fsd_handler.h for two constants
+// dragged its 38 CAN ID macros into every file that touches events -- which on
+// the ESP32 is most of them, and where config.h has already defined 24 of the
+// same names. That produced a wall of "macro redefined" warnings on every
+// build, and a build that is never warning-clean is one where a NEW warning is
+// invisible. test/check_can_ids.py now guards the two lists instead.
+#define DAS_APSTATE_ABORTING 8u
+#define DAS_APSTATE_ABORTED  9u

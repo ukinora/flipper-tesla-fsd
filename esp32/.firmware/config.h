@@ -29,6 +29,10 @@
 #define CAN_ID_VCSEC_WINDOW    0x119u // 281  - VCSEC_windowRequests: windows
 #define CAN_ID_DAS_BODY        0x3E9u // 1001 - DAS_bodyControls: lights/hazards/turn/wipers
 #define CAN_ID_VCLEFT_SWITCH   0x3C2u // 962  - VCLEFT_switchStatus: right scroll wheel (speed profile). Vehicle CAN only, NOT forwarded to Bus 6
+#define CAN_ID_DI_STATE        0x286u // 646  - DI_state: NOT where DI_gear lives (PR #18)
+#define CAN_ID_DI_SPEED        0x257u // 599  - DI_speed: the only proof the car is actually moving (fsd_gps.h)
+#define CAN_ID_DI_SYS_STATUS   0x118u // 280  - DI_systemStatus: DI_gear lives here, NOT in 0x286 (see the PR #18 note)
+#define CAN_ID_UI_WARNING      0x311u // 785  - UI_warning: seat-buckle, blinkers
 
 // ── GPIO ──────────────────────────────────────────────────────────────────────
 #if defined(BOARD_LILYGO_T2CAN)
