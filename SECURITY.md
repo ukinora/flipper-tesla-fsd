@@ -1,5 +1,11 @@
 # Security & responsible use
 
+> [!NOTE]
+> **This is a fork.** Everything below is upstream's and applies to the project
+> as a whole. One variant, `lilygo-t2can`, has been changed here in ways that do
+> **not** apply to the other seven — see
+> [Fork scope](#fork-scope-lilygo-t2can) at the end.
+
 ## Disclaimer
 
 > [!WARNING]
@@ -162,3 +168,72 @@ people who use it. The community has since reorganized on GitHub as
 [ev-open-can-tools/ev-open-can-tools](https://github.com/ev-open-can-tools/ev-open-can-tools)
 — a vehicle-agnostic CAN mod toolkit. The CanFeather mirror lives at
 [Karolynaz/waymo-fsd-can-mod](https://github.com/Karolynaz/waymo-fsd-can-mod).
+
+---
+
+## Fork scope (`lilygo-t2can`)
+
+This fork exists to build **one variant, for one car**: `lilygo-t2can`, wired
+permanently into a Model 3 and controlled from a phone over BLE.
+
+**The other seven build environments are upstream's and have not been reviewed
+or changed here.** If you build one of them from this fork, read "Not addressed"
+below first.
+
+### What was changed
+
+| | |
+|---|---|
+| **WiFi, web dashboard, HTTP CAN stream** | Removed from the image (PR #28). The AP password was a fixed `12345678` printed in `esp32/README.md`, and the dashboard's WebSocket authenticated nothing — one message flipped the module to Active, which opens CAN transmit on every bus. `GET /sdformat` was unauthenticated too. A car parked in public was broadcasting that. |
+| **Residue from that removal** | `libWiFi.a` was still on the link line and the default SSID/password were still in `.rodata` (PR #29). Neither was reachable, but both made "removed" only approximately true — and the credentials would have been waiting if anyone re-enabled the radio later. |
+| **Regression guard** | `esp32/ci_check_no_wifi.py` fails the build if excluded objects, WiFi archives, credentials or web strings reappear. Runs in CI on this variant only. |
+| **BLE pairing** | `WRITE_ENC` + bonding, no MITM requirement (PR #23). The board has no display or keypad, so demanding MITM produced `INSUFFICIENT_AUTHEN` on every command rather than any real protection. |
+| **OTA accept** | The image is marked valid only after a self-test in `loop()` — every CAN controller up, storage mounted, BLE advertising — and rolls itself back on a definite failure (PRs #30, #31). Previously it cancelled rollback in `setup()`, before any of that existed. |
+
+There is no OTA **install** path on this variant: `/update` lived in the
+dashboard, and BLE has no firmware command — the only thing it writes to flash
+is `camera.bin`, into a data file. The board is flashed over USB-C.
+
+### Not addressed
+
+**The other build environments still carry upstream's OTA.**
+`m5stack-atom`, `m5stack-atom-matrix`, `m5stack-atom-swap-pins`,
+`esp32-mcp2515`, `esp32-lilygo`, `ttgo-tdisplay` and `waveshare-s3-can` all
+still have a WiFi AP with the published default password `12345678`, a
+`POST /update` behind HTTP Basic Auth using that same password, an upload check
+that looks at extension, size and the `0xE9` image magic byte, and
+`Update.end(true)` on anything structurally valid.
+
+Anyone who knows the default password can install arbitrary firmware on those
+boards and reach the vehicle CAN bus. **That is upstream's design and upstream's
+call to make** — the dashboard is its entire user interface. It is recorded here
+so nobody reads "we removed WiFi" as covering a board it does not.
+
+**Secure Boot, signed apps and flash encryption are off.**
+`CONFIG_SECURE_BOOT`, `CONFIG_SECURE_SIGNED_APPS_*` and flash encryption are all
+disabled in the Arduino ESP32 SDK this builds against.
+`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y`, so rollback works; anti-rollback does
+not.
+
+Deliberately not enabled on `lilygo-t2can`, for now: Secure Boot v2 burns eFuses
+**irreversibly** and a mistake bricks the board; this board is days from a
+one-shot capture that cannot be repeated; it defends a boundary that is already
+crossed, since anyone who can reach the connector behind the rear trim can
+replace the module outright; and there is currently no OTA path for it to
+protect. Worth revisiting before the permanent install.
+
+**A self-test filters a broken image. It does not authenticate a malicious
+one.** Those are different problems and only one of them is solved here.
+
+### Preconditions if OTA is ever added back
+
+The self-test work assumed no install path. Before adding one — over BLE or
+anything else — all of these are required, not optional:
+
+- [ ] **Signature verification** of the image, against a key that is not in this repo
+- [ ] Board type and firmware version checked before install
+- [x] Explicit rollback on self-test failure — `ota_selftest_tick()`
+- [x] Health check covering **both** CAN controllers, storage and BLE
+- [ ] Credentials for the update channel that are not shared with anything else
+- [ ] Secure Boot reconsidered, since signature checking in application code is
+      only as trustworthy as the application doing the checking

@@ -73,6 +73,10 @@ static uint32_t g_ota_loops           = 0;
 // nobody sits waiting for it.
 #define OTA_SELFTEST_MS     20000u
 #define OTA_SELFTEST_LOOPS  1000u
+// When the self-test is still failing at this point, stop waiting and roll back
+// on purpose. Sized to give the 30 s CAN re-init retry about ten attempts, so a
+// controller that is merely slow is not mistaken for one that is broken.
+#define OTA_SELFTEST_DEADLINE_MS  300000u
 static FSDState   g_state = {};
 static portMUX_TYPE g_state_mux = portMUX_INITIALIZER_UNLOCKED;
 
@@ -1793,40 +1797,76 @@ void setup() {
 //   ✗ ble_server_connected() -- needs a phone in range
 //   ✓ we reached loop()    -- catches a crash or hang anywhere in setup()
 //   ✓ the loop keeps running -- catches boot loops and watchdog resets
-//   ✓ a CAN controller came up -- on this board the transceivers are onboard, so
-//                                 begin() talks to the chip, not to the car
+//   ✓ EVERY CAN controller came up -- on this board the transceivers are onboard,
+//                                 so begin() talks to the chip, not to the car.
+//                                 "every", not "any": this variant runs two, and
+//                                 an image that kept can0 alive while breaking
+//                                 can1 would otherwise be accepted with half its
+//                                 hardware dead
+//   ✓ storage mounted      -- the blackbox ring and camera.bin both live there
+//   ✓ BLE started advertising -- the only control channel this board has
+//
+// Returns why the image is not acceptable yet, or nullptr when it is.
+static const char* ota_selftest_failure(void) {
+    for (uint8_t i = 0; i < CAN_ACTIVE_BUS_COUNT; i++) {
+        if (!g_can_ok[i]) return "a CAN controller did not come up";
+    }
+    if (!blackbox_storage_ok()) return "storage did not mount";
+    if (!ble_server_up())       return "BLE did not start advertising";
+    return nullptr;
+}
+
 static void ota_selftest_tick(uint32_t now) {
     if (!g_ota_pending_verify) return;
 
     if (g_ota_first_loop_ms == 0) g_ota_first_loop_ms = now;
     if (g_ota_loops < UINT32_MAX) g_ota_loops++;
 
-    if ((uint32_t)(now - g_ota_first_loop_ms) < OTA_SELFTEST_MS) return;
+    uint32_t elapsed = (uint32_t)(now - g_ota_first_loop_ms);
+    if (elapsed < OTA_SELFTEST_MS)       return;
     if (g_ota_loops < OTA_SELFTEST_LOOPS) return;
 
-    bool can_ok = false;
-    for (uint8_t i = 0; i < CAN_ACTIVE_BUS_COUNT; i++) if (g_can_ok[i]) can_ok = true;
-    if (!can_ok) {
-        // Not fatal yet: the periodic re-init below can still bring a controller
-        // up, and each retry gets another look. Say so once a minute rather than
-        // every loop, because this is also what a genuine failure looks like and
-        // the operator needs to see it.
-        static uint32_t s_last_warn_ms = 0;
-        if (s_last_warn_ms == 0 || (uint32_t)(now - s_last_warn_ms) >= 60000u) {
-            s_last_warn_ms = now;
-            Serial.println("[OTA] self-test waiting: no CAN controller yet — "
-                           "this image is NOT accepted, a reset restores the previous one");
+    const char* why = ota_selftest_failure();
+
+    if (why == nullptr) {
+        g_ota_pending_verify = false;
+        if (esp_ota_mark_app_valid_cancel_rollback() == ESP_OK) {
+            Serial.printf("[OTA] self-test passed (%u loops, %u ms) — firmware accepted\n",
+                          (unsigned)g_ota_loops, (unsigned)elapsed);
+        } else {
+            Serial.println("[OTA] WARNING: self-test passed but could not mark firmware valid");
         }
         return;
     }
 
-    g_ota_pending_verify = false;
-    if (esp_ota_mark_app_valid_cancel_rollback() == ESP_OK) {
-        Serial.printf("[OTA] self-test passed (%u loops, %u ms) — firmware accepted\n",
-                      (unsigned)g_ota_loops, (unsigned)(now - g_ota_first_loop_ms));
-    } else {
-        Serial.println("[OTA] WARNING: self-test passed but could not mark firmware valid");
+    // Still inside the window. A CAN controller can come back on the 30 s
+    // re-init retry, so this is not a verdict yet -- but say so out loud, once a
+    // minute, because it is also what a real failure looks like on its way to
+    // the deadline.
+    if (elapsed < OTA_SELFTEST_DEADLINE_MS) {
+        static uint32_t s_last_warn_ms = 0;
+        if (s_last_warn_ms == 0 || (uint32_t)(now - s_last_warn_ms) >= 60000u) {
+            s_last_warn_ms = now;
+            Serial.printf("[OTA] self-test waiting: %s — image NOT accepted "
+                          "(%u s until rollback)\n",
+                          why, (unsigned)((OTA_SELFTEST_DEADLINE_MS - elapsed) / 1000u));
+        }
+        return;
     }
+
+    // Deadline. Waiting forever is its own failure mode: the image runs
+    // indefinitely in PENDING_VERIFY, and the rollback only happens whenever
+    // something else happens to reboot the board -- which on a car that sleeps
+    // could be hours later, with nobody watching and no reason recorded.
+    // ESP-IDF's guidance is to call this on a definite self-test failure.
+    Serial.printf("[OTA] self-test FAILED after %u s: %s\n",
+                  (unsigned)(elapsed / 1000u), why);
+    Serial.println("[OTA] rolling back to the previous firmware and rebooting");
+    Serial.flush();
+    g_ota_pending_verify = false;          // do not retry if the call returns
+    esp_ota_mark_app_invalid_rollback_and_reboot();
+    // Only reached when there is no valid image to roll back to.
+    Serial.println("[OTA] WARNING: rollback refused — staying on this image");
 }
 
 // ── loop ──────────────────────────────────────────────────────────────────────
