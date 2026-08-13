@@ -39,6 +39,7 @@ void fsd_wire_pack_state(const FsdWireState* in, uint8_t* out) {
      * position is confirmed only for 0x39B (HW4). Left zero rather than guessed.
      * Bit 7 (profile change in progress) belongs to the SET_PROFILE closed
      * loop, which emits nothing while both of its gates are shut. */
+    if(in->blackbox_recording) flags |= (1u << 4);
     if(in->brake_applied) flags |= (1u << 6);
 
     int32_t prof = in->speed_profile;

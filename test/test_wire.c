@@ -61,6 +61,7 @@ static void test_state_layout(void) {
     w.rx_seen = true;
     w.blinker_right = true;
     w.brake_applied = true;
+    w.blackbox_recording = true;
     w.op_mode = 1;      // Active
     w.hw_version = 2;   // HW3
     w.speed_profile = 2;
@@ -78,8 +79,8 @@ static void test_state_layout(void) {
     fsd_wire_pack_state(&w, b);
 
     CHECK(b[0] == 2, "ver 2, got %u", b[0]);
-    // bit0 rx, bit3 right blinker, bit6 brake = 0x49
-    CHECK(b[1] == 0x49u, "flags 0x49, got 0x%02X", b[1]);
+    // bit0 rx, bit3 right blinker, bit4 recording, bit6 brake = 0x59
+    CHECK(b[1] == 0x59u, "flags 0x59, got 0x%02X", b[1]);
     CHECK(b[2] == 1, "op_mode");
     CHECK(b[3] == 2, "hw");
     CHECK(b[4] == 2, "profile");
@@ -323,6 +324,11 @@ static void emit_fixture(FILE* f) {
           .crc_err_count = 70000u, .uptime_s = 0xFFFFFFFFu}},
         {"ota_running", {.rx_seen = true, .ota_in_progress = true, .op_mode = 0,
                          .hw_version = 2, .gear = 1, .rx_fps = 1000}},
+        /* The bit the phone reads before taking a capture that cannot be
+         * retaken. Its own vector so a packer change that drops it fails on
+         * both sides of the link rather than on neither. */
+        {"recording", {.rx_seen = true, .blackbox_recording = true, .op_mode = 0,
+                       .hw_version = 2, .gear = 1, .rx_fps = 1000, .uptime_s = 60}},
     };
 
     const size_t ns = sizeof(states) / sizeof(states[0]);
