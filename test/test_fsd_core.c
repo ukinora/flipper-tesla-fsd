@@ -28,6 +28,7 @@
 #include "fsd_events.h"
 #include "fsd_handler.h"
 #include "fsd_power.h"
+#include "fsd_owner.h"
 #include "fsd_profile.h"
 #include "fsd_profile_db.h"
 
@@ -2312,6 +2313,62 @@ static void test_power_quiet_ms(void) {
           fsd_pwr_quiet_ms(20000u, 0xFFFFFF00u, true));
 }
 
+static void test_owner(void) {
+    printf("\n-- BLE owner enrolment --\n");
+
+    const uint8_t phone[6]  = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01};
+    const uint8_t other[6]  = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x02};
+    const uint8_t zeros[6]  = {0, 0, 0, 0, 0, 0};
+
+    // 🔴 The trap. A peer whose identity has not resolved reports all-zero.
+    // Enrolling it would lock out the real owner AND match every later peer in
+    // the same unresolved state -- the exact inverse of the intent.
+    CHECK(!fsd_owner_addr_valid(1u, zeros), "all-zero is not an identity");
+    CHECK(!fsd_owner_addr_valid(1u, NULL), "NULL is not an identity");
+    CHECK(fsd_owner_addr_valid(1u, phone), "a real address is an identity");
+
+    FsdOwner empty = {0};
+    CHECK(fsd_owner_check(&empty, 1u, zeros, false) == FSD_OWNER_BAD_ADDR,
+          "unresolved peer is never enrolled");
+    CHECK(fsd_owner_check(&empty, 1u, zeros, true) == FSD_OWNER_BAD_ADDR,
+          "not even with the window open");
+
+    // Trust on first use: ordinary setup needs no ceremony.
+    CHECK(fsd_owner_check(&empty, 1u, phone, false) == FSD_OWNER_ENROLL,
+          "first peer is enrolled");
+    CHECK(fsd_owner_check(NULL, 1u, phone, false) == FSD_OWNER_ENROLL,
+          "NULL store behaves as not enrolled");
+
+    FsdOwner o = {0};
+    o.enrolled = true;
+    o.type = 1u;
+    for(unsigned i = 0; i < 6; i++) o.addr[i] = phone[i];
+
+    CHECK(fsd_owner_check(&o, 1u, phone, false) == FSD_OWNER_MATCH, "owner matches");
+    CHECK(fsd_owner_check(&o, 1u, other, false) == FSD_OWNER_REFUSE,
+          "a different phone is refused");
+
+    // The address type is part of the identity: the same six bytes as a public
+    // and as a random static address are two different peers.
+    CHECK(fsd_owner_check(&o, 0u, phone, false) == FSD_OWNER_REFUSE,
+          "same bytes, different address type -> not the owner");
+
+    // The button opens the door for a new phone...
+    CHECK(fsd_owner_check(&o, 1u, other, true) == FSD_OWNER_ENROLL,
+          "window open -> a new phone may take over");
+
+    // ...but the existing owner reconnecting during the window must stay a
+    // match, not be re-enrolled. Otherwise opening the window and walking away
+    // leaves the enrolment in a different state than it started in, and the
+    // serial log claims an enrolment nobody performed.
+    CHECK(fsd_owner_check(&o, 1u, phone, true) == FSD_OWNER_MATCH,
+          "window open + owner reconnects -> still MATCH, not a re-enrolment");
+
+    CHECK(!fsd_owner_same(&empty, 1u, phone), "an empty store matches nobody");
+    CHECK(!fsd_owner_same(NULL, 1u, phone), "a NULL store matches nobody");
+    CHECK(!fsd_owner_same(&o, 1u, NULL), "a NULL address matches nobody");
+}
+
 static void test_tx_allowlist(void) {
     printf("\n-- TX gate allow-list --\n");
 
@@ -2699,6 +2756,7 @@ int main(void) {
 
     test_power_verdict();
     test_power_quiet_ms();
+    test_owner();
 
     test_tx_allowlist();
     test_drive_observers();

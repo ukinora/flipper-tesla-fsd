@@ -20,6 +20,7 @@
 #include "../../fsd_logic/fsd_autonomy.h"
 #include "../../fsd_logic/fsd_wire.h"
 #include "blackbox.h"
+#include "ble_owner.h"
 #include "camera_store.h"
 #include "camera_task.h"
 #include "capability.h"
@@ -322,6 +323,15 @@ class UploadCB : public NimBLECharacteristicCallbacks {
         if (v.size() < BLE_UPLOAD_HDR) return;
         if (!info.isEncrypted()) return;  // same bar as Command
 
+        // Same gate as CommandCB. A camera database is what the judgement core
+        // reads to decide when to slow the car down; a stranger must not get to
+        // choose its contents.
+        if (!ble_owner_allows(info.getIdAddress().getType(),
+                              info.getIdAddress().getVal())) {
+            ble_send_result(BLE_CMD_UPLOAD_ABORT, BLE_RES_NOT_OWNER, 0);
+            return;
+        }
+
         uint16_t seq = (uint8_t)v[0] | ((uint16_t)(uint8_t)v[1] << 8);
         const uint8_t *body = (const uint8_t *)v.data() + BLE_UPLOAD_HDR;
         size_t n = v.size() - BLE_UPLOAD_HDR;
@@ -372,6 +382,17 @@ class CommandCB : public NimBLECharacteristicCallbacks {
         // and the difference was invisible until it was traced by hand).
         if (!info.isEncrypted()) {
             ble_send_result(v[0], BLE_RES_REJECTED, 0);
+            return;
+        }
+
+        // Encrypted says "nobody is listening in". It does not say "you are the
+        // phone this module was set up with" -- this board has no display or
+        // keypad, so Just Works is the only pairing available and anyone in
+        // radio range of a parked car can complete it. Without this line they
+        // could then send SET_MODE(Active) and open CAN transmit.
+        if (!ble_owner_allows(info.getIdAddress().getType(),
+                              info.getIdAddress().getVal())) {
+            ble_send_result(v[0], BLE_RES_NOT_OWNER, 0);
             return;
         }
 
@@ -478,6 +499,14 @@ class ServerCB : public NimBLEServerCallbacks {
         g_connected = true;
         g_link_down_ms = 0;  // reconnected in time — cancel the pending revoke
         Serial.println("[BLE] client connected");
+    }
+    // Fires when pairing completes and when an existing bond re-encrypts, which
+    // is where the peer's identity address becomes known. Runs on the BLE host
+    // task, so this only updates RAM — the NVS write is queued for loop().
+    void onAuthenticationComplete(NimBLEConnInfo &info) override {
+        if (!info.isBonded()) return;
+        ble_owner_on_bond(info.getIdAddress().getType(),
+                          info.getIdAddress().getVal());
     }
     void onDisconnect(NimBLEServer *, NimBLEConnInfo &, int) override {
         g_connected = false;
