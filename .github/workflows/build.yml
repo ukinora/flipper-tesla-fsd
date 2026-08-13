@@ -39,9 +39,16 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      # Pinned for the same reason as PlatformIO below.
+      #
+      # ⚠️ The SDK channel is still `release`, which MOVES. Pinning it needs a
+      # specific Flipper SDK version that somebody has actually validated this
+      # app against, and nobody here has: this repo's target is the ESP32 and
+      # the .fap is upstream's. Recorded rather than papered over -- a pin
+      # chosen at random would look like reproducibility without being it.
       - name: Install ufbt
-        run: pip install --upgrade ufbt
-      - name: Fetch SDK (release channel)
+        run: pip install "ufbt==0.2.6"
+      - name: Fetch SDK (release channel — see note above)
         run: ufbt update --channel=release
       - name: Build app
         run: ufbt
@@ -86,8 +93,12 @@ jobs:
             ~/.platformio
             esp32/.pio
           key: pio-${{ matrix.env }}-${{ hashFiles('esp32/platformio.ini') }}
+      # Pinned, not --upgrade. The CLI chooses the toolchain and the build
+      # scripts, so an upgrade landing between two runs changes the binary
+      # without a line of this repo changing -- which is the whole thing the
+      # version pins in platformio.ini exist to prevent.
       - name: Install PlatformIO
-        run: pip install --upgrade platformio
+        run: pip install "platformio==6.1.19"
       - name: Build ${{ matrix.env }}
         working-directory: esp32
         run: pio run -e ${{ matrix.env }}
