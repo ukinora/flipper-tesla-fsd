@@ -99,6 +99,14 @@ void blackbox_tick(uint32_t now_ms);
 void blackbox_set_enabled(bool enabled);
 bool blackbox_is_enabled();
 
+/** True when the storage this backend needs is mounted and usable.
+ *
+ *  Distinct from blackbox_is_enabled(), which is the operator's choice. This is
+ *  whether the filesystem came up at all -- a health signal for the OTA
+ *  self-test, and the same filesystem the camera database lives on. Always true
+ *  on the RAM backend, which has nothing to mount. */
+bool blackbox_storage_ok();
+
 // Dashboard helpers.
 String blackbox_status_json();              // {"enabled":..,"backend":..,...}
 String blackbox_list_json();                // [{"name":..,"summary":{...}},..]

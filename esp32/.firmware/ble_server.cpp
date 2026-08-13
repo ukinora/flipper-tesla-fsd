@@ -64,6 +64,11 @@ static NimBLECharacteristic *g_ch_bulk   = nullptr;
 static NimBLECharacteristic *g_ch_upload = nullptr;
 static NimBLECharacteristic *g_ch_camstat = nullptr;
 
+// Set once in ble_server_init() from startAdvertising()'s return value. Read by
+// the OTA self-test, which must not accept an image whose only control channel
+// never came up.
+static bool g_adv_ok = false;
+
 static volatile bool g_connected = false;
 static volatile bool g_state_subscribed = false;  // client enabled State notifications
 static volatile bool g_bulk_subscribed  = false;
@@ -594,10 +599,20 @@ void ble_server_init(FSDState *state, portMUX_TYPE *state_mux) {
     NimBLEAdvertising *adv = NimBLEDevice::getAdvertising();
     adv->addServiceUUID(BLE_UUID_SERVICE);
     adv->enableScanResponse(true);
-    NimBLEDevice::startAdvertising();
+    // Keep the result. Until now nothing checked it, so a radio that failed to
+    // start looked exactly like one that worked -- and the OTA self-test needs
+    // to tell those apart before it accepts an image whose only control channel
+    // this is.
+    g_adv_ok = NimBLEDevice::startAdvertising();
 
-    Serial.printf("[BLE] GATT server up — advertising as \"%s\"\n", name);
+    if (g_adv_ok) {
+        Serial.printf("[BLE] GATT server up — advertising as \"%s\"\n", name);
+    } else {
+        Serial.printf("[BLE] GATT server up but ADVERTISING FAILED — \"%s\" is not visible\n", name);
+    }
 }
+
+bool ble_server_up(void) { return g_adv_ok; }
 
 void ble_server_tick(uint32_t now_ms) {
     if (!g_ch_state) return;

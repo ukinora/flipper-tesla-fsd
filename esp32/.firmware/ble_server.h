@@ -161,10 +161,21 @@ void ble_server_tick(uint32_t now_ms);
 /** True while a phone is connected AND subscribed to State. */
 bool ble_server_connected(void);
 
+/** True once the GATT server started and the radio began advertising.
+ *
+ *  This is "the stack came up", not "someone is talking to us" -- deliberately.
+ *  It is a health signal for the OTA self-test, which has to be answerable on a
+ *  bench with no phone in the room. ble_server_connected() cannot do that job:
+ *  it would make accepting a firmware depend on who happens to be nearby. */
+bool ble_server_up(void);
+
 #else  // BLE disabled — no-op shims so main.cpp needs no #ifdef
 
 static inline void ble_server_init(FSDState *, portMUX_TYPE *) {}
 static inline void ble_server_tick(uint32_t) {}
 static inline bool ble_server_connected(void) { return false; }
+// Nothing to bring up on this variant, so nothing can have failed to. Returning
+// false here would make the OTA self-test unpassable on every non-BLE board.
+static inline bool ble_server_up(void) { return true; }
 
 #endif

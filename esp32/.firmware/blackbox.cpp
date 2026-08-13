@@ -854,3 +854,13 @@ bool blackbox_delete(const char* name) {
 }
 
 void blackbox_delete_all() { backend_delete_all(); }
+
+bool blackbox_storage_ok() {
+#if defined(BLACKBOX_BACKEND_LITTLEFS) || defined(BLACKBOX_BACKEND_SD)
+    return g_fs_ok;
+#else
+    // RAM backend: the ring is the storage, so there is nothing that can fail
+    // to mount. Reporting false here would make the OTA self-test unpassable.
+    return true;
+#endif
+}
