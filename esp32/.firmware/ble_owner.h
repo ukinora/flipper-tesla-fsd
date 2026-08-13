@@ -63,5 +63,15 @@ bool ble_owner_window_open(void);
 /** Forget the owner, so the next phone to bond is enrolled. */
 void ble_owner_forget(void);
 
+/**
+ * Forget the owner AND commit it before returning.
+ *
+ * ble_owner_forget() queues the write for ble_owner_tick(), which is right for
+ * a running module and wrong for the factory-reset path: that reboots 200 ms
+ * later, so the queued write never happened and the old owner survived a reset
+ * that had already announced itself as complete. Loop task only.
+ */
+void ble_owner_erase_now(void);
+
 /** Print the current enrolment for the serial console. */
 void ble_owner_print(void);
