@@ -51,6 +51,16 @@
 #define BLE_CMD_DUMP_START   0x30u  // arg: 0 = .log (candump), 1 = .json summary
 #define BLE_CMD_DUMP_STOP    0x31u
 #define BLE_CMD_UPLOAD_ABORT 0x33u  // give up on an in-flight camera.bin upload
+// 🔴 The recorder had no reachable switch and no reachable trigger.
+//
+// blackbox_set_enabled() was only ever called from the web dashboard and from a
+// boot path guarded by the flag it sets -- so on this board it could only be
+// turned on if it was already on. blackbox_mark() had exactly one caller, also
+// the dashboard. Removing the dashboard (PR #28) therefore left the module
+// unable to record anything, which is the one thing the schedule depends on:
+// the capture taken before the TSL comes out cannot be retaken.
+#define BLE_CMD_BB_ENABLE    0x34u  // arg: 0 = off, 1 = on. Persisted.
+#define BLE_CMD_BB_MARK      0x35u  // record a window around NOW
 #define BLE_CMD_CAP_RECHECK  0x40u  // re-run the capability listen window
 #define BLE_CMD_SET_AUTONOMY 0x41u  // arg: 0/1 — operator intent, persisted
 #define BLE_CMD_PING         0x50u

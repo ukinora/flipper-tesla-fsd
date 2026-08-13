@@ -288,6 +288,8 @@ static void camera_persist(uint32_t now_ms, bool rx_stale) {
     }
 }
 
+static void camera_report(uint32_t now_ms);
+
 void camera_task_tick(uint32_t now_ms) {
     if((uint32_t)(now_ms - g_last_tick_ms) < CAMERA_TICK_MS) return;
     const uint32_t elapsed = (uint32_t)(now_ms - g_last_tick_ms);
@@ -341,6 +343,40 @@ void camera_task_tick(uint32_t now_ms) {
     }
 
     camera_persist(now_ms, rx_stale);
+    camera_report(now_ms);
+}
+
+// One line on the serial console when the judgement changes, plus a heartbeat.
+//
+// 🔴 This file had exactly one Serial.print in it, for a save failure. Every
+// other thing it decides -- whether GPS is usable, whether a person is judged
+// to be driving, what the policy wants -- reached the outside world ONLY through
+// the BLE CamStat notification. So during bring-up, the moment BLE is the thing
+// that is broken, the entire judgement chain goes dark at once and there is no
+// way to tell "the module is not deciding" from "the phone is not listening".
+//
+// Changes only, so a working module does not scroll the console away from the
+// [CAN]/[BB] lines that bring-up actually watches; a slow heartbeat proves it is
+// still running when nothing is changing.
+static void camera_report(uint32_t now_ms) {
+    static uint8_t  s_gps = 0xFF, s_phase = 0xFF, s_action = 0xFF;
+    static uint32_t s_last_beat_ms = 0;
+
+    bool changed = (g_gps_verdict != s_gps) ||
+                   ((uint8_t)g_decision.phase != s_phase) ||
+                   ((uint8_t)g_decision.action != s_action);
+    bool beat = (uint32_t)(now_ms - s_last_beat_ms) >= 30000u;
+    if(!changed && !beat) return;
+
+    s_gps = g_gps_verdict;
+    s_phase = (uint8_t)g_decision.phase;
+    s_action = (uint8_t)g_decision.action;
+    s_last_beat_ms = now_ms;
+
+    Serial.printf("[CAM] gps=%s phase=%u action=%u%s\n",
+                  fsd_gps_verdict_str((FsdGpsVerdict)g_gps_verdict),
+                  (unsigned)s_phase, (unsigned)s_action,
+                  changed ? "" : "  (heartbeat)");
 }
 
 // ── accessors ────────────────────────────────────────────────────────────────
