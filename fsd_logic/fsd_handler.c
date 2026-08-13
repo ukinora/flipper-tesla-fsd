@@ -57,7 +57,7 @@ bool fsd_can_transmit(const FSDState* state) {
     // and forgetting is silent. Naming the modes that MAY transmit makes a new
     // mode default to no-TX, which is the direction a mistake should fall.
     // Behaviour for the three existing modes is unchanged.
-    if(state->op_mode != OpMode_Active && state->op_mode != OpMode_Service) return false;
+    if(!fsd_mode_opens_tx(state->op_mode)) return false;
     if(state->tesla_ota_in_progress) return false;
     if(state->rx_stale) return false; // deaf bus: injecting achieves nothing
     return true;

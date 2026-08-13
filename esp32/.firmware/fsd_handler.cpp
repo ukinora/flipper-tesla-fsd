@@ -107,7 +107,7 @@ bool fsd_can_transmit(const FSDState *state) {
     // Allow-list, not deny-list — see the note on the fsd_logic twin. A new
     // OpMode must not inherit TX permission by default. Unchanged for the three
     // modes that exist today.
-    if (state->op_mode != OpMode_Active && state->op_mode != OpMode_Service) return false;
+    if (!fsd_mode_opens_tx(state->op_mode)) return false;
     if (state->tesla_ota_in_progress && !state->ignore_ota) return false;
     if (state->rx_stale) return false;  // deaf bus: injecting achieves nothing
     return true;

@@ -25,6 +25,7 @@
 #include "camera_task.h"
 #include "capability.h"
 #include "config.h"
+#include "mode_switch.h"
 #include "prefs.h"
 #include <NimBLEDevice.h>
 #include <string.h>
@@ -94,6 +95,11 @@ static bool     g_bulk_json   = false;
 // independent authorities and a BLE disconnect must not override them.
 static volatile bool     g_active_by_ble = false;
 static volatile uint32_t g_link_down_ms  = 0;  // 0 = link up or nothing to undo
+// SET_MODE arrives on the BLE task but has to be applied from loop(), because
+// applying it means switching a CAN controller. Single word each, written by
+// the BLE task and read-and-cleared in one place, so no lock is needed.
+static volatile bool     g_mode_req_pending = false;
+static volatile uint8_t  g_mode_req         = 0;
 // Declared size of the camera.bin currently being uploaded (0 = none).
 static volatile uint32_t g_upload_expect = 0;
 static char     g_bulk_name[40] = {};
@@ -287,6 +293,27 @@ static void ble_bulk_pump() {
     }
 }
 
+// Apply a SET_MODE the BLE task parked for us, and answer with the truth.
+// Runs from loop(), which is the only task allowed to touch the CAN driver.
+static void ble_apply_mode_request(void) {
+    if (!g_mode_req_pending) return;
+    g_mode_req_pending = false;
+
+    OpMode m = (OpMode)g_mode_req;
+    bool ok = mode_apply(m);
+
+    // Track the lease only when the switch really happened. Claiming an Active
+    // we never got would arm the grace timer to "revoke" something that was
+    // never granted.
+    if (ok) g_active_by_ble = (m == OpMode_Active);
+
+    Serial.printf("[BLE] mode -> %s%s\n",
+                  m == OpMode_Active ? "ACTIVE" : "LISTEN-ONLY",
+                  ok ? "" : " — FAILED, controller did not switch");
+    ble_send_result(BLE_CMD_SET_MODE, ok ? BLE_RES_OK : BLE_RES_REJECTED,
+                    (uint16_t)mode_current());
+}
+
 // Hand Active back once the phone has been gone for BLE_ACTIVE_GRACE_MS.
 // Runs from loop(), so g_state is touched on the same task as everything else.
 static void ble_revoke_active_if_stale(uint32_t now_ms) {
@@ -304,8 +331,14 @@ static void ble_revoke_active_if_stale(uint32_t now_ms) {
     // module exists to cover. The floor grants no general TX either way, and
     // the camera path still has to see a person driving.
     OpMode floor = fsd_autonomy_floor(g_state);
-    if (was_active) g_state->op_mode = floor;
     portEXIT_CRITICAL(g_mux);
+
+    // 🔴 Through mode_apply(), not by writing op_mode here. This path used to
+    // lower the variable and leave the controller wherever it was — so a module
+    // that had been opened with the button ended up reporting Listen-Only while
+    // its transmitter was still enabled. Listen-Only's safety claim is that it
+    // is a hardware register; a Listen-Only that is only a variable is not that.
+    if (was_active) mode_apply(floor);
 
     if (was_active) {
         Serial.printf("[BLE] no phone for %u s — falling back to %s\n",
@@ -405,15 +438,19 @@ class CommandCB : public NimBLECharacteristicCallbacks {
             break;
 
         case BLE_CMD_SET_MODE: {
-            OpMode m = arg ? OpMode_Active : OpMode_ListenOnly;
-            portENTER_CRITICAL(g_mux);
-            g_state->op_mode = m;
-            portEXIT_CRITICAL(g_mux);
-            // Remember that this Active is ours, so the grace timer knows what
-            // it may revoke (and stop tracking once the phone turns it off).
-            g_active_by_ble = (m == OpMode_Active);
-            Serial.printf("[BLE] mode -> %s\n", arg ? "ACTIVE" : "LISTEN-ONLY");
-            ble_send_result(cmd, BLE_RES_OK, (uint16_t)m);
+            // 🔴 Deliberately NOT answered here.
+            //
+            // This used to write g_state->op_mode and reply OK on the spot,
+            // without touching the CAN controllers -- so the app read "Active"
+            // while the hardware listen-only register still refused every
+            // transmit. The acknowledgement was a claim nobody had checked.
+            //
+            // It cannot be checked from here either: this runs on the BLE host
+            // task, and switching the driver means talking to an MCP2515 over
+            // the same SPI bus loop() is polling. So the request is handed to
+            // loop(), which applies it and answers with what actually happened.
+            g_mode_req         = arg ? OpMode_Active : OpMode_ListenOnly;
+            g_mode_req_pending = true;
             break;
         }
 
@@ -650,6 +687,7 @@ void ble_server_tick(uint32_t now_ms) {
     // Bulk runs every loop(), not on the 5 Hz State cadence — a ~100 KB capture
     // over 5 Hz chunks would take minutes.
     ble_bulk_pump();
+    ble_apply_mode_request();      // answers only after the driver moved
     ble_revoke_active_if_stale(now_ms);
 
     if (g_prefs_dirty) {

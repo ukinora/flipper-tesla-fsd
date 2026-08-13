@@ -208,6 +208,61 @@ static void can_set_all_listen_only(bool listen_only) {
     }
 }
 
+// Did every initialised controller actually reach the register state we asked
+// for? isListenOnly() is not a wish: both drivers only update it after the mode
+// change reports success, and an uninstalled MCP2515 reports listen-only, which
+// is the safe direction.
+static bool can_mode_settled(bool listen_only) {
+    for (uint8_t i = 0; i < CAN_ACTIVE_BUS_COUNT; i++) {
+        if (!g_can_ok[i] || !g_can[i]) continue;   // nothing to check on this one
+        if (g_can[i]->isListenOnly() != listen_only) return false;
+    }
+    return true;
+}
+
+// The one way to change op_mode. See mode_switch.h for why it exists.
+//
+// 🔴 Loop task only.
+bool mode_apply(OpMode m) {
+    const bool want_listen_only = !fsd_mode_opens_tx(m);
+
+    // The rule both branches follow: the software gate is never more permissive
+    // than the hardware. So the direction that RESTRICTS moves first.
+    if (!want_listen_only) {
+        // Opening. Register first -- if it will not move we must not raise
+        // op_mode, or we advertise a permission the wire cannot honour. That is
+        // precisely the bug this function exists to remove.
+        can_set_all_listen_only(false);
+        if (!can_mode_settled(false)) {
+            Serial.println("[MODE] 컨트롤러가 Listen-Only 를 못 벗어났다 — 모드를 바꾸지 않는다");
+            can_set_all_listen_only(true);   // never leave it half-open
+            return false;
+        }
+    }
+
+    portENTER_CRITICAL(&g_state_mux);
+    g_state.op_mode = m;
+    portEXIT_CRITICAL(&g_state_mux);
+
+    if (want_listen_only) {
+        // Closing. State first, so the software gate shuts immediately; the
+        // reverse order would leave a moment where op_mode still said Active.
+        can_set_all_listen_only(true);
+        if (!can_mode_settled(true)) {
+            Serial.println("[MODE] 경고: 컨트롤러가 Listen-Only 로 안 들어갔다");
+            return false;
+        }
+    }
+    return true;
+}
+
+OpMode mode_current(void) {
+    portENTER_CRITICAL(&g_state_mux);
+    OpMode m = g_state.op_mode;
+    portEXIT_CRITICAL(&g_state_mux);
+    return m;
+}
+
 static bool can_any_ok() {
     for (uint8_t i = 0; i < CAN_ACTIVE_BUS_COUNT; i++) {
         if (g_can_ok[i]) return true;
@@ -989,19 +1044,16 @@ static bool     g_sleep_warned   = false;
 
 static void dispatch_clicks(int n) {
     if (n == 1) {
-        // Toggle Listen-Only ↔ Active
-        FSDState saved;
-        bool active = false;
-        state_enter();
-        if (g_state.op_mode == OpMode_ListenOnly) {
-            g_state.op_mode = OpMode_Active;
-            active = true;
-        } else {
-            g_state.op_mode = OpMode_ListenOnly;
+        // Toggle Listen-Only ↔ Active, through the one API. Only report and
+        // persist what actually happened: a controller that refuses the switch
+        // used to leave the log and NVS claiming a mode the hardware was not in.
+        bool want_active = (mode_current() != OpMode_Active);
+        if (!mode_apply(want_active ? OpMode_Active : OpMode_ListenOnly)) {
+            Serial.println("[BTN] 모드 전환 실패 — 바뀌지 않았다");
+            return;
         }
-        saved = g_state;
-        state_exit();
-        can_set_all_listen_only(!active);
+        bool active = want_active;
+        FSDState saved = state_snapshot();
 #if !defined(FSD_NO_WIFI)
         http_can_stream_set_enabled(true);  // capture works in both modes now (#108)
 #endif
@@ -1762,8 +1814,14 @@ void setup() {
         }
 #endif
     } else {
-        if (state_snapshot().op_mode == OpMode_Active) {
-            can_set_all_listen_only(false);
+        // Through mode_apply() like every other caller, so a controller that
+        // refuses to leave Listen-Only cannot leave the module claiming Active
+        // at boot. PERSIST_OP_MODE=0 on the car board means this is always
+        // Listen-Only there; the other variants can restore Active.
+        OpMode restored = state_snapshot().op_mode;
+        if (!mode_apply(restored)) {
+            Serial.println("[CAN] 500 kbps — mode switch failed, staying Listen-Only");
+        } else if (restored == OpMode_Active) {
             Serial.println("[CAN] 500 kbps — Active (restored from NVS)");
         } else {
             Serial.println("[CAN] 500 kbps — Listen-Only");

@@ -210,6 +210,16 @@ boards and reach the vehicle CAN bus. **That is upstream's design and upstream's
 call to make** — the dashboard is its entire user interface. It is recorded here
 so nobody reads "we removed WiFi" as covering a board it does not.
 
+Those variants also run a **second HTTP server on port 82** serving raw CAN
+frames at `/stream`, with no authentication and `Access-Control-Allow-Origin: *`
+— so any web page the browser happens to be on can read the vehicle bus,
+including the VIN. It is enabled in Listen-Only as well as Active, and a single
+`?ids=` request reprogrammes the controller's hardware acceptance filter, which
+narrows what the device itself can see. Gone on `lilygo-t2can` with the rest
+(`http_can_stream.cpp` is excluded), and `ci_check_no_wifi.py` watches for
+`/stream` and the CORS header specifically — it is a separate file from the
+dashboard, so one could come back without the other.
+
 **Secure Boot, signed apps and flash encryption are off.**
 `CONFIG_SECURE_BOOT`, `CONFIG_SECURE_SIGNED_APPS_*` and flash encryption are all
 disabled in the Arduino ESP32 SDK this builds against.

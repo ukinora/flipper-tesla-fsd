@@ -12,6 +12,7 @@
  * so this is behavior-preserving for the existing Flipper build.
  */
 
+#include <stdbool.h>   // fsd_mode_opens_tx() below
 #include <stdint.h>
 
 #define MAX_LEN 8
@@ -61,3 +62,27 @@ typedef enum {
     // scroll detent, is far more than the job needs.
     OpMode_Autonomous,
 } OpMode;
+
+/**
+ * Does this mode open the CAN controller's transmitter?
+ *
+ * The CAN driver has a hardware listen-only register, and Listen-Only's whole
+ * safety claim is that it is "physically incapable of TX even on bus error
+ * frames". That claim only holds if the register tracks op_mode -- and it did
+ * not: the BLE SET_MODE handler set op_mode and acknowledged success without
+ * touching the driver, so the app read Active while the hardware could not
+ * transmit, and the revoke path lowered op_mode while leaving a driver that
+ * somebody else had opened.
+ *
+ * Inline in the header on purpose. fsd_can_transmit() exists twice -- once in
+ * fsd_logic/fsd_handler.c for the Flipper and the host tests, once in
+ * esp32/.firmware/fsd_handler.cpp because that build does not compile the
+ * fsd_logic twin -- and the shim that drives the register is a third place.
+ * Three copies of an allow-list drift; one predicate cannot.
+ *
+ * Allow-list, for the same reason fsd_can_transmit() is one: a mode added later
+ * must default to a closed transmitter rather than inherit an open one.
+ */
+static inline bool fsd_mode_opens_tx(OpMode m) {
+    return m == OpMode_Active || m == OpMode_Service;
+}

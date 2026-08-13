@@ -12,6 +12,7 @@
 #include "web_dashboard.h"
 #include "can_dump.h"
 #include "http_can_stream.h"
+#include "mode_switch.h"
 #include "blackbox.h"
 #include "capability.h"
 #include "profile_match.h"
@@ -1662,20 +1663,21 @@ static void ws_event(uint8_t num, WStype_t type,
     if (vptr) vptr = strstr(vptr, ":") + 1;
 
     if (strstr(buf, "\"mode\"")) {
-        FSDState saved;
-        bool active = false;
-        state_enter();
-        if (g_state->op_mode == OpMode_ListenOnly) {
-            g_state->op_mode = OpMode_Active;
-            active = true;
-        } else {
-            g_state->op_mode = OpMode_ListenOnly;
+        // Through mode_apply() like the button and BLE. This branch already
+        // switched the controllers, so it was not the one that was broken --
+        // but leaving one path with its own copy of "set the variable, then
+        // loop the buses" is how the paths drifted apart in the first place.
+        // Safe from here: ws_event() runs inside web_dashboard_update(), which
+        // loop() calls, and mode_apply() is loop-task-only.
+        bool active = (mode_current() != OpMode_Active);
+        if (!mode_apply(active ? OpMode_Active : OpMode_ListenOnly)) {
+            Serial.println("[Web] mode switch FAILED — unchanged");
+            return;
         }
+        FSDState saved;
+        state_enter();
         saved = *g_state;
         state_exit();
-        for (uint8_t i = 0; i < g_can_count; i++) {
-            if (g_can_buses[i]) g_can_buses[i]->setListenOnly(!active);
-        }
         http_can_stream_set_enabled(true);  // capture works in both modes now (#108)
         Serial.println(active ? "[Web] → Active mode" : "[Web] → Listen-Only mode");
         prefs_save(&saved);
