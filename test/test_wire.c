@@ -97,10 +97,15 @@ static void test_state_layout(void) {
 static void test_state_structural_zeros(void) {
     printf("\n-- State: the bits that are always zero stay zero --\n");
 
-    // Bits 4, 5 (blind spot) and 7 (profile change) have no input field at all,
+    // Bits 5 (blind spot R) and 7 (profile change) have no input field at all,
     // deliberately: giving them one would invite someone to fill it, and
     // neither is extracted or emitted on this build. The app renders them as
     // unavailable, and this pins that they cannot be set by accident.
+    //
+    // Bit 4 used to be in this list. It now carries blackbox_recording, which is
+    // why that line below is an assertion about the FIELD rather than about the
+    // bit: this test failing is exactly what should happen when a spare bit
+    // stops being spare, and it did.
     FsdWireState w;
     memset(&w, 0xFF, sizeof(w)); // every bool true, every number huge
     w.speed_kph = 0.0f;
@@ -110,9 +115,17 @@ static void test_state_structural_zeros(void) {
 
     uint8_t b[FSD_WIRE_STATE_LEN];
     fsd_wire_pack_state(&w, b);
-    CHECK((b[1] & (1u << 4)) == 0, "blind spot L never set");
     CHECK((b[1] & (1u << 5)) == 0, "blind spot R never set");
     CHECK((b[1] & (1u << 7)) == 0, "profile-change never set");
+
+    // ...and bit 4 tracks its field in BOTH directions, so it can neither be
+    // stuck on nor silently dropped.
+    w.blackbox_recording = false;
+    fsd_wire_pack_state(&w, b);
+    CHECK((b[1] & (1u << 4)) == 0, "recording clear when not recording");
+    w.blackbox_recording = true;
+    fsd_wire_pack_state(&w, b);
+    CHECK((b[1] & (1u << 4)) != 0, "recording set when recording");
 }
 
 static void test_state_clamps(void) {
