@@ -61,6 +61,7 @@ static void test_state_layout(void) {
     w.rx_seen = true;
     w.blinker_right = true;
     w.brake_applied = true;
+    w.blackbox_recording = true;
     w.op_mode = 1;      // Active
     w.hw_version = 2;   // HW3
     w.speed_profile = 2;
@@ -78,8 +79,8 @@ static void test_state_layout(void) {
     fsd_wire_pack_state(&w, b);
 
     CHECK(b[0] == 2, "ver 2, got %u", b[0]);
-    // bit0 rx, bit3 right blinker, bit6 brake = 0x49
-    CHECK(b[1] == 0x49u, "flags 0x49, got 0x%02X", b[1]);
+    // bit0 rx, bit3 right blinker, bit4 recording, bit6 brake = 0x59
+    CHECK(b[1] == 0x59u, "flags 0x59, got 0x%02X", b[1]);
     CHECK(b[2] == 1, "op_mode");
     CHECK(b[3] == 2, "hw");
     CHECK(b[4] == 2, "profile");
@@ -96,10 +97,15 @@ static void test_state_layout(void) {
 static void test_state_structural_zeros(void) {
     printf("\n-- State: the bits that are always zero stay zero --\n");
 
-    // Bits 4, 5 (blind spot) and 7 (profile change) have no input field at all,
+    // Bits 5 (blind spot R) and 7 (profile change) have no input field at all,
     // deliberately: giving them one would invite someone to fill it, and
     // neither is extracted or emitted on this build. The app renders them as
     // unavailable, and this pins that they cannot be set by accident.
+    //
+    // Bit 4 used to be in this list. It now carries blackbox_recording, which is
+    // why that line below is an assertion about the FIELD rather than about the
+    // bit: this test failing is exactly what should happen when a spare bit
+    // stops being spare, and it did.
     FsdWireState w;
     memset(&w, 0xFF, sizeof(w)); // every bool true, every number huge
     w.speed_kph = 0.0f;
@@ -109,9 +115,17 @@ static void test_state_structural_zeros(void) {
 
     uint8_t b[FSD_WIRE_STATE_LEN];
     fsd_wire_pack_state(&w, b);
-    CHECK((b[1] & (1u << 4)) == 0, "blind spot L never set");
     CHECK((b[1] & (1u << 5)) == 0, "blind spot R never set");
     CHECK((b[1] & (1u << 7)) == 0, "profile-change never set");
+
+    // ...and bit 4 tracks its field in BOTH directions, so it can neither be
+    // stuck on nor silently dropped.
+    w.blackbox_recording = false;
+    fsd_wire_pack_state(&w, b);
+    CHECK((b[1] & (1u << 4)) == 0, "recording clear when not recording");
+    w.blackbox_recording = true;
+    fsd_wire_pack_state(&w, b);
+    CHECK((b[1] & (1u << 4)) != 0, "recording set when recording");
 }
 
 static void test_state_clamps(void) {
@@ -323,6 +337,11 @@ static void emit_fixture(FILE* f) {
           .crc_err_count = 70000u, .uptime_s = 0xFFFFFFFFu}},
         {"ota_running", {.rx_seen = true, .ota_in_progress = true, .op_mode = 0,
                          .hw_version = 2, .gear = 1, .rx_fps = 1000}},
+        /* The bit the phone reads before taking a capture that cannot be
+         * retaken. Its own vector so a packer change that drops it fails on
+         * both sides of the link rather than on neither. */
+        {"recording", {.rx_seen = true, .blackbox_recording = true, .op_mode = 0,
+                       .hw_version = 2, .gear = 1, .rx_fps = 1000, .uptime_s = 60}},
     };
 
     const size_t ns = sizeof(states) / sizeof(states[0]);

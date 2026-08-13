@@ -53,9 +53,9 @@ extern "C" {
 
 /* Everything State is built from. Filled by the caller from FSDState.
  *
- * Note what is NOT here: flags bits 4, 5 and 7. They are structurally zero —
+ * Note what is NOT here: flags bits 5 and 7. They are structurally zero --
  * blind-spot is not extracted on the ESP32 path and the closed loop that would
- * set bit 7 emits nothing — so they are not inputs to anything. Giving them a
+ * set bit 7 emits nothing -- so they are not inputs to anything. Giving them a
  * field would invite someone to fill it. */
 typedef struct {
     bool rx_seen; // any CAN frame ever received
@@ -63,6 +63,19 @@ typedef struct {
     bool blinker_left;
     bool blinker_right;
     bool brake_applied;
+
+    /* bit 4. Whether the capture recorder is actually recording -- the RING is
+     * allocated, not merely the operator's wish.
+     *
+     * Added because the phone had no way to know. The recorder defaults to off,
+     * and until BB_ENABLE existed there was no way to turn it on at all; with
+     * the button but without this bit, the app knows the state right after
+     * pressing it and forgets on the next reconnect. The one moment that
+     * matters is the moment before a capture that cannot be retaken.
+     *
+     * A spare bit rather than a new field, so the length and the version are
+     * unchanged. */
+    bool blackbox_recording;
 
     uint8_t op_mode;   // 0=ListenOnly 1=Active 2=Service 3=Autonomous
     uint8_t hw_version; // 0=Unknown 1=Legacy 2=HW3 3=HW4

@@ -133,6 +133,9 @@ static void ble_pack_state(uint8_t *out, uint16_t rx_fps) {
     w.blinker_left     = s.ui_left_blinker;
     w.blinker_right    = s.ui_right_blinker;
     w.brake_applied    = s.driver_brake_applied;
+    // The ring, not the wish: blackbox_is_enabled() is false when the heap
+    // guard refused, which is exactly the case the operator must not miss.
+    w.blackbox_recording = blackbox_is_enabled();
     w.op_mode          = (uint8_t)s.op_mode;
     w.hw_version       = (uint8_t)s.hw_version;
     w.speed_profile    = s.speed_profile;
