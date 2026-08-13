@@ -61,6 +61,18 @@ static CanDriver *g_can[CAN_ACTIVE_BUS_COUNT] = {};
 static bool       g_can_ok[CAN_ACTIVE_BUS_COUNT] = {};       // true once begin() succeeds
 static uint32_t   g_can_last_retry_ms[CAN_ACTIVE_BUS_COUNT] = {}; // periodic re-init
 #define CAN_REINIT_INTERVAL_MS  30000u
+
+// ── OTA self-test ────────────────────────────────────────────────────────────
+// Set in setup() when we booted an image the bootloader has not accepted yet.
+// Cleared by ota_selftest_tick() once the image has proved it runs; until then
+// the previous firmware stays as the fallback and a reset restores it.
+static bool     g_ota_pending_verify  = false;
+static uint32_t g_ota_first_loop_ms   = 0;
+static uint32_t g_ota_loops           = 0;
+// Long enough to outlive a boot loop and a watchdog reset, short enough that
+// nobody sits waiting for it.
+#define OTA_SELFTEST_MS     20000u
+#define OTA_SELFTEST_LOOPS  1000u
 static FSDState   g_state = {};
 static portMUX_TYPE g_state_mux = portMUX_INITIALIZER_UNLOCKED;
 
@@ -1550,12 +1562,16 @@ void setup() {
         esp_ota_img_states_t ota_state;
         if (esp_ota_get_state_partition(running, &ota_state) == ESP_OK) {
             if (ota_state == ESP_OTA_IMG_PENDING_VERIFY) {
-                Serial.println("[OTA] First boot after update - marking as valid...");
-                if (esp_ota_mark_app_valid_cancel_rollback() == ESP_OK) {
-                    Serial.println("[OTA] Firmware marked valid");
-                } else {
-                    Serial.println("[OTA] WARNING: Could not mark firmware valid");
-                }
+                // Do NOT mark valid here. This line runs before CAN, storage and
+                // BLE are up, so calling esp_ota_mark_app_valid_cancel_rollback()
+                // now would throw away the rollback for an image we have not
+                // watched run for even one loop. An image that boots and then
+                // dies in CAN init would already have cancelled its own way back.
+                // ESP-IDF's OTA docs say to self-test first; ota_selftest_tick()
+                // below does that. CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y in the
+                // Arduino SDK, so this is live, not theoretical.
+                g_ota_pending_verify = true;
+                Serial.println("[OTA] First boot after update - self-test running");
             } else if (ota_state == ESP_OTA_IMG_VALID) {
                 Serial.println("[OTA] Running verified firmware");
             }
@@ -1761,9 +1777,62 @@ void setup() {
     if (g_state.blackbox_enabled) blackbox_set_enabled(true);
 }
 
+// ── OTA self-test ─────────────────────────────────────────────────────────────
+// Accept a freshly installed image only after watching it run, per ESP-IDF's OTA
+// rollback guidance. Until this calls mark_app_valid, a reset boots the previous
+// firmware -- which is the whole point of the pending-verify state.
+//
+// WHAT IS AND IS NOT A HEALTH SIGNAL
+// ----------------------------------
+// The test has to prove OUR CODE works, never that the CAR is there. Gate on the
+// wrong thing and a good image is rolled back for sitting on a bench:
+//
+//   ✗ frames received      -- needs a live bus
+//   ✗ camera_store_ready() -- false until a database has been uploaded, so a
+//                             fresh board would NEVER accept its own firmware
+//   ✗ ble_server_connected() -- needs a phone in range
+//   ✓ we reached loop()    -- catches a crash or hang anywhere in setup()
+//   ✓ the loop keeps running -- catches boot loops and watchdog resets
+//   ✓ a CAN controller came up -- on this board the transceivers are onboard, so
+//                                 begin() talks to the chip, not to the car
+static void ota_selftest_tick(uint32_t now) {
+    if (!g_ota_pending_verify) return;
+
+    if (g_ota_first_loop_ms == 0) g_ota_first_loop_ms = now;
+    if (g_ota_loops < UINT32_MAX) g_ota_loops++;
+
+    if ((uint32_t)(now - g_ota_first_loop_ms) < OTA_SELFTEST_MS) return;
+    if (g_ota_loops < OTA_SELFTEST_LOOPS) return;
+
+    bool can_ok = false;
+    for (uint8_t i = 0; i < CAN_ACTIVE_BUS_COUNT; i++) if (g_can_ok[i]) can_ok = true;
+    if (!can_ok) {
+        // Not fatal yet: the periodic re-init below can still bring a controller
+        // up, and each retry gets another look. Say so once a minute rather than
+        // every loop, because this is also what a genuine failure looks like and
+        // the operator needs to see it.
+        static uint32_t s_last_warn_ms = 0;
+        if (s_last_warn_ms == 0 || (uint32_t)(now - s_last_warn_ms) >= 60000u) {
+            s_last_warn_ms = now;
+            Serial.println("[OTA] self-test waiting: no CAN controller yet — "
+                           "this image is NOT accepted, a reset restores the previous one");
+        }
+        return;
+    }
+
+    g_ota_pending_verify = false;
+    if (esp_ota_mark_app_valid_cancel_rollback() == ESP_OK) {
+        Serial.printf("[OTA] self-test passed (%u loops, %u ms) — firmware accepted\n",
+                      (unsigned)g_ota_loops, (unsigned)(now - g_ota_first_loop_ms));
+    } else {
+        Serial.println("[OTA] WARNING: self-test passed but could not mark firmware valid");
+    }
+}
+
 // ── loop ──────────────────────────────────────────────────────────────────────
 void loop() {
     uint32_t now = millis();
+    ota_selftest_tick(now);
 
     if (g_factory_reset_window && now >= FACTORY_RESET_WINDOW_MS) {
         g_factory_reset_window = false;
