@@ -24,10 +24,17 @@
 #include "../../fsd_logic/fsd_autonomy.h"
 #include "can_driver.h"
 #include "led.h"
+// FSD_NO_WIFI drops the radio, the dashboard and the HTTP CAN stream from the
+// build entirely -- platformio.ini also removes the three .cpp files, so these
+// headers would declare functions nothing implements.
+#if !defined(FSD_NO_WIFI)
 #include "wifi_manager.h"
 #include "web_dashboard.h"
+#endif
 #include "can_dump.h"
+#if !defined(FSD_NO_WIFI)
 #include "http_can_stream.h"
+#endif
 #include "blackbox.h"
 #include "camera_store.h"
 #include "camera_task.h"
@@ -130,7 +137,13 @@ static void serial_command_tick() {
             len = 0;
 
             if (serial_cmd_equals(buf, "ip") || serial_cmd_equals(buf, "wifi")) {
+#if defined(FSD_NO_WIFI)
+                // Answer rather than ignore: the command is in the README and
+                // silence would read as a hung serial port, not as a decision.
+                Serial.println("[WiFi] not built into this firmware — BLE only");
+#else
                 wifi_print_status();
+#endif
             } else if (serial_cmd_equals(buf, "btnscan")) {
                 // Bring-up: look before writing a parser for a device nobody has.
                 if (!ble_central_scan(5)) Serial.println("[SER] scan already running");
@@ -963,7 +976,9 @@ static void dispatch_clicks(int n) {
         saved = g_state;
         state_exit();
         can_set_all_listen_only(!active);
+#if !defined(FSD_NO_WIFI)
         http_can_stream_set_enabled(true);  // capture works in both modes now (#108)
+#endif
         Serial.println(active ? "[BTN] → Active mode" : "[BTN] → Listen-Only mode");
         can_dump_log(active ? "MODE switched to Active — TX enabled" : "MODE switched to Listen-Only — TX disabled");
         prefs_save(&saved);
@@ -1144,7 +1159,9 @@ static void process_frame(CanBusId bus, const CanFrame &frame) {
     // cheap ring-buffer write and only does anything when a client is connected.
     // Injection safety is preserved by never installing the single-ID hardware
     // filter in Active mode (see the acceptance-filter block in loop()).
+#if !defined(FSD_NO_WIFI)
     http_can_stream_record(bus, frame);
+#endif
 #if defined(BOARD_LILYGO)
     g_last_can_rx_ms = millis();
     g_sleep_warned   = false;
@@ -1715,15 +1732,33 @@ void setup() {
     Serial.println("[LED] Blue=Listen  Green=Active  Yellow=OTA  Red=Error");
 
     // ── WiFi + Web dashboard (non-fatal if WiFi fails) ───────────────────────
+#if defined(FSD_NO_WIFI)
+    // Not built. This board lives permanently in a car and talks to its phone
+    // app over BLE, so the AP was pure attack surface: the default password is
+    // printed in this repo's README, and ws_event() in web_dashboard.cpp has no
+    // authentication of any kind -- one message on that socket flips the module
+    // to Active and opens CAN transmit on every bus. blackbox.h already said we
+    // "do not intend to bring WiFi up at all" here; this makes that true.
+    Serial.println("[WiFi] not built into this firmware — BLE only");
+#else
     if (wifi_init(&g_state)) {
         web_dashboard_init(&g_state, g_can, CAN_ACTIVE_BUS_COUNT, &g_state_mux);
         http_can_stream_set_enabled(true);  // capture works in both modes now (#108)
-        // Ring is allocated lazily on enable. If it was persisted ON, (re)apply
-        // it now that WiFi/web hold their heap — the guard refuses if too tight,
-        // so a persisted-ON device can never re-trigger the boot loop (#124).
-        if (g_state.blackbox_enabled) blackbox_set_enabled(true);
         Serial.println("[SER] Type 'ip' in the serial monitor to print WiFi URLs again");
     }
+#endif
+
+    // Ring is allocated lazily on enable, so a persisted-ON device re-applies it
+    // here. The heap guard refuses when memory is too tight, so this can never
+    // re-trigger the boot loop (#124).
+    //
+    // 🔴 This used to sit INSIDE the WiFi block above. On a build without WiFi
+    // that is one of only two callers gone, and the other one is the dashboard
+    // -- so the module would have booted with its capture ring permanently
+    // unallocated and no way left to allocate it. BLE can read captures
+    // (DUMP_START) but has no command to switch recording on. The one-shot
+    // capture we take before the TSL comes out runs on this ring.
+    if (g_state.blackbox_enabled) blackbox_set_enabled(true);
 }
 
 // ── loop ──────────────────────────────────────────────────────────────────────
@@ -1912,6 +1947,7 @@ void loop() {
     sleep_tick(now);
 #endif
 
+#if !defined(FSD_NO_WIFI)
     // ── Web dashboard (after CAN to preserve CAN frame latency) ──────────────
     web_dashboard_update();
 
@@ -1957,6 +1993,7 @@ void loop() {
             }
         }
     }
+#endif  // !FSD_NO_WIFI — dashboard + the stream's acceptance-filter driver
 
 #if defined(BOARD_TTGO_DISPLAY)
     s = state_snapshot();
