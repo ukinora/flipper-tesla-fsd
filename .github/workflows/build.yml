@@ -85,6 +85,14 @@ jobs:
       - name: Build ${{ matrix.env }}
         working-directory: esp32
         run: pio run -e ${{ matrix.env }}
+      # lilygo-t2can is installed permanently in a car and has no dashboard, so
+      # WiFi there is attack surface with a published password and no auth on
+      # the control socket. Nothing in the source makes that removal hard to undo
+      # by accident -- one #include in a shared header brings the library back.
+      - name: No WiFi in ${{ matrix.env }}
+        if: matrix.env == 'lilygo-t2can'
+        working-directory: esp32
+        run: python ci_check_no_wifi.py ${{ matrix.env }}
       - name: Stage firmware
         working-directory: esp32
         run: |
