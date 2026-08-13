@@ -46,6 +46,14 @@ All CAN protocol handling from hypery11's Flipper Zero implementation (`fsd_hand
 **WiFi Access Point + Web Dashboard** — inspired by [wjsall's ESP32 WiFi Web version](https://github.com/wjsall/tesla-fsd-controller) and [tuncasoftbildik's Tesla-style UI](https://github.com/tuncasoftbildik/tesla-can-mod):
 
 - **WiFi AP mode** — connects without internet, SSID: `Tesla-FSD`, password: `12345678`
+
+> ⚠️ **Not built on `lilygo-t2can`.** That variant defines `FSD_NO_WIFI`, which
+> drops the radio, this dashboard and the HTTP CAN stream from the image. The
+> password above is public and the dashboard's WebSocket authenticates nothing,
+> so anyone in radio range of a parked car can put the module into Active mode
+> and open CAN transmit. That board is permanently installed and talks to its
+> phone app over BLE, so it has no use for any of this. Flash it over USB-C —
+> it has no OTA.
 - **Tesla dark theme UI** — mobile-first responsive design (optimized for phone in portrait)
   - Dark background (#0a0a1a) with accent gradients, inspired by Tesla's in-car UI
   - All HTML/CSS/JS embedded in firmware (no external CDN dependencies)
@@ -310,6 +318,8 @@ pio device monitor -b 115200
 | 🔴 Red | Error (no CAN signal / CRC errors) |
 
 ### WiFi Dashboard
+
+> ⚠️ Not available on `lilygo-t2can` — see the note under "What Was Added".
 
 1. Connect phone to WiFi: **Tesla-FSD** (password: **12345678**)
 2. Open browser: **http://192.168.4.1**
