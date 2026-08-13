@@ -49,7 +49,14 @@ FORBIDDEN_LIBS = ("libWiFi.a", "libWebSockets.a", "libWebServer.a", "libESPmDNS.
 FORBIDDEN_TOKENS = ("Tesla-FSD", "12345678")
 
 # Substrings. Safe to match loosely: none of these occur in library boilerplate.
-FORBIDDEN_SUBSTRINGS = (b"softAP", b"WebSocket", b"192.168.4.1", b"/sdformat")
+#
+# /stream and the CORS header are the HTTP CAN stream on port 82 -- a second
+# server that served raw CAN frames to any origin with no authentication at all.
+# It went with the dashboard, but nothing was watching for its return: it is a
+# separate .cpp from web_dashboard, so a build_src_filter edit could bring back
+# one without the other.
+FORBIDDEN_SUBSTRINGS = (b"softAP", b"WebSocket", b"192.168.4.1", b"/sdformat",
+                        b"/stream", b"Access-Control-Allow-Origin")
 
 TOKEN_RE = re.compile(rb"[\x20-\x7e]{4,}")
 
