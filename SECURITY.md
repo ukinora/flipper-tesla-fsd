@@ -189,7 +189,26 @@ below first.
 | **Regression guard** | `esp32/ci_check_no_wifi.py` fails the build if excluded objects, WiFi archives, credentials or web strings reappear. Runs in CI on this variant only. |
 | **BLE pairing** | `WRITE_ENC` + bonding, no MITM requirement (PR #23). The board has no display or keypad, so demanding MITM produced `INSUFFICIENT_AUTHEN` on every command rather than any real protection. |
 | **Which phone may command** | Bonding alone restricts nothing — Just Works is the only pairing this hardware can do, so anyone in radio range of a parked car could pair and then open CAN transmit. The module now remembers **one owner** (PR #32): first phone to bond is enrolled, and a different phone needs a triple click on the physical button, which means being in the car. Commands and `camera.bin` upload are refused otherwise. |
-| **OTA accept** | The image is marked valid only after a self-test in `loop()` — every CAN controller up, storage mounted, BLE advertising — and rolls itself back on a definite failure (PRs #30, #31). Previously it cancelled rollback in `setup()`, before any of that existed. |
+| **OTA accept** | The image is marked valid only after a self-test in `loop()` — every CAN controller up, storage mounted, BLE advertising — and rolls itself back on a definite failure (PRs #30, #31, **#35**). |
+
+> ⚠️ **That row was not true of the shipped binary until PR #35.** Arduino-ESP32
+> makes the rollback decision itself in `initArduino()`, **before `setup()` runs
+> at all**: `esp32-hal-misc.c` has weak `verifyOta()` (returns true) and
+> `verifyRollbackLater()` (returns false), so it saw `PENDING_VERIFY` and called
+> `esp_ota_mark_app_valid_cancel_rollback()` on the spot. `setup()` then found
+> the partition already `ESP_OTA_IMG_VALID`, never armed the self-test, and
+> `ota_selftest_tick()` returned immediately forever. The self-test was dead
+> code and this document was describing an intention, not the firmware.
+>
+> Fixed by overriding the weak hook. Verified in the ELF rather than assumed:
+>
+> ```
+> 42063d00 T verifyRollbackLater       (was: W, the framework default)
+> 42063d00 <verifyRollbackLater>:
+>   entry   a1, 32
+>   movi.n  a2, 1        ← returns true, so the framework does not decide
+>   retw.n
+> ```
 
 There is no OTA **install** path on this variant: `/update` lived in the
 dashboard, and BLE has no firmware command — the only thing it writes to flash

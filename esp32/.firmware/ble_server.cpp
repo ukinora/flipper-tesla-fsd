@@ -66,9 +66,9 @@ static NimBLECharacteristic *g_ch_bulk   = nullptr;
 static NimBLECharacteristic *g_ch_upload = nullptr;
 static NimBLECharacteristic *g_ch_camstat = nullptr;
 
-// Set once in ble_server_init() from startAdvertising()'s return value. Read by
-// the OTA self-test, which must not accept an image whose only control channel
-// never came up.
+// Whether the radio is advertising, as reported by startAdvertising() -- both
+// at init and on every re-advertise after a disconnect. Read by the OTA
+// self-test, which must not accept an image whose only control channel is down.
 static bool g_adv_ok = false;
 
 static volatile bool g_connected = false;
@@ -560,8 +560,15 @@ class ServerCB : public NimBLEServerCallbacks {
             uint32_t t = millis();
             g_link_down_ms = t ? t : 1u;
         }
-        Serial.println("[BLE] client disconnected — advertising again");
-        NimBLEDevice::startAdvertising();
+        // 🔴 Keep the result here too. g_adv_ok used to be written once, at
+        // init, so a radio that came up and then failed to advertise again
+        // after a disconnect still reported healthy forever -- and the OTA
+        // self-test would accept an image whose only control channel was down.
+        // "It worked once" is not a health signal.
+        g_adv_ok = NimBLEDevice::startAdvertising();
+        Serial.printf("[BLE] client disconnected — %s\n",
+                      g_adv_ok ? "advertising again"
+                               : "ADVERTISING FAILED, the module is not visible");
     }
     void onMTUChange(uint16_t mtu, NimBLEConnInfo &) override {
         g_mtu = mtu;  // bulk chunk size follows this

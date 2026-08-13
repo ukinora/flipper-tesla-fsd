@@ -29,6 +29,7 @@
 #include "fsd_handler.h"
 #include "fsd_power.h"
 #include "fsd_owner.h"
+#include "fsd_selftest.h"
 #include "fsd_profile.h"
 #include "fsd_profile_db.h"
 
@@ -2313,6 +2314,53 @@ static void test_power_quiet_ms(void) {
           fsd_pwr_quiet_ms(20000u, 0xFFFFFF00u, true));
 }
 
+static void test_selftest_decide(void) {
+    printf("\n-- OTA self-test decision --\n");
+
+    const uint32_t D = FSD_SELFTEST_DEADLINE_MS;   // 300000
+    const uint32_t M = FSD_SELFTEST_MIN_MS;        // 20000
+    const uint32_t L = FSD_SELFTEST_MIN_LOOPS;     // 1000
+
+    // 🔴 The reported bug, as reported. The loop-count gate used to be checked
+    // BEFORE the deadline, so an image too broken to run its loop was never
+    // rolled back. All four of these must roll back: at the deadline the loop
+    // counter is not evidence of health, it is a symptom.
+    CHECK(fsd_selftest_decide(D, 0u, false) == FSD_SELFTEST_ROLLBACK,
+          "deadline + 0 loops + unhealthy -> rollback");
+    CHECK(fsd_selftest_decide(D, 1u, false) == FSD_SELFTEST_ROLLBACK,
+          "deadline + 1 loop + unhealthy -> rollback");
+    CHECK(fsd_selftest_decide(D, L - 1u, false) == FSD_SELFTEST_ROLLBACK,
+          "deadline + 999 loops + unhealthy -> rollback");
+    CHECK(fsd_selftest_decide(D, L, false) == FSD_SELFTEST_ROLLBACK,
+          "deadline + 1000 loops + unhealthy -> rollback");
+
+    // ...and the case that made the old order look fine in a hand trace: long
+    // past the deadline, still not enough loops.
+    CHECK(fsd_selftest_decide(1000000u, L - 1u, false) == FSD_SELFTEST_ROLLBACK,
+          "far past the deadline with a slow loop still rolls back");
+
+    // A healthy image at the deadline is accepted, not punished for being slow.
+    CHECK(fsd_selftest_decide(D, 0u, true) == FSD_SELFTEST_ACCEPT,
+          "deadline + healthy -> accept even with no loops counted");
+
+    // Before the deadline, both warm-up gates apply. Neither alone is proof:
+    // a hung loop still accumulates time, a fast one reaches 1000 iterations in
+    // milliseconds.
+    CHECK(fsd_selftest_decide(M - 1u, L, true) == FSD_SELFTEST_WAIT,
+          "too early, even with loops and health");
+    CHECK(fsd_selftest_decide(M, L - 1u, true) == FSD_SELFTEST_WAIT,
+          "enough time but not enough loops");
+    CHECK(fsd_selftest_decide(M, L, true) == FSD_SELFTEST_ACCEPT,
+          "both gates met and healthy -> accept");
+
+    // Unhealthy but still inside the window keeps waiting — a controller can
+    // still come back on its re-init retry.
+    CHECK(fsd_selftest_decide(M, L, false) == FSD_SELFTEST_WAIT,
+          "unhealthy inside the window waits");
+    CHECK(fsd_selftest_decide(D - 1u, L, false) == FSD_SELFTEST_WAIT,
+          "one ms before the deadline still waits");
+}
+
 static void test_owner(void) {
     printf("\n-- BLE owner enrolment --\n");
 
@@ -2757,6 +2805,7 @@ int main(void) {
     test_power_verdict();
     test_power_quiet_ms();
     test_owner();
+    test_selftest_decide();
 
     test_tx_allowlist();
     test_drive_observers();
