@@ -181,6 +181,17 @@ int fsd_cam_near(const FsdCamDb* db, int32_t lat_e7, int32_t lon_e7,
             uint16_t rc = 0;
             if(!find_cell(db, key, &ri, &rc)) continue;
 
+            /* 🔴 The cell says where its records are; nothing had checked that
+             * it points inside the record array. A crafted (or corrupted) cell
+             * with ri near UINT32_MAX makes `(ri + j) * FSD_CAM_REC_SIZE` wrap
+             * and land somewhere else in the file, and whatever bytes are there
+             * are then reported as cameras -- at coordinates nobody put in the
+             * database. The CRC does not help: a file can be internally
+             * consistent and still say this.
+             *
+             * Checked as a range so the arithmetic below cannot overflow. */
+            if(ri > db->rec_count || rc > db->rec_count - ri) continue;
+
             for(uint16_t j = 0; j < rc && n < max; j++) {
                 uint8_t b[FSD_CAM_REC_SIZE];
                 uint32_t off = db->rec_offset + (ri + j) * FSD_CAM_REC_SIZE;

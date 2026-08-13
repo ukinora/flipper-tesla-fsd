@@ -1,4 +1,8 @@
 #include "prefs.h"
+#ifdef BLE_SERVER_ENABLED
+#include "ble_owner.h"
+#include <NimBLEDevice.h>
+#endif
 #include "blackbox.h"   // BLACKBOX_DEFAULT_ENABLED
 #include <Preferences.h>
 
@@ -92,6 +96,19 @@ void prefs_clear() {
     g_prefs.begin(NS, /*readOnly=*/false);
     g_prefs.clear();
     g_prefs.end();
+
+    // 🔴 "All settings erased" used to be false. This namespace holds operator
+    // settings; the BLE owner lives in its own ("bleowner") and the pairing keys
+    // live in NimBLE's store, so a factory reset left the previous phone
+    // enrolled AND bonded. Someone handing the car on, or selling the module,
+    // would have had no way to know -- the log said everything was gone.
+    //
+    // A reset has to mean the next phone starts from nothing.
+#ifdef BLE_SERVER_ENABLED
+    ble_owner_erase_now();   // synchronous: a reboot follows in 200 ms
+    NimBLEDevice::deleteAllBonds();
+    Serial.println("[NVS] BLE owner and bonds erased too");
+#endif
     Serial.println("[NVS] All settings erased — factory reset");
 }
 

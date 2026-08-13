@@ -219,7 +219,17 @@ static int bb_scan_count() {
 
 static void backend_init() {
 #if defined(BLACKBOX_BACKEND_LITTLEFS)
-    g_fs_ok = LittleFS.begin(true);  // format-on-fail: own the spiffs data partition
+    g_fs_ok = LittleFS.begin(false);
+    if(!g_fs_ok) {
+        // 🔴 begin(true) formats on any mount failure, silently. A transient
+        // error or a power cut during a write would therefore erase the camera
+        // database, the learning file and every stored capture -- including the
+        // one-shot capture taken before the TSL comes out, which cannot be
+        // retaken. Say it out loud first; a blank board still needs formatting
+        // once, but it should never happen without a line in the log.
+        Serial.println("[BB] LittleFS mount failed — FORMATTING (all stored data is lost)");
+        g_fs_ok = LittleFS.begin(true);
+    }  // format-on-fail: own the spiffs data partition
     if (!g_fs_ok) { Serial.println("[BB] LittleFS mount failed"); return; }
 #else
     g_fs_ok = SD.cardType() != CARD_NONE;  // can_dump_init() already mounted SD

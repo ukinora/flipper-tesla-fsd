@@ -300,12 +300,36 @@ static void ble_apply_mode_request(void) {
     g_mode_req_pending = false;
 
     OpMode m = (OpMode)g_mode_req;
+
+    // 🔴 The requester has to still be there.
+    //
+    // Parking the request for loop() (PR #34) opened a window that did not
+    // exist when SET_MODE was handled inline: the phone can disconnect between
+    // the park and the apply. onDisconnect only arms the 30 s recovery when
+    // g_active_by_ble is already true, and it is not true yet -- so applying
+    // Active here granted CAN transmit to a phone that had left, with nothing
+    // left to take it back. Permanently.
+    if (!g_connected) {
+        Serial.printf("[BLE] mode request dropped — phone left before it was applied\n");
+        return;
+    }
+
     bool ok = mode_apply(m);
 
     // Track the lease only when the switch really happened. Claiming an Active
     // we never got would arm the grace timer to "revoke" something that was
     // never granted.
     if (ok) g_active_by_ble = (m == OpMode_Active);
+
+    // The link can also drop DURING mode_apply(), which talks to an MCP2515
+    // over SPI and is not instant. onDisconnect would have run while
+    // g_active_by_ble was still false, so arm the timer here instead of
+    // leaving the grant unowned.
+    if (ok && m == OpMode_Active && !g_connected && g_link_down_ms == 0) {
+        uint32_t t = millis();
+        g_link_down_ms = t ? t : 1u;
+        Serial.println("[BLE] phone left while the mode was being applied — recovery armed");
+    }
 
     Serial.printf("[BLE] mode -> %s%s\n",
                   m == OpMode_Active ? "ACTIVE" : "LISTEN-ONLY",
@@ -449,6 +473,14 @@ class CommandCB : public NimBLECharacteristicCallbacks {
             // task, and switching the driver means talking to an MCP2515 over
             // the same SPI bus loop() is polling. So the request is handed to
             // loop(), which applies it and answers with what actually happened.
+            // One slot, so a second request before loop() drained the first
+            // would silently replace it -- and both waiters would then match
+            // the single answer, so a Listen-Only request could be reported
+            // successful by an Active one. Refuse instead; the app retries.
+            if (g_mode_req_pending) {
+                ble_send_result(cmd, BLE_RES_BUSY, (uint16_t)mode_current());
+                break;
+            }
             g_mode_req         = arg ? OpMode_Active : OpMode_ListenOnly;
             g_mode_req_pending = true;
             break;
@@ -547,6 +579,9 @@ class ServerCB : public NimBLEServerCallbacks {
     }
     void onDisconnect(NimBLEServer *, NimBLEConnInfo &, int) override {
         g_connected = false;
+        // A mode change asked for by a phone that is now gone must not be
+        // applied. See ble_apply_mode_request() for the window this closes.
+        g_mode_req_pending = false;
         g_state_subscribed = false;  // subscriptions die with the link
         g_bulk_subscribed  = false;
         g_bulk_active      = false;  // a half-sent capture is not resumable

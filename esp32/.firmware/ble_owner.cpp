@@ -109,7 +109,13 @@ bool ble_owner_allows(uint8_t addr_type, const uint8_t* addr) {
     // Nobody enrolled yet: this is the trust-on-first-use case and the bond
     // callback is about to claim this peer. Refusing here would make the very
     // first command after the very first pairing fail for no visible reason.
-    if(!o.enrolled) return true;
+    //
+    // 🔴 But only for a peer we can actually identify. ble_owner_on_bond()
+    // refuses to enrol an unresolved identity (all-zero, see fsd_owner.c) --
+    // correctly -- and that left the module permanently unenrolled, which this
+    // branch then read as "allow everyone". The two halves disagreed, and the
+    // half that decided was the permissive one.
+    if(!o.enrolled) return fsd_owner_addr_valid(addr_type, addr);
 
     return fsd_owner_same(&o, addr_type, addr);
 }
@@ -131,6 +137,12 @@ void ble_owner_forget(void) {
     Serial.println("[OWNER] 등록을 지웠다 — 다음에 짝짓기하는 폰이 주인이 된다");
 }
 
+void ble_owner_erase_now(void) {
+    ble_owner_forget();
+    // Drain the queue here rather than waiting for a loop() that is not coming.
+    ble_owner_tick(0);
+}
+
 void ble_owner_tick(uint32_t now_ms) {
     if(g_window_active && (int32_t)(now_ms - g_window_until_ms) >= 0) {
         g_window_active = false;
@@ -138,15 +150,18 @@ void ble_owner_tick(uint32_t now_ms) {
     }
 
     if(!g_save_pending) return;
-    g_save_pending = false;
 
     FsdOwner o;
     portENTER_CRITICAL(&g_mux);
     o = g_owner;
     portEXIT_CRITICAL(&g_mux);
 
+    // 🔴 The flag is cleared only after the write lands. Clearing it first
+    // meant a failed begin()/put() lost the enrolment silently: the module kept
+    // running as if it had an owner and came back after a reboot in
+    // trust-on-first-use, ready to adopt whoever paired next.
     if(!g_nvs.begin(NS, /*readOnly=*/false)) {
-        Serial.println("[OWNER] NVS 를 못 열었다 — 이 등록은 재부팅하면 사라진다");
+        Serial.println("[OWNER] NVS 를 못 열었다 — 다음 루프에서 다시 시도한다");
         return;
     }
     if(o.enrolled) {
@@ -158,6 +173,7 @@ void ble_owner_tick(uint32_t now_ms) {
         g_nvs.remove(KEY);
     }
     g_nvs.end();
+    g_save_pending = false;
 }
 
 #else  // BLE disabled — nothing to own
@@ -169,6 +185,7 @@ bool ble_owner_allows(uint8_t, const uint8_t*) { return true; }
 void ble_owner_open_window(uint32_t) {}
 bool ble_owner_window_open(void) { return false; }
 void ble_owner_forget(void) {}
+void ble_owner_erase_now(void) {}
 void ble_owner_print(void) {}
 
 #endif  // BLE_SERVER_ENABLED
