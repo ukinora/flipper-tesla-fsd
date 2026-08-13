@@ -290,6 +290,7 @@ static bool backend_size(const char* name, bool json, size_t* out) {
     return true;
 }
 
+#if !defined(FSD_NO_WIFI)
 static void backend_stream_body(WiFiClient& client, const char* name, bool json) {
     if (!g_fs_ok) return;
     char p[64];
@@ -304,6 +305,7 @@ static void backend_stream_body(WiFiClient& client, const char* name, bool json)
     }
     f.close();
 }
+#endif
 
 static size_t backend_read_chunk(const char* name, bool json, size_t offset,
                                  uint8_t* out, size_t cap) {
@@ -424,6 +426,7 @@ static bool backend_size(const char* name, bool json, size_t* out) {
     return true;
 }
 
+#if !defined(FSD_NO_WIFI)
 static void backend_stream_body(WiFiClient& client, const char* name, bool json) {
     if (!g_slot_used || strcmp(name, g_slot_base) != 0) return;
     if (json) { client.print(g_slot_json); return; }
@@ -436,6 +439,7 @@ static void backend_stream_body(WiFiClient& client, const char* name, bool json)
         client.write((const uint8_t*)line, n);
     }
 }
+#endif
 
 static size_t backend_read_chunk(const char* name, bool json, size_t offset,
                                  uint8_t* out, size_t cap) {
@@ -827,10 +831,12 @@ bool blackbox_file_size(const char* name, bool json, size_t* size_out) {
     return backend_size(name, json, size_out);
 }
 
+#if !defined(FSD_NO_WIFI)
 void blackbox_stream_body(WiFiClient& client, const char* name, bool json) {
     if (!bb_name_ok(name)) return;
     backend_stream_body(client, name, json);
 }
+#endif
 
 size_t blackbox_read_chunk(const char* name, bool json, size_t offset,
                            uint8_t* out, size_t cap) {

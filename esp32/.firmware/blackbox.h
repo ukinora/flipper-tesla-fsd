@@ -25,7 +25,14 @@
  */
 
 #include <Arduino.h>
+#if !defined(FSD_NO_WIFI)
+// Only for the WiFiClient in blackbox_stream_body() below. Including it anyway
+// on a no-WiFi build is not inert: PlatformIO's dependency finder reads these
+// includes, so libWiFi.a gets built and handed to the linker. No member is
+// adopted and the ELF stays clean, but "we removed WiFi" and "the WiFi library
+// is on the link line" should not both be true.
 #include <WiFi.h>
+#endif
 #include "can_driver.h"   // CanBusId, CanFrame
 #include "fsd_handler.h"  // FSDState
 
@@ -98,7 +105,9 @@ String blackbox_list_json();                // [{"name":..,"summary":{...}},..]
 // Download: report the byte size of an event's .log/.json (false if missing),
 // then stream just the body to the client. The caller owns the HTTP headers.
 bool   blackbox_file_size(const char* name, bool json, size_t* size_out);
+#if !defined(FSD_NO_WIFI)
 void   blackbox_stream_body(WiFiClient& client, const char* name, bool json);
+#endif
 
 // Transport-independent download. blackbox_stream_body() is bound to a
 // WiFiClient, which BLE cannot use — and on a T-2CAN we do not intend to bring

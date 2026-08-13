@@ -63,8 +63,18 @@ void fsd_state_init(FSDState *state, TeslaHWVersion hw) {
 #endif
     state->sleep_idle_ms        = SLEEP_IDLE_MS;
 
+#if defined(FSD_NO_WIFI)
+    // Nothing on this build can start an AP, so a default SSID and password are
+    // dead data -- but they are dead data that still lands in the image, where
+    // an audit finds a published password in a firmware that claims not to have
+    // WiFi. Worse, they would be waiting to be used again the moment someone
+    // re-enabled the radio, which is exactly when nobody is looking.
+    state->wifi_ssid[0] = '\0';
+    state->wifi_pass[0] = '\0';
+#else
     strncpy(state->wifi_ssid, "Tesla-FSD", sizeof(state->wifi_ssid));
     strncpy(state->wifi_pass, "12345678",  sizeof(state->wifi_pass));
+#endif
     state->wifi_hidden = false;
     state->wifi_sta_ssid[0] = '\0';
     state->wifi_sta_pass[0] = '\0';
