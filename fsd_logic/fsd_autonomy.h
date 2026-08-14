@@ -112,6 +112,22 @@ void fsd_drive_observe_cruise(FSDState* state, const CANFRAME* frame);
  *  Refuses any other CAN ID, for the same reason the gear observer does. */
 void fsd_drive_observe_belt(FSDState* state, const CANFRAME* frame, uint32_t now_ms);
 
+/**
+ * 0x257 DI_speed -> FSDState.vehicle_speed_kph and .ui_speed.
+ *
+ * 🔴 Both fields existed and NOTHING on this build wrote them. The only writer
+ * is fsd_logic/fsd_handler.c, which the ESP32 build does not compile -- so
+ * FSDState.vehicle_speed_kph was structurally zero and the phone app's speed
+ * display read 0 forever. The frame was being parsed all along, inside
+ * fsd_gps.c's freeze detector, and then thrown away.
+ *
+ * ⚠️ NON-RETURNING at the call site. camera_task_observe() needs this same
+ * frame for the freeze detector, and process_frame()'s other observers return
+ * as soon as they handle one -- intercepting 0x257 there would have silently
+ * blinded the camera path.
+ */
+void fsd_drive_observe_speed(FSDState* state, const CANFRAME* frame, uint32_t now_ms);
+
 /** Why supervision is (not) satisfied. FSD_SUP_OK means a person is driving. */
 FsdSupVerdict fsd_supervised_drive_why(const FSDState* state, uint32_t now_ms);
 

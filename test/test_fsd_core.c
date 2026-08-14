@@ -2375,6 +2375,71 @@ static void test_selftest_decide(void) {
           "one ms before the deadline still waits");
 }
 
+static void test_speed_observer(void) {
+    printf("
+-- 0x257: two speeds in one frame --
+");
+
+    /* DI_vehicleSpeed 12|12 (0.08,-40): raw 1000 -> 40.0 km/h. */
+    CANFRAME f;
+    memset(&f, 0, sizeof(f));
+    f.canId = CAN_ID_DI_SPEED;
+    f.data_lenght = 8;
+    f.buffer[1] = (uint8_t)((1000u & 0x0Fu) << 4);
+    f.buffer[2] = (uint8_t)((1000u >> 4) & 0xFFu);
+    f.buffer[3] = 40;   /* DI_uiSpeed -- the number on the screen */
+
+    FSDState s;
+    fsd_state_init(&s, TeslaHW_HW3);
+    CHECK(!s.speed_seen, "speed unseen before any frame");
+    CHECK(!s.ui_speed_seen, "ui speed unseen before any frame");
+
+    fsd_drive_observe_speed(&s, &f, 1234u);
+    CHECK(s.speed_seen, "speed seen after 0x257");
+    CHECK(s.vehicle_speed_kph > 39.9f && s.vehicle_speed_kph < 40.1f,
+          "40.0 km/h, got %f", (double)s.vehicle_speed_kph);
+    CHECK(s.last_speed_tick_ms == 1234u, "timestamp stamped");
+    CHECK(s.ui_speed_seen && s.ui_speed == 40, "ui speed 40, got %u", s.ui_speed);
+
+    /* The unit trap. DI_uiSpeed is whatever the CAR displays; DI_vehicleSpeed is
+     * always km/h. A car set to mph shows 25 while doing 40 km/h, and the two
+     * legitimately disagree. Nothing may "correct" one from the other -- the
+     * disagreement IS the signal that says which unit the car is in. */
+    f.buffer[3] = 25;
+    fsd_drive_observe_speed(&s, &f, 2000u);
+    CHECK(s.ui_speed == 25, "ui speed follows the display, not the maths");
+    CHECK(s.vehicle_speed_kph > 39.9f && s.vehicle_speed_kph < 40.1f,
+          "km/h is unchanged by the display unit");
+
+    /* Wrong frame must produce nothing -- the gear observer read the wrong frame
+     * for weeks (PR #18) because it trusted the dispatcher. */
+    FSDState s2;
+    fsd_state_init(&s2, TeslaHW_HW3);
+    f.canId = CAN_ID_DI_SYS_STATUS;
+    fsd_drive_observe_speed(&s2, &f, 3000u);
+    CHECK(!s2.speed_seen && !s2.ui_speed_seen, "wrong CAN id writes nothing");
+
+    /* A 3-byte frame carries DI_vehicleSpeed but NOT DI_uiSpeed. Writing the
+     * display speed from a frame that did not carry it would put a confident
+     * zero on the speedometer. */
+    FSDState s3;
+    fsd_state_init(&s3, TeslaHW_HW3);
+    f.canId = CAN_ID_DI_SPEED;
+    f.data_lenght = 3;
+    fsd_drive_observe_speed(&s3, &f, 4000u);
+    CHECK(s3.speed_seen, "short frame still yields km/h");
+    CHECK(!s3.ui_speed_seen, "short frame yields NO display speed");
+
+    /* Negative maths clamps to standstill rather than wrapping. */
+    FSDState s4;
+    fsd_state_init(&s4, TeslaHW_HW3);
+    memset(f.buffer, 0, sizeof(f.buffer));
+    f.data_lenght = 8;
+    fsd_drive_observe_speed(&s4, &f, 5000u);
+    CHECK(s4.vehicle_speed_kph == 0.0f, "raw 0 clamps to 0, got %f",
+          (double)s4.vehicle_speed_kph);
+}
+
 static void test_owner(void) {
     printf("\n-- BLE owner enrolment --\n");
 
@@ -2819,6 +2884,7 @@ int main(void) {
     test_power_verdict();
     test_power_quiet_ms();
     test_owner();
+    test_speed_observer();
     test_selftest_decide();
 
     test_tx_allowlist();

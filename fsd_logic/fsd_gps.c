@@ -184,10 +184,12 @@ void fsd_gps_observe_motion_ref(FsdGps* g, float kph, uint32_t now_ms) {
 bool fsd_gps_observe_di_speed(FsdGps* g, const uint8_t* data, uint8_t dlc, uint32_t now_ms) {
     if (!g || !data || dlc < 3) return false;
 
-    // DI_vehicleSpeed : 12|12@1+ (0.08,-40) km/h — byte1 high nibble + byte2.
-    const uint16_t raw = (uint16_t)(((uint16_t)data[2] << 4) | (uint16_t)(data[1] >> 4));
-    float kph = (float)raw * 0.08f - 40.0f;
-    if (kph < 0.0f) kph = 0.0f;
+    // Shared with fsd_drive_observe_speed() through fsd_types.h. Two copies of
+    // this arithmetic would drift, and the freeze detector and the speedometer
+    // disagreeing about how fast the car is going is the worst possible way for
+    // them to drift.
+    float kph;
+    if (!fsd_decode_di_speed_kph(data, dlc, &kph)) return false;
 
     fsd_gps_observe_motion_ref(g, kph, now_ms);
     return true;
