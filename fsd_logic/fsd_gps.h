@@ -50,6 +50,7 @@
  */
 
 #include "fsd_camera.h"
+#include "fsd_types.h"   // fsd_decode_di_speed_kph() — shared with the drive observer
 
 #include <stdbool.h>
 #include <stdint.h>

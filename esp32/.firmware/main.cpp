@@ -1464,6 +1464,17 @@ static void process_frame(CanBusId bus, const CanFrame &frame) {
     // position frames, and fsd_can_transmit() is false in OpMode_Autonomous —
     // the exact mode this feature exists for. On builds without the camera core
     // the shim returns false and this whole line folds away.
+    // 0x257 speed -> FSDState. NON-RETURNING on purpose: camera_task_observe()
+    // below needs this same frame for the freeze detector, and every other
+    // observer in this function returns as soon as it handles one. Intercepting
+    // 0x257 here would have blinded the camera path without a symptom.
+    if (frame.id == CAN_ID_DI_SPEED) {
+        uint32_t now_ms = millis();
+        state_enter();
+        fsd_drive_observe_speed(&g_state, &frame, now_ms);
+        state_exit();
+    }
+
     if (camera_task_observe(frame.id, frame.data, frame.dlc, millis())) return;
 
     // Body detectors (0x102, 0x103, 0x3C2). NON-RETURNING on purpose: 0x3C2 is

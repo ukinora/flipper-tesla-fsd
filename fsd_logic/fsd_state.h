@@ -79,6 +79,9 @@ typedef struct FSDState {
     uint8_t rear_defrost_state;  // 0=sna 1=on 2=off (from 0x343)
     float vehicle_speed_kph;     // from 0x257 DI_vehicleSpeed (12-bit, 0.08 factor, -40 offset)
     uint8_t ui_speed;            // from 0x257 DI_uiSpeed (8-bit, display value)
+    bool ui_speed_seen;          // 0 is a legal speed (stopped), so "never parsed"
+                                 // needs its own answer — the display must not
+                                 // show a confident 0 it never received
     uint8_t steering_tune_mode;  // from 0x370 EPAS3S_currentTuneMode (0-6)
     float torsion_bar_torque_nm; // from 0x370 EPAS3S_torsionBarTorque
     bool torsion_bar_torque_seen;

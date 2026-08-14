@@ -87,6 +87,42 @@ static inline bool fsd_mode_opens_tx(OpMode m) {
     return m == OpMode_Active || m == OpMode_Service;
 }
 
+/* ── 0x257 DI_speed carries TWO speeds, and they are not the same thing ──────
+ *
+ * Inline here, next to fsd_mode_opens_tx() and for the same reason: two places
+ * need these and they must not drift. fsd_gps.c uses the first for its freeze
+ * detector, and the drive observer publishes both into FSDState -- but
+ * fsd_gps.c is only linked on the camera variant, so a shared .c would break
+ * the link on every other board.
+ */
+
+/* DI_vehicleSpeed : 12|12@1+ (0.08,-40). ALWAYS km/h, whatever the car shows. */
+static inline bool fsd_decode_di_speed_kph(const uint8_t* d, uint8_t dlc, float* out) {
+    if(!d || !out || dlc < 3) return false;
+    const uint16_t raw = (uint16_t)(((uint16_t)d[2] << 4) | (uint16_t)(d[1] >> 4));
+    float kph = (float)raw * 0.08f - 40.0f;
+    if(kph < 0.0f) kph = 0.0f;
+    *out = kph;
+    return true;
+}
+
+/* DI_uiSpeed : 24|8@1+ raw -- the number on the car's own display.
+ *
+ * 🔴 IN THE CAR'S DISPLAY UNIT, not always km/h. A car set to mph reports mph
+ * here. That is exactly why it is worth having alongside the one above: the
+ * ratio between them tells you which unit the car is set to, and no other frame
+ * we parse says that. It is also the right source for a speedometer, because it
+ * is by definition the number the driver is looking at.
+ *
+ * Source: canhackers/Saturn (MIT), cross-checked against opendbc. NOT yet
+ * confirmed on our car -- see 차량-방문-체크리스트.md.
+ */
+static inline bool fsd_decode_ui_speed(const uint8_t* d, uint8_t dlc, uint8_t* out) {
+    if(!d || !out || dlc < 4) return false;
+    *out = d[3];
+    return true;
+}
+
 // Abort Guard (#108): DAS_autopilotState values that mean the car is aborting an
 // engage — the moment linked to the steer-jerk in dunckencn's logs.
 //

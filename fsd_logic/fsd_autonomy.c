@@ -54,6 +54,31 @@
  * frame: same ID, different layout, or a truncated capture. Parsing it would
  * invent a gear. Return without stamping so freshness keeps reporting the last
  * frame we actually understood. */
+void fsd_drive_observe_speed(FSDState* state, const CANFRAME* frame, uint32_t now_ms) {
+    if(!state || !frame) return;
+    /* Same guard as the gear observer, for the same reason: this is an input to
+     * a safety gate (fsd_profile.c refuses to act above 0.5 km/h) and the
+     * dispatcher has been wrong before. */
+    if(frame->id != CAN_ID_DI_SPEED) return;
+
+    float kph;
+    if(fsd_decode_di_speed_kph(frame->buffer, frame->data_lenght, &kph)) {
+        state->vehicle_speed_kph = kph;
+        state->speed_seen = true;
+        state->last_speed_tick_ms = now_ms;
+    }
+
+    /* Separate decode, separate success: DI_uiSpeed needs one more byte than
+     * DI_vehicleSpeed, so a short frame can legitimately yield one and not the
+     * other. Writing ui_speed from a frame that did not carry it would put a
+     * stale or zero speed on the display we are building this for. */
+    uint8_t ui;
+    if(fsd_decode_ui_speed(frame->buffer, frame->data_lenght, &ui)) {
+        state->ui_speed = ui;
+        state->ui_speed_seen = true;
+    }
+}
+
 void fsd_drive_observe_gear(FSDState* state, const CANFRAME* frame, uint32_t now_ms) {
     if(!state || !frame) return;
     /* The check that would have prevented this function's original defect. A
