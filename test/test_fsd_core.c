@@ -362,6 +362,19 @@ static void test_di_speed(void) {
           (double)s.vehicle_speed_kph);
     CHECK(s.ui_speed == 0x42, "ui_speed got 0x%02X exp 0x42", s.ui_speed);
     CHECK(s.speed_seen, "speed_seen set after parse");
+
+    /* SNA on this path too. This function used to carry its OWN copy of the bit
+     * maths, so the same missing signal decoded to 287.6 km/h here while the
+     * ESP32 path (fsd_drive_observe_speed) rejected it -- two targets, two
+     * answers, one frame. Both now call fsd_decode_di_speed_kph(). */
+    f.buffer[1] = 0xF0;
+    f.buffer[2] = 0xFF; /* raw = 0xFFF = 4095 = SNA */
+    fsd_handle_di_speed(&s, &f);
+    CHECK(fabs(s.vehicle_speed_kph - 10.0f) < 0.01f,
+          "SNA leaves the last real speed alone, got %.3f", (double)s.vehicle_speed_kph);
+    /* The display field rides in the same frame and is decoded separately, so a
+     * missing DI_vehicleSpeed must not suppress it. */
+    CHECK(s.ui_speed == 0x42, "ui_speed still decodes from an SNA frame");
 }
 
 // ── 0x331 TLSSC restore ───────────────────────────────────────────────────────
@@ -2408,6 +2421,36 @@ static void test_speed_observer(void) {
     CHECK(s.ui_speed == 25, "ui speed follows the display, not the maths");
     CHECK(s.vehicle_speed_kph > 39.9f && s.vehicle_speed_kph < 40.1f,
           "km/h is unchanged by the display unit");
+
+    /* SNA. The field is 12 bits, so 4095 means "no value" -- but 0.08*4095-40 is
+     * 287.6, a number that LOOKS like a speed. Before this check the decoder
+     * published it, and vehicle_speed_kph feeds two safety decisions:
+     * fsd_profile.c's stationary interlock and fsd_gps.c's freeze detector. Both
+     * would have failed closed -- safe, but under a name describing something
+     * else entirely. Found by comparing against ev-open-can-tools (GPL-3.0). */
+    const uint32_t stamp_before = s.last_speed_tick_ms;
+    f.buffer[1] = 0xF0;
+    f.buffer[2] = 0xFF; /* raw = 0xFFF = 4095 */
+    fsd_drive_observe_speed(&s, &f, 3000u);
+    CHECK(s.vehicle_speed_kph > 39.9f && s.vehicle_speed_kph < 40.1f,
+          "SNA leaves the last real speed alone, got %f", (double)s.vehicle_speed_kph);
+    /* The stamp matters as much as the value: refusing to refresh it is what
+     * lets a vanished signal age out into "stale" instead of sitting there
+     * looking fresh and fast forever. */
+    CHECK(s.last_speed_tick_ms == stamp_before,
+          "SNA must not refresh the freshness stamp");
+    /* Independent decodes: a missing DI_vehicleSpeed says nothing about the
+     * display field riding in the same frame. */
+    CHECK(s.ui_speed == 25, "ui speed still decodes from an SNA frame");
+
+    /* One below the marker is still a reading. We reject SNA itself, not
+     * "implausibly fast" -- ev-open-can-tools bounds at 4062, but that is their
+     * constant rather than a measurement, and adopting someone else's numbers
+     * without evidence is what shipped the 0x286 gear read (PR #18). */
+    f.buffer[1] = 0xE0;
+    f.buffer[2] = 0xFF; /* raw = 0xFFE = 4094 */
+    fsd_drive_observe_speed(&s, &f, 4000u);
+    CHECK(s.last_speed_tick_ms == 4000u, "4094 is below SNA and still decodes");
 
     /* Wrong frame must produce nothing -- the gear observer read the wrong frame
      * for weeks (PR #18) because it trusted the dispatcher. */

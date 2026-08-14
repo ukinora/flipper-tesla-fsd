@@ -460,21 +460,35 @@ void fsd_build_park_frame(CANFRAME* frame) {
 //   DI_vehicleSpeed : 12|12@1+ (0.08,-40) kph
 //   DI_uiSpeed      : 24|8@1+  (1,0)
 
+// Both fields go through the shared decoders in fsd_types.h instead of being
+// re-derived here.
+//
+// 🔴 THERE WERE TWO COPIES OF THIS CALCULATION AND THEY HAD ALREADY DRIFTED.
+// The inline decoder rejects the 12-bit SNA marker (4095, which works out to a
+// plausible-looking 287.6 km/h); this function published it. Which copy ran
+// depended on the build: the ESP32 does not compile this file and goes through
+// fsd_drive_observe_speed(), the Flipper comes through here. So the same missing
+// signal produced two different vehicle_speed_kph values on two targets.
+//
+// Same reasoning as fsd_mode_opens_tx() and fsd_cam_crc32(): every time this
+// project has kept two copies of one calculation, they ended up saying
+// different things. One decoder cannot disagree with itself.
 void fsd_handle_di_speed(FSDState* state, const CANFRAME* frame) {
-    if(frame->data_lenght < 4) return;
-    // DI_vehicleSpeed: 12-bit little-endian starting at bit 12
-    uint16_t raw = ((uint16_t)(frame->buffer[2] & 0x0F) << 8) | frame->buffer[1];
-    raw >>= 4; // shift down (bit 12 start in LE = byte1 upper nibble + byte2 lower)
-    // Actually: bit12|12@1+ means start_bit=12, length=12, little-endian
-    // byte1 bits[7:4] = bits 12-15, byte2 bits[7:0] = bits 16-23
-    // Re-extract properly:
-    raw = (((uint16_t)frame->buffer[2]) << 4) | (frame->buffer[1] >> 4);
-    state->vehicle_speed_kph = (float)raw * 0.08f - 40.0f;
-    if(state->vehicle_speed_kph < 0) state->vehicle_speed_kph = 0;
+    float kph;
+    if(fsd_decode_di_speed_kph(frame->buffer, frame->data_lenght, &kph)) {
+        state->vehicle_speed_kph = kph;
+        state->speed_seen = true;
+    }
 
-    // DI_uiSpeed: bit24|8 = byte 3
-    state->ui_speed = frame->buffer[3];
-    state->speed_seen = true;
+    // Separate decode, separate success: DI_uiSpeed needs one more byte than
+    // DI_vehicleSpeed, so a short frame can legitimately carry one and not the
+    // other. Writing ui_speed from a frame that did not carry it would put a
+    // stale number on the display.
+    uint8_t ui;
+    if(fsd_decode_ui_speed(frame->buffer, frame->data_lenght, &ui)) {
+        state->ui_speed = ui;
+        state->ui_speed_seen = true;
+    }
 }
 
 // --- EPAS3S_currentTuneMode from 0x370 ---
