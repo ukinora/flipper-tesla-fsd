@@ -2376,9 +2376,7 @@ static void test_selftest_decide(void) {
 }
 
 static void test_speed_observer(void) {
-    printf("
--- 0x257: two speeds in one frame --
-");
+    printf("\n-- 0x257: two speeds in one frame --\n");
 
     /* DI_vehicleSpeed 12|12 (0.08,-40): raw 1000 -> 40.0 km/h. */
     CANFRAME f;
