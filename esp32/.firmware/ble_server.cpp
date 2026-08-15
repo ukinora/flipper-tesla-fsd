@@ -386,12 +386,21 @@ static void ble_apply_blackbox_request(void) {
 
     if (g_bb_mark_pending) {
         g_bb_mark_pending = false;
-        uint32_t before = blackbox_capture_count();
-        blackbox_mark(millis());
-        // blackbox_mark() can be suppressed by the event cooldown, and silently
-        // doing nothing is exactly what the operator must not be told at the one
-        // moment that matters. The count is the honest answer.
-        ble_send_result(BLE_CMD_BB_MARK, BLE_RES_OK, (uint16_t)(before + 1u));
+        // 🔴 예전에는 "성공 + (이전 개수 + 1)" 을 무조건 답했다. 둘 다 예측이다.
+        // cooldown 이 삼켜 아무것도 안 생겨도 성공이었고, post-roll 이 끝나기
+        // 전이라 그 개수는 아직 사실이 아니었다. 그 사이 DUMP_START 가 오면
+        // latest 는 직전 캡처를 주고 화면에는 "성공" 이 뜬다.
+        //
+        // 이제 남은 대기 시간(ms)을 그대로 돌려준다. 0 이면 무장되지 않은
+        // 것이므로 거부로 답한다 — 앱이 "찍혔다" 로 읽으면 안 된다.
+        uint32_t wait_ms = blackbox_mark(millis());
+        if (wait_ms == 0) {
+            ble_send_result(BLE_CMD_BB_MARK, BLE_RES_REJECTED, 0);
+        } else {
+            // extra 는 ms. 앱은 이만큼 기다린 뒤에 받아야 방금 찍은 것을 받는다.
+            ble_send_result(BLE_CMD_BB_MARK, BLE_RES_OK,
+                            (uint16_t)(wait_ms > 0xFFFFu ? 0xFFFFu : wait_ms));
+        }
     }
 }
 
