@@ -100,6 +100,27 @@ static inline bool fsd_mode_opens_tx(OpMode m) {
 static inline bool fsd_decode_di_speed_kph(const uint8_t* d, uint8_t dlc, float* out) {
     if(!d || !out || dlc < 3) return false;
     const uint16_t raw = (uint16_t)(((uint16_t)d[2] << 4) | (uint16_t)(d[1] >> 4));
+
+    /* 4095 is SNA (signal not available), not a speed. The field is 12 bits, so
+     * all-ones is the conventional "no value" marker -- and 0.08*4095-40 works
+     * out to 287.6 km/h, a number that LOOKS like a speed and is not one.
+     *
+     * This reaches further than the display. vehicle_speed_kph is an input to
+     * two safety decisions: fsd_profile.c refuses to act above 0.5 km/h, and
+     * fsd_gps.c counts "kept moving fast" as one of the three conditions for
+     * FROZEN. A missing signal decoded as 287.6 makes both fail CLOSED -- safe,
+     * but under the wrong name, and a bench session gets spent chasing a
+     * phantom. Returning false instead leaves speed_seen false, which every
+     * consumer already treats as "no evidence the car is moving".
+     *
+     * Found by comparing against ev-open-can-tools (GPL-3.0): its injection
+     * policy rejects raw > 4062 for exactly this reason. We reject only the SNA
+     * value itself -- 4062 is their constant, not a measurement, and this
+     * project has already been bitten once by adopting someone else's numbers
+     * without evidence (the 0x286 gear read, PR #18). If a capture ever shows
+     * this field pinned high below 4095, revisit with that evidence. */
+    if(raw >= 4095u) return false;
+
     float kph = (float)raw * 0.08f - 40.0f;
     if(kph < 0.0f) kph = 0.0f;
     *out = kph;
@@ -116,6 +137,14 @@ static inline bool fsd_decode_di_speed_kph(const uint8_t* d, uint8_t dlc, float*
  *
  * Source: canhackers/Saturn (MIT), cross-checked against opendbc. NOT yet
  * confirmed on our car -- see 차량-방문-체크리스트.md.
+ *
+ * ⚠️ NO SNA check here, deliberately -- unlike the decoder above. This field is
+ * 8 bits, and 255 is physically reachable on this platform when the car is set
+ * to km/h, so treating all-ones as "no value" could discard a real reading. The
+ * asymmetry is about consequence, not consistency: the decoder above feeds
+ * safety gates, this one feeds a display where a wrong number is visible to the
+ * person who can act on it. If a capture ever shows what SNA looks like here,
+ * add the check with that evidence.
  */
 static inline bool fsd_decode_ui_speed(const uint8_t* d, uint8_t dlc, uint8_t* out) {
     if(!d || !out || dlc < 4) return false;
