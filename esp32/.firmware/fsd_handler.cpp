@@ -40,8 +40,11 @@ void fsd_state_init(FSDState *state, TeslaHWVersion hw) {
     state->das_prev_hands_on_state = 0xFF;  // nag escalation-edge baseline (#100)
     state->op_mode    = OpMode_ListenOnly;  // safe default — never TX on boot
 
-    // Feature flags: nag killer and chime suppress default ON; others OFF
-    state->nag_killer           = true;
+    // Feature flags: nag killer and chime suppress default ON; others OFF.
+    // nag_killer follows the compile-time switch — see fsd_handler.h. On a board
+    // that excludes the feature this must not come up true even for the moment
+    // between defaults and prefs_load().
+    state->nag_killer           = FSD_NAG_KILLER_ENABLED ? true : false;
     state->continuous_ap        = false;
     state->suppress_speed_chime = true;
     state->ignore_ota           = false;
@@ -638,6 +641,14 @@ static bool nag_faithful_modec(FSDState *state, const CanFrame *frame,
 
 bool fsd_handle_nag_killer(FSDState *state, const CanFrame *frame, CanFrame *out,
                            uint32_t now_ms) {
+#if !FSD_NAG_KILLER_ENABLED
+    /* The backstop. The two lines below (defaults, NVS) decide what the flag
+     * holds; this decides whether the flag can do anything at all. Kept here
+     * rather than only at the call site in main.cpp so a future second caller
+     * inherits the refusal instead of re-opening the hole. */
+    (void)state; (void)frame; (void)out; (void)now_ms;
+    return false;
+#else
     if (frame->dlc < 8)     return false;
     if (!state->nag_killer) return false;
     if (!fsd_das_ctx_fresh(state, now_ms)) return false;        // cfg DAS stale -> no-op (#122)
@@ -721,6 +732,7 @@ bool fsd_handle_nag_killer(FSDState *state, const CanFrame *frame, CanFrame *out
     state->nag_echo_count++;
     state->nag_suppressed = true;
     return true;
+#endif  // FSD_NAG_KILLER_ENABLED
 }
 
 void fsd_handle_epas_status(FSDState *state, const CanFrame *frame) {
