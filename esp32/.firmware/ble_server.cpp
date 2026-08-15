@@ -95,6 +95,23 @@ static bool     g_bulk_json   = false;
 // independent authorities and a BLE disconnect must not override them.
 static volatile bool     g_active_by_ble = false;
 static volatile uint32_t g_link_down_ms  = 0;  // 0 = link up or nothing to undo
+
+// 🔴 "somebody is connected" and "the OWNER is connected" are different facts,
+// and the revoke path needs the second one.
+//
+// It used to use g_connected, and onConnect() cleared g_link_down_ms outright.
+// onConnect fires on the bare GAP connection — before pairing, before identity
+// resolution — so ANY radio in range could cancel a pending revoke just by
+// connecting, and then hold the revoke off indefinitely simply by staying
+// connected. The stranger cannot send commands (ble_owner_allows blocks those),
+// but it does not need to: the damage is that the owner's Active permission is
+// never taken back, so a car with nobody in it keeps a live transmitter. It also
+// occupies the single connection slot, so the owner cannot reconnect to undo it.
+//
+// Set only where the peer's identity is actually known to be the owner's, and
+// cleared on disconnect. Failing closed here means the timer keeps running when
+// we are unsure — which ends in Listen-Only, the direction we want to fall.
+static volatile bool     g_owner_present  = false;
 // SET_MODE arrives on the BLE task but has to be applied from loop(), because
 // applying it means switching a CAN controller. Single word each, written by
 // the BLE task and read-and-cleared in one place, so no lock is needed.
@@ -396,7 +413,9 @@ static void ble_refresh_capability(void) {
 // Hand Active back once the phone has been gone for BLE_ACTIVE_GRACE_MS.
 // Runs from loop(), so g_state is touched on the same task as everything else.
 static void ble_revoke_active_if_stale(uint32_t now_ms) {
-    if (g_connected || g_link_down_ms == 0) return;
+    // g_owner_present, not g_connected: a stranger holding the link open is not
+    // a reason to leave the owner's transmit permission standing. See the flag.
+    if (g_owner_present || g_link_down_ms == 0) return;
     if ((uint32_t)(now_ms - g_link_down_ms) < BLE_ACTIVE_GRACE_MS) return;
 
     g_link_down_ms  = 0;
@@ -638,7 +657,11 @@ class BulkCB : public NimBLECharacteristicCallbacks {
 class ServerCB : public NimBLEServerCallbacks {
     void onConnect(NimBLEServer *, NimBLEConnInfo &) override {
         g_connected = true;
-        g_link_down_ms = 0;  // reconnected in time — cancel the pending revoke
+        // 🔴 The pending revoke is NOT cancelled here. At this point we know a
+        // radio connected and nothing else — not who, not whether it can pair.
+        // Cancelling on the bare connection let any passer-by keep a departed
+        // owner's Active permission alive. The cancel moved to
+        // onAuthenticationComplete, where the identity address is resolved.
         Serial.println("[BLE] client connected");
     }
     // Fires when pairing completes and when an existing bond re-encrypts, which
@@ -648,9 +671,19 @@ class ServerCB : public NimBLEServerCallbacks {
         if (!info.isBonded()) return;
         ble_owner_on_bond(info.getIdAddress().getType(),
                           info.getIdAddress().getVal());
+
+        // Now — and only now — we can say whether the owner is back. A bonded
+        // phone re-encrypting lands here too, which is exactly the "owner
+        // reconnected within the grace window" case the cancel is meant for.
+        if (ble_owner_allows(info.getIdAddress().getType(),
+                             info.getIdAddress().getVal())) {
+            g_owner_present = true;
+            g_link_down_ms  = 0;   // owner is back in time — cancel the revoke
+        }
     }
     void onDisconnect(NimBLEServer *, NimBLEConnInfo &, int) override {
         g_connected = false;
+        g_owner_present = false;  // re-established only by a resolved owner bond
         // A mode change asked for by a phone that is now gone must not be
         // applied. See ble_apply_mode_request() for the window this closes.
         g_mode_req_pending = false;
