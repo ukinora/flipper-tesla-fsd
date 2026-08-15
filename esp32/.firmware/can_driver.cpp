@@ -161,7 +161,18 @@ public:
         }
     }
 
-    bool isListenOnly() const override { return listen_only_; }
+    // 🔴 An uninstalled controller reports SHUT, not open.
+    //
+    // setListenOnly() uninstalls and reinstalls; if install_and_start() fails it
+    // leaves installed_ = false with listen_only_ still holding the OLD value. A
+    // failed Active -> Listen-Only switch therefore used to answer "not
+    // listen-only" — i.e. open — for a controller that could not transmit at all.
+    // body_task reads !isListenOnly() as "the bus can transmit" and fed that into
+    // fsd_body_allows()'s FSD_BODY_BUS_SHUT gate, so a dead controller opened a
+    // safety gate. The MCP2515 driver already answered this way; TWAI did not.
+    //
+    // Reporting shut is also simply true: twai_transmit() fails when uninstalled.
+    bool isListenOnly() const override { return !installed_ || listen_only_; }
 
     void setAcceptanceFilter(bool single, uint32_t id) override {
         if (filter_single_ == single && (!single || filter_id_ == id)) return;

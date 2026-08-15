@@ -266,11 +266,33 @@ static bool can_mode_settled(bool listen_only) {
     return true;
 }
 
+// A controller that would not take the requested mode has failed its reinstall:
+// setListenOnly() uninstalls, then install_and_start() did not bring it back. It
+// is now deaf as well as mute, and nothing else notices — g_can_ok is written by
+// begin() alone, so the periodic re-init loop below would skip that bus forever
+// and it would stay dead for the rest of the session.
+//
+// Clearing the flag hands it to that loop, which calls begin() again on an
+// interval and restores it (and the flag) if the hardware comes back.
+static void can_mark_unsettled(bool want_listen_only) {
+    for (uint8_t i = 0; i < CAN_ACTIVE_BUS_COUNT; i++) {
+        if (!g_can_ok[i] || !g_can[i]) continue;
+        if (g_can[i]->isListenOnly() != want_listen_only) {
+            g_can_ok[i] = false;
+            Serial.printf("[CAN] %s did not take the mode — flagged for re-init\n",
+                          can_bus_name(bus_id_from_index(i)));
+        }
+    }
+}
+
 // The one way to change op_mode. See mode_switch.h for why it exists.
 //
 // 🔴 Loop task only.
 bool mode_apply(OpMode m) {
-    const bool want_listen_only = !fsd_mode_opens_tx(m);
+    // fsd_mode_opens_hw_tx(), not fsd_mode_opens_tx(): this decides the REGISTER.
+    // Same value today; separate names so that opening the register for a future
+    // Autonomous scroll detent does not also open general TX. See fsd_types.h.
+    const bool want_listen_only = !fsd_mode_opens_hw_tx(m);
 
     // The rule both branches follow: the software gate is never more permissive
     // than the hardware. So the direction that RESTRICTS moves first.
@@ -282,6 +304,7 @@ bool mode_apply(OpMode m) {
         if (!can_mode_settled(false)) {
             Serial.println("[MODE] 컨트롤러가 Listen-Only 를 못 벗어났다 — 모드를 바꾸지 않는다");
             can_set_all_listen_only(true);   // never leave it half-open
+            can_mark_unsettled(true);        // whichever one is stuck, re-init it
             return false;
         }
     }
@@ -296,6 +319,7 @@ bool mode_apply(OpMode m) {
         can_set_all_listen_only(true);
         if (!can_mode_settled(true)) {
             Serial.println("[MODE] 경고: 컨트롤러가 Listen-Only 로 안 들어갔다");
+            can_mark_unsettled(true);
             return false;
         }
     }
@@ -346,6 +370,27 @@ static bool send_on_bus(CanBusId bus, const CanFrame &frame) {
     // guard TX live at the CALL sites, and a ninth call site could forget one.
     if (body_task_tx_refused(frame.id)) {
         Serial.printf("[BODY] refused TX of 0x%03X — this firmware sends no body frames\n",
+                      (unsigned)frame.id);
+        return false;
+    }
+
+    // 🔴 0x229 — the right stalk, i.e. GEAR SELECTION. Refused here for the same
+    // reason as the body IDs: this board has an emitter for it and no business
+    // using it.
+    //
+    // arm_gear_ap_double_press_sequence() really does transmit FULL_DOWN /
+    // CENTER / FULL_DOWN / CENTER on 0x229 to re-engage AP, gated only by
+    // fsd_can_transmit() and continuous_ap. CLAUDE.md calls 0x229 a "펌웨어 TX
+    // denylist" entry, but that denial lives in fsd_profile_id_blocked() — which
+    // serves the text-profile parser, and fsd_profile.c is not even in this
+    // variant's build_src_filter. The documented protection did not exist here.
+    //
+    // continuous_ap has no way to be switched on in this build (no BLE command,
+    // no serial command, dashboard removed) — but its NVS key "contap" survives
+    // reflashing, so a board that once ran a WiFi build with it enabled boots
+    // with it true. Cheap backstop, real path.
+    if (frame.id == CAN_ID_SCCM_RSTALK) {
+        Serial.printf("[TX] refused 0x%03X — gear-lever frames are not sent by this board\n",
                       (unsigned)frame.id);
         return false;
     }

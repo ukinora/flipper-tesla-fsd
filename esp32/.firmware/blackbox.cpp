@@ -17,6 +17,9 @@
 #include "../../fsd_logic/fsd_blackbox_filter.h"   // fsd_blackbox_should_record
 #include <stdlib.h>
 #include <string.h>
+#if defined(BLACKBOX_BACKEND_LITTLEFS)
+#include <Preferences.h>   // fs_ever_mounted() — the format guard, see backend_init()
+#endif
 
 // Backend selection (BLACKBOX_BACKEND_*) + the enable-default live in blackbox.h
 // so main.cpp / prefs.cpp share one source of truth.
@@ -175,7 +178,30 @@ static uint32_t bb_seq_from_name(const char* base) {
     return u ? (uint32_t)strtoul(u + 1, nullptr, 10) : 0u;
 }
 
+/* Is this a capture somebody asked for by hand?
+ *
+ * 🔴 Manual captures are never evicted. The one the operator takes before the
+ * TSL comes out is a manual capture, and it cannot be retaken.
+ *
+ * Without this, retention deleted it FIRST. Two things stacked up:
+ *  - eviction picks the smallest <ms>, and the manual capture is taken before
+ *    the teardown, so it is the oldest by construction;
+ *  - unplugging the connector during teardown provokes bus-off, which arms
+ *    automatic captures. Five of those and the manual one is gone, silently.
+ *
+ * <ms> is millis(), which also resets to 0 on reboot — so a capture taken after
+ * a reboot looks OLDER than one taken before it, and eviction order inverts.
+ * Pinning manual captures sidesteps that for the file that matters; the
+ * automatic ones are diagnostic and losing the wrong one is survivable.
+ */
+static bool bb_is_manual(const char* base) {
+    const char* u = strrchr(base, '_');
+    return u && strcmp(u + 1, "manual") == 0;
+}
+
 // Keep only the newest BLACKBOX_RETAIN events (smallest <ms> deleted first).
+// Manual captures are counted but never chosen for deletion; when only manual
+// ones remain, oldest_base stays empty and the loop exits.
 static void bb_enforce_retention() {
     for (;;) {
         File dir = BB_FS.open(BLACKBOX_DIR);
@@ -189,7 +215,9 @@ static void bb_enforce_retention() {
                 bb_basename(nm, base, sizeof(base));
                 uint32_t s = bb_seq_from_name(base);
                 count++;
-                if (s < oldest) { oldest = s; strncpy(oldest_base, base, sizeof(oldest_base) - 1); }
+                if (!bb_is_manual(base) && s < oldest) {
+                    oldest = s; strncpy(oldest_base, base, sizeof(oldest_base) - 1);
+                }
             }
             e.close();
         }
@@ -217,20 +245,58 @@ static int bb_scan_count() {
     return n;
 }
 
+#if defined(BLACKBOX_BACKEND_LITTLEFS)
+/* "Has this board ever mounted its filesystem?" — and the answer has to live
+ * OUTSIDE that filesystem, or a format erases the very fact that says a format
+ * would be destructive. Hence NVS.
+ *
+ * A blank board genuinely needs one format. A board that has mounted before and
+ * suddenly cannot is a different situation entirely: the likely causes are a
+ * power cut mid-write (this module is on a switched feed that dies with the car)
+ * or transient corruption, and the stored data at that moment may include the
+ * one-shot capture taken before the TSL came out — which cannot be retaken. */
+static bool fs_ever_mounted(void) {
+    Preferences p;
+    if (!p.begin("fsd", /*readOnly=*/true)) return false;
+    bool v = p.getBool("fsmnt", false);
+    p.end();
+    return v;
+}
+
+static void fs_mark_mounted(void) {
+    Preferences p;
+    if (!p.begin("fsd", /*readOnly=*/false)) return;
+    if (!p.getBool("fsmnt", false)) p.putBool("fsmnt", true);
+    p.end();
+}
+#endif
+
 static void backend_init() {
 #if defined(BLACKBOX_BACKEND_LITTLEFS)
     g_fs_ok = LittleFS.begin(false);
-    if(!g_fs_ok) {
-        // 🔴 begin(true) formats on any mount failure, silently. A transient
-        // error or a power cut during a write would therefore erase the camera
-        // database, the learning file and every stored capture -- including the
-        // one-shot capture taken before the TSL comes out, which cannot be
-        // retaken. Say it out loud first; a blank board still needs formatting
-        // once, but it should never happen without a line in the log.
-        Serial.println("[BB] LittleFS mount failed — FORMATTING (all stored data is lost)");
+    if (!g_fs_ok) {
+        // One retry before concluding anything. A mount can fail transiently and
+        // the cost of asking twice is a few milliseconds.
+        delay(50);
+        g_fs_ok = LittleFS.begin(false);
+    }
+    if (!g_fs_ok) {
+        // 🔴 begin(true) formats, and it used to run on ANY mount failure. That
+        // erases the camera database, the learning file and every stored capture.
+        // Formatting is now allowed exactly once in a board's life: when it has
+        // never successfully mounted, i.e. it really is blank.
+        if (fs_ever_mounted()) {
+            Serial.println("[BB] 🔴 LittleFS mount FAILED and this board has mounted before.");
+            Serial.println("[BB] NOT formatting — stored captures would be lost.");
+            Serial.println("[BB] Blackbox and the camera database are disabled this boot.");
+            Serial.println("[BB] If the data is expendable: erase flash over USB and reflash.");
+            return;
+        }
+        Serial.println("[BB] LittleFS mount failed on a board that has never mounted — formatting once");
         g_fs_ok = LittleFS.begin(true);
-    }  // format-on-fail: own the spiffs data partition
+    }
     if (!g_fs_ok) { Serial.println("[BB] LittleFS mount failed"); return; }
+    fs_mark_mounted();   // from here on, a failure is a reason to stop, not format
 #else
     g_fs_ok = SD.cardType() != CARD_NONE;  // can_dump_init() already mounted SD
 #endif
@@ -335,16 +401,37 @@ static size_t backend_read_chunk(const char* name, bool json, size_t offset,
 
 // Newest = last entry the directory hands back. Capture names are timestamped,
 // so listing order tracks age closely enough for "give me the one I just took".
+/* 🔴 "latest" has to mean newest, not last-listed.
+ *
+ * This used to keep whatever the directory walk happened to hand over last.
+ * LittleFS does not promise creation order, so on a board with more than one
+ * stored capture the BLE download — which is the ONLY way to get a capture off
+ * this module, and has no "list" or "fetch by name" command — could serve an
+ * older one while reporting success. The operator sees a completed download,
+ * removes the TSL, and only later finds the file is the wrong capture.
+ *
+ * Pick the largest <ms> instead. Same caveat as retention: millis() resets on
+ * reboot, so "newest" is only ordered within one power cycle. That is the case
+ * that matters here (mark, then download in the same session), and the manual
+ * capture is pinned against eviction anyway.
+ */
 static bool backend_latest_name(char* out, size_t cap) {
     if (!g_fs_ok || !out || cap == 0) return false;
     File dir = BB_FS.open(BLACKBOX_DIR);
     if (!dir) return false;
     bool found = false;
+    uint32_t newest = 0;
     for (File e = dir.openNextFile(); e; e = dir.openNextFile()) {
         const char* nm = e.name();
         if (strstr(nm, ".json")) {
-            bb_basename(nm, out, cap);
-            found = true;
+            char base[40];
+            bb_basename(nm, base, sizeof(base));
+            uint32_t s = bb_seq_from_name(base);
+            if (!found || s >= newest) {
+                newest = s;
+                snprintf(out, cap, "%s", base);
+                found = true;
+            }
         }
         e.close();
     }

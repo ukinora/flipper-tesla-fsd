@@ -135,8 +135,43 @@ bool fsd_handle_legacy_autopilot(FSDState *state, CanFrame *frame);
  *  Returns true if frame was modified and should be re-sent. */
 bool fsd_handle_isa_speed_chime(CanFrame *frame);
 
+/* Is the nag killer compiled into this board's firmware at all?
+ *
+ * 🔴 Default 1 keeps upstream's behaviour for the seven boards that exist to run
+ * this feature. tesla-can-mod's T-2CAN sets it to 0 in platformio.ini, because
+ * that board is wired permanently into a car whose owner has full FSD and does
+ * not use nag suppression (CLAUDE.md lists it under "제외" — excluded).
+ *
+ * Why a compile-time switch and not just a default of false: fsd_can_transmit()
+ * asks only about op_mode, OTA and bus silence. It never consults
+ * fsd_supervised_drive(). So on that board Active is not "transmission is now
+ * permitted" — it is "transmission has now started", and with nag_killer set the
+ * thing that starts is a FORGED EPAS steering-torque frame on 0x370. One press of
+ * the BOOT button (dispatch_clicks(1) -> mode_apply(Active)) was enough, with the
+ * car parked and nobody in it. A runtime default would have been re-enabled by
+ * any stale NVS "nag" key; this cannot be.
+ *
+ * Removing the feature from that board is the narrow fix. The wide one — making
+ * general TX require supervision — is a structural change and is deliberately
+ * NOT bundled here. */
+#ifndef FSD_NAG_KILLER_ENABLED
+#define FSD_NAG_KILLER_ENABLED 1
+#endif
+
+/* May the ignore_ota flag override the "no TX during a Tesla OTA" rule?
+ *
+ * Default 1 preserves upstream's escape hatch. tesla-can-mod's T-2CAN sets 0,
+ * which makes this build's fsd_can_transmit() byte-for-byte equivalent to the
+ * fsd_logic twin that the host tests actually compile — the two had drifted, so
+ * a test asserting "we stay quiet during an OTA" passed while the firmware did
+ * not. A flag that only exists in the untested copy is the worst place for it. */
+#ifndef FSD_ALLOW_IGNORE_OTA
+#define FSD_ALLOW_IGNORE_OTA 1
+#endif
+
 /** Build an echo of EPAS3P_sysStatus (0x370) with counter+1 and handsOnLevel=1.
- *  Writes result into *out.  Returns true if echo should be sent. */
+ *  Writes result into *out.  Returns true if echo should be sent.
+ *  Always returns false when FSD_NAG_KILLER_ENABLED is 0. */
 bool fsd_handle_nag_killer(FSDState *state, const CanFrame *frame, CanFrame *out,
                            uint32_t now_ms);
 

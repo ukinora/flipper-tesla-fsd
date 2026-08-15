@@ -118,21 +118,16 @@ void camera_store_init(void) {
         return; // g_fs_ok stays false: no lock, no shared file
     }
 
-    // begin(true) formats on failure. blackbox_init() usually mounts first;
-    // calling again is harmless and removes the ordering dependency.
+    // Mount only — never format. blackbox_init() runs first (main.cpp) and owns
+    // the one decision about whether this board may be formatted; it allows it
+    // exactly once, when the board has never mounted. Two places deciding to
+    // format meant the second one could still wipe stored captures after the
+    // first had deliberately refused. If the mount failed there it will fail
+    // here too, and the right answer is to run without a database, not to erase.
     g_fs_ok = LittleFS.begin(false);
     if(!g_fs_ok) {
-        // 🔴 begin(true) formats on any mount failure, silently. A transient
-        // error or a power cut during a write would therefore erase the camera
-        // database, the learning file and every stored capture -- including the
-        // one-shot capture taken before the TSL comes out, which cannot be
-        // retaken. Say it out loud first; a blank board still needs formatting
-        // once, but it should never happen without a line in the log.
-        Serial.println("[CAM] LittleFS mount failed — FORMATTING (all stored data is lost)");
-        g_fs_ok = LittleFS.begin(true);
-    }
-    if(!g_fs_ok) {
-        Serial.println("[CAM] LittleFS mount failed");
+        Serial.println("[CAM] LittleFS not mounted — camera database disabled this boot");
+        Serial.println("[CAM] (see the [BB] lines above for why; nothing was erased)");
         return;
     }
     // A leftover temp file means a previous upload died. It is not a database.

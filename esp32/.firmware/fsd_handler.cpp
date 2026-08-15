@@ -40,8 +40,11 @@ void fsd_state_init(FSDState *state, TeslaHWVersion hw) {
     state->das_prev_hands_on_state = 0xFF;  // nag escalation-edge baseline (#100)
     state->op_mode    = OpMode_ListenOnly;  // safe default — never TX on boot
 
-    // Feature flags: nag killer and chime suppress default ON; others OFF
-    state->nag_killer           = true;
+    // Feature flags: nag killer and chime suppress default ON; others OFF.
+    // nag_killer follows the compile-time switch — see fsd_handler.h. On a board
+    // that excludes the feature this must not come up true even for the moment
+    // between defaults and prefs_load().
+    state->nag_killer           = FSD_NAG_KILLER_ENABLED ? true : false;
     state->continuous_ap        = false;
     state->suppress_speed_chime = true;
     state->ignore_ota           = false;
@@ -108,7 +111,24 @@ bool fsd_can_transmit(const FSDState *state) {
     // OpMode must not inherit TX permission by default. Unchanged for the three
     // modes that exist today.
     if (!fsd_mode_opens_tx(state->op_mode)) return false;
+    // 🔴 The two fsd_can_transmit() twins disagreed here, and the host tests only
+    // ever compiled the strict one.
+    //
+    // fsd_logic/fsd_handler.c:  if (state->tesla_ota_in_progress) return false;
+    // this file (until now):    ... && !state->ignore_ota
+    //
+    // So "we do not transmit while Tesla is installing firmware" passed green in
+    // CI while the firmware, with ignore_ota set, transmitted. And ignore_ota is
+    // an NVS key ("ignota") that survives a reflash. fsd_body.c:59 already noted
+    // it "never consults ignore_ota" — that defence just never reached here.
+    //
+    // FSD_ALLOW_IGNORE_OTA=0 (this board, platformio.ini) makes the twins
+    // identical. Boards that want the escape hatch keep it by default.
+#if FSD_ALLOW_IGNORE_OTA
     if (state->tesla_ota_in_progress && !state->ignore_ota) return false;
+#else
+    if (state->tesla_ota_in_progress) return false;
+#endif
     if (state->rx_stale) return false;  // deaf bus: injecting achieves nothing
     return true;
 }
@@ -638,6 +658,14 @@ static bool nag_faithful_modec(FSDState *state, const CanFrame *frame,
 
 bool fsd_handle_nag_killer(FSDState *state, const CanFrame *frame, CanFrame *out,
                            uint32_t now_ms) {
+#if !FSD_NAG_KILLER_ENABLED
+    /* The backstop. The two lines below (defaults, NVS) decide what the flag
+     * holds; this decides whether the flag can do anything at all. Kept here
+     * rather than only at the call site in main.cpp so a future second caller
+     * inherits the refusal instead of re-opening the hole. */
+    (void)state; (void)frame; (void)out; (void)now_ms;
+    return false;
+#else
     if (frame->dlc < 8)     return false;
     if (!state->nag_killer) return false;
     if (!fsd_das_ctx_fresh(state, now_ms)) return false;        // cfg DAS stale -> no-op (#122)
@@ -721,6 +749,7 @@ bool fsd_handle_nag_killer(FSDState *state, const CanFrame *frame, CanFrame *out
     state->nag_echo_count++;
     state->nag_suppressed = true;
     return true;
+#endif  // FSD_NAG_KILLER_ENABLED
 }
 
 void fsd_handle_epas_status(FSDState *state, const CanFrame *frame) {

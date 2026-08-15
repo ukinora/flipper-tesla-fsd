@@ -16,7 +16,14 @@ void prefs_load(FSDState *state) {
         g_prefs.end();
         return;
     }
-    state->nag_killer               = g_prefs.getBool("nag",    true);
+    // 🔴 Not restored when the feature is compiled out. A board that ever ran a
+    // build with the nag killer enabled still has "nag"=true sitting in its NVS,
+    // and reading that back would raise the flag on a firmware that is supposed
+    // to have no nag killer at all. The compile-time switch has to beat anything
+    // the flash remembers. (fsd_handle_nag_killer() refuses regardless — this is
+    // so the flag we report over BLE matches what the code will actually do.)
+    state->nag_killer               = FSD_NAG_KILLER_ENABLED
+                                        ? g_prefs.getBool("nag", true) : false;
     state->continuous_ap            = g_prefs.getBool("contap", false);
     state->ap_first                 = g_prefs.getBool("apfirst",false);
     state->ap_first_edge            = g_prefs.getBool("apfe",   false);
