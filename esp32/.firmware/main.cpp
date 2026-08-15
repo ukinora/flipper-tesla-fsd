@@ -266,11 +266,33 @@ static bool can_mode_settled(bool listen_only) {
     return true;
 }
 
+// A controller that would not take the requested mode has failed its reinstall:
+// setListenOnly() uninstalls, then install_and_start() did not bring it back. It
+// is now deaf as well as mute, and nothing else notices — g_can_ok is written by
+// begin() alone, so the periodic re-init loop below would skip that bus forever
+// and it would stay dead for the rest of the session.
+//
+// Clearing the flag hands it to that loop, which calls begin() again on an
+// interval and restores it (and the flag) if the hardware comes back.
+static void can_mark_unsettled(bool want_listen_only) {
+    for (uint8_t i = 0; i < CAN_ACTIVE_BUS_COUNT; i++) {
+        if (!g_can_ok[i] || !g_can[i]) continue;
+        if (g_can[i]->isListenOnly() != want_listen_only) {
+            g_can_ok[i] = false;
+            Serial.printf("[CAN] %s did not take the mode — flagged for re-init\n",
+                          can_bus_name(bus_id_from_index(i)));
+        }
+    }
+}
+
 // The one way to change op_mode. See mode_switch.h for why it exists.
 //
 // 🔴 Loop task only.
 bool mode_apply(OpMode m) {
-    const bool want_listen_only = !fsd_mode_opens_tx(m);
+    // fsd_mode_opens_hw_tx(), not fsd_mode_opens_tx(): this decides the REGISTER.
+    // Same value today; separate names so that opening the register for a future
+    // Autonomous scroll detent does not also open general TX. See fsd_types.h.
+    const bool want_listen_only = !fsd_mode_opens_hw_tx(m);
 
     // The rule both branches follow: the software gate is never more permissive
     // than the hardware. So the direction that RESTRICTS moves first.
@@ -282,6 +304,7 @@ bool mode_apply(OpMode m) {
         if (!can_mode_settled(false)) {
             Serial.println("[MODE] 컨트롤러가 Listen-Only 를 못 벗어났다 — 모드를 바꾸지 않는다");
             can_set_all_listen_only(true);   // never leave it half-open
+            can_mark_unsettled(true);        // whichever one is stuck, re-init it
             return false;
         }
     }
@@ -296,6 +319,7 @@ bool mode_apply(OpMode m) {
         can_set_all_listen_only(true);
         if (!can_mode_settled(true)) {
             Serial.println("[MODE] 경고: 컨트롤러가 Listen-Only 로 안 들어갔다");
+            can_mark_unsettled(true);
             return false;
         }
     }

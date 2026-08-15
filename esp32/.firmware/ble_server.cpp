@@ -418,9 +418,15 @@ static void ble_revoke_active_if_stale(uint32_t now_ms) {
     if (g_owner_present || g_link_down_ms == 0) return;
     if ((uint32_t)(now_ms - g_link_down_ms) < BLE_ACTIVE_GRACE_MS) return;
 
-    g_link_down_ms  = 0;
-    g_active_by_ble = false;
-
+    // 🔴 The bookkeeping is cleared AFTER the switch succeeds, not before.
+    //
+    // It used to be cleared here, first, and mode_apply()'s return value was
+    // discarded. So a revoke that failed — an SPI glitch on the MCP2515, a TWAI
+    // reinstall that did not take — left op_mode lowered, the transmitter still
+    // physically enabled, and no way back: g_link_down_ms was already 0, so this
+    // function was never entered again. One dropped return value and the module
+    // sits there claiming Listen-Only with an open transmitter, which is exactly
+    // the claim SECURITY.md makes about the hardware register.
     portENTER_CRITICAL(g_mux);
     bool was_active = (g_state->op_mode == OpMode_Active);
     // Not Listen-Only unconditionally any more. The phone leaving withdraws the
@@ -436,7 +442,25 @@ static void ble_revoke_active_if_stale(uint32_t now_ms) {
     // that had been opened with the button ended up reporting Listen-Only while
     // its transmitter was still enabled. Listen-Only's safety claim is that it
     // is a hardware register; a Listen-Only that is only a variable is not that.
-    if (was_active) mode_apply(floor);
+    // Called unconditionally, not only when was_active. mode_apply(floor) is
+    // idempotent and only ever narrows permission here, and the retry case needs
+    // it: mode_apply() lowers op_mode BEFORE closing the register on the way
+    // down, so a failed attempt leaves op_mode already at the floor — was_active
+    // would read false on the next tick and the retry would never fire.
+    if (!mode_apply(floor)) {
+        // Keep g_link_down_ms and g_active_by_ble as they are: they are the
+        // reason this function runs, and the next tick will try again. Rate-limit
+        // the log so a persistently stuck controller does not drown the console.
+        static uint32_t s_warn_ms = 0;
+        if (!s_warn_ms || (uint32_t)(now_ms - s_warn_ms) >= 5000u) {
+            s_warn_ms = now_ms;
+            Serial.println("[BLE] 회수 실패 — 송신기가 아직 열려 있을 수 있다. 계속 재시도한다");
+        }
+        return;
+    }
+
+    g_link_down_ms  = 0;
+    g_active_by_ble = false;
 
     if (was_active) {
         Serial.printf("[BLE] no phone for %u s — falling back to %s\n",
@@ -586,20 +610,39 @@ class CommandCB : public NimBLECharacteristicCallbacks {
             bool on = (arg != 0);
             portENTER_CRITICAL(g_mux);
             g_state->autonomy_enabled = on;
-            // Re-derive the floor now. Turning autonomy off while sitting in
-            // Autonomous has to drop the module out of it immediately;
-            // otherwise the switch would appear to do nothing until a reboot.
-            if (g_state->op_mode == OpMode_Autonomous ||
-                g_state->op_mode == OpMode_ListenOnly)
-                g_state->op_mode = fsd_autonomy_floor(g_state);
-            FSDState snap = *g_state;
+            OpMode cur   = g_state->op_mode;
+            OpMode floor = fsd_autonomy_floor(g_state);
             portEXIT_CRITICAL(g_mux);
+
+            // 🔴 op_mode is NOT written here. mode_switch.h calls itself "the one
+            // way to change op_mode" and "LOOP TASK ONLY — a BLE callback must
+            // NOT call this", and this was the one place still doing it directly.
+            //
+            // It looked harmless only because fsd_mode_opens_hw_tx(Autonomous) is
+            // false, so Autonomous and Listen-Only map to the same register
+            // state. The day Autonomous opens the register for a scroll detent,
+            // this line would drop Autonomous -> Listen-Only while leaving the
+            // transmitter enabled — the software saying "Listen-Only" over an
+            // open transmitter, which is the exact defect PR #34 removed.
+            //
+            // Park it for loop() the same way SET_MODE does. If the phone leaves
+            // before it is applied the request is dropped, which is safe here:
+            // autonomy_enabled is already false, and fsd_autonomy_allows() checks
+            // that flag, so the camera path is shut regardless of what op_mode
+            // still says. The floor is recomputed at the next boot anyway.
+            if ((cur == OpMode_Autonomous || cur == OpMode_ListenOnly) && cur != floor) {
+                g_mode_req         = (uint8_t)floor;
+                g_mode_req_pending = true;
+            }
             // Persist from loop(), not here. This file's contract is that
             // nothing blocks the BLE host task, and an NVS commit is a flash
             // erase-write that can stall for tens of milliseconds.
             g_prefs_dirty = true;
             Serial.printf("[BLE] autonomy -> %s\n", on ? "ON" : "OFF");
-            ble_send_result(cmd, BLE_RES_OK, (uint16_t)snap.op_mode);
+            // The floor we asked for, not a snapshot of op_mode: the switch now
+            // happens on loop(), so op_mode has not moved yet at this point.
+            // State notifications carry the truth once it has.
+            ble_send_result(cmd, BLE_RES_OK, (uint16_t)floor);
             break;
         }
 

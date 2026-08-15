@@ -87,6 +87,35 @@ static inline bool fsd_mode_opens_tx(OpMode m) {
     return m == OpMode_Active || m == OpMode_Service;
 }
 
+/**
+ * Does this mode open the CAN controller's transmit REGISTER?
+ *
+ * Identical to fsd_mode_opens_tx() today, and deliberately so — this is a
+ * seam, not a behaviour change.
+ *
+ * 🔴 Why it exists. The comment on OpMode_Autonomous above says the camera path
+ * "has its own door" separate from general TX. It does not, yet: mode_apply()
+ * (which drives the register) and fsd_can_transmit() (which permits general TX)
+ * both asked fsd_mode_opens_tx(). One predicate, two jobs. So the sentence
+ * "fsd_can_transmit() returns FALSE here" is not a separate design — it is a
+ * side effect of the register being shut in Autonomous too.
+ *
+ * That matters the day the scroll emitter is wired. Autonomous has to open the
+ * register for a detent to reach the wire, and with one predicate the only way
+ * to do that is to add Autonomous to it — which hands the SAME key to
+ * fsd_can_transmit(), opening nag killer, 0x229 gear-lever, precondition and
+ * 0x3FD injection on a car with nobody in it. A one-line edit made to enable one
+ * frame would enable eight.
+ *
+ * With the seam in place that edit becomes: add Autonomous HERE (register may
+ * open) and leave fsd_mode_opens_tx() alone (general TX stays shut). Splitting
+ * it now costs nothing; splitting it under pressure, later, is how the wrong
+ * eight get opened.
+ */
+static inline bool fsd_mode_opens_hw_tx(OpMode m) {
+    return fsd_mode_opens_tx(m);
+}
+
 /* ── 0x257 DI_speed carries TWO speeds, and they are not the same thing ──────
  *
  * Inline here, next to fsd_mode_opens_tx() and for the same reason: two places

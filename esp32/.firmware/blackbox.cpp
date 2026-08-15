@@ -17,6 +17,9 @@
 #include "../../fsd_logic/fsd_blackbox_filter.h"   // fsd_blackbox_should_record
 #include <stdlib.h>
 #include <string.h>
+#if defined(BLACKBOX_BACKEND_LITTLEFS)
+#include <Preferences.h>   // fs_ever_mounted() — the format guard, see backend_init()
+#endif
 
 // Backend selection (BLACKBOX_BACKEND_*) + the enable-default live in blackbox.h
 // so main.cpp / prefs.cpp share one source of truth.
@@ -217,20 +220,58 @@ static int bb_scan_count() {
     return n;
 }
 
+#if defined(BLACKBOX_BACKEND_LITTLEFS)
+/* "Has this board ever mounted its filesystem?" — and the answer has to live
+ * OUTSIDE that filesystem, or a format erases the very fact that says a format
+ * would be destructive. Hence NVS.
+ *
+ * A blank board genuinely needs one format. A board that has mounted before and
+ * suddenly cannot is a different situation entirely: the likely causes are a
+ * power cut mid-write (this module is on a switched feed that dies with the car)
+ * or transient corruption, and the stored data at that moment may include the
+ * one-shot capture taken before the TSL came out — which cannot be retaken. */
+static bool fs_ever_mounted(void) {
+    Preferences p;
+    if (!p.begin("fsd", /*readOnly=*/true)) return false;
+    bool v = p.getBool("fsmnt", false);
+    p.end();
+    return v;
+}
+
+static void fs_mark_mounted(void) {
+    Preferences p;
+    if (!p.begin("fsd", /*readOnly=*/false)) return;
+    if (!p.getBool("fsmnt", false)) p.putBool("fsmnt", true);
+    p.end();
+}
+#endif
+
 static void backend_init() {
 #if defined(BLACKBOX_BACKEND_LITTLEFS)
     g_fs_ok = LittleFS.begin(false);
-    if(!g_fs_ok) {
-        // 🔴 begin(true) formats on any mount failure, silently. A transient
-        // error or a power cut during a write would therefore erase the camera
-        // database, the learning file and every stored capture -- including the
-        // one-shot capture taken before the TSL comes out, which cannot be
-        // retaken. Say it out loud first; a blank board still needs formatting
-        // once, but it should never happen without a line in the log.
-        Serial.println("[BB] LittleFS mount failed — FORMATTING (all stored data is lost)");
+    if (!g_fs_ok) {
+        // One retry before concluding anything. A mount can fail transiently and
+        // the cost of asking twice is a few milliseconds.
+        delay(50);
+        g_fs_ok = LittleFS.begin(false);
+    }
+    if (!g_fs_ok) {
+        // 🔴 begin(true) formats, and it used to run on ANY mount failure. That
+        // erases the camera database, the learning file and every stored capture.
+        // Formatting is now allowed exactly once in a board's life: when it has
+        // never successfully mounted, i.e. it really is blank.
+        if (fs_ever_mounted()) {
+            Serial.println("[BB] 🔴 LittleFS mount FAILED and this board has mounted before.");
+            Serial.println("[BB] NOT formatting — stored captures would be lost.");
+            Serial.println("[BB] Blackbox and the camera database are disabled this boot.");
+            Serial.println("[BB] If the data is expendable: erase flash over USB and reflash.");
+            return;
+        }
+        Serial.println("[BB] LittleFS mount failed on a board that has never mounted — formatting once");
         g_fs_ok = LittleFS.begin(true);
-    }  // format-on-fail: own the spiffs data partition
+    }
     if (!g_fs_ok) { Serial.println("[BB] LittleFS mount failed"); return; }
+    fs_mark_mounted();   // from here on, a failure is a reason to stop, not format
 #else
     g_fs_ok = SD.cardType() != CARD_NONE;  // can_dump_init() already mounted SD
 #endif
