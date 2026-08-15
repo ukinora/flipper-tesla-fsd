@@ -53,6 +53,22 @@ public:
      *  input defaulting to "shut". */
     virtual bool isListenOnly() const = 0;
 
+    /** Is the controller actually installed and running?
+     *
+     * 🔴 isListenOnly() cannot answer this, and must not try. It reports SHUT for
+     * an uninstalled controller because that is the safe answer for a TX gate —
+     * a dead controller genuinely cannot transmit. But that makes a FAILED
+     * "switch to Listen-Only" indistinguishable from a successful one: both
+     * report shut, so mode_apply() returns true, the BLE revoke path clears its
+     * retry state, and the periodic re-init loop never picks the bus up. The bus
+     * stays deaf AND mute until the next reboot, and nothing says so.
+     *
+     * Two questions, two predicates: isListenOnly() = "can it transmit?",
+     * isOperational() = "is it there at all?".
+     *
+     * Default true for drivers with no install step. */
+    virtual bool isOperational() const { return true; }
+
     /** Restrict hardware reception to a single CAN id for full-rate single-ID
      *  capture on a busy bus, or restore accept-all.
      *  @param single  true = accept only @p id; false = accept all ids.

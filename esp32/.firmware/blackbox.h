@@ -95,7 +95,15 @@ void blackbox_arm(BBTrigger trig, const FSDState* snap, uint32_t now_ms);
 // Inject a bus-off / manual mark through the event-core (applies the cooldown)
 // and arm a capture if it fires. Used from the loop (bus-off) and dashboard.
 void blackbox_busoff(uint32_t now_ms);
-void blackbox_mark(uint32_t now_ms);
+/** Arm a manual capture.
+ *
+ * @return milliseconds until the capture becomes a FILE, or 0 when nothing was
+ *         armed (the event cooldown swallowed it, or the recorder is off).
+ *
+ * Non-zero does NOT mean the capture is downloadable yet — it means "wait this
+ * long, then it will be". Asking for a download before then serves the PREVIOUS
+ * capture and reports success, which is how the wrong file gets taken to the car. */
+uint32_t blackbox_mark(uint32_t now_ms);
 
 // Post-roll countdown + flush. Call once per loop().
 void blackbox_tick(uint32_t now_ms);

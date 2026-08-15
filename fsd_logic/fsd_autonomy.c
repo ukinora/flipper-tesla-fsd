@@ -66,6 +66,23 @@ void fsd_drive_observe_speed(FSDState* state, const CANFRAME* frame, uint32_t no
         state->vehicle_speed_kph = kph;
         state->speed_seen = true;
         state->last_speed_tick_ms = now_ms;
+    } else {
+        /* 🔴 SNA 를 거부하는 것만으로는 부족했다 — 그 자체가 회귀를 만들었다.
+         *
+         * 거부 전에는 SNA 가 287.6 km/h 로 디코드됐고, fsd_profile.c 의 정차
+         * 인터록은 "> 0.5" 에서 닫혔다. 우발적이지만 닫히긴 했다.
+         *
+         * 거부 후에는 아무것도 갱신하지 않으므로 직전 값이 남는다. 차가 막
+         * 멈춰서 0 이었다면, 신선도 창(1초) 동안 게이트는 "정지 상태이고 값도
+         * 신선하다" 로 읽는다 — 실제로는 속도를 모르는데. 그 사이 차가 구르기
+         * 시작하면 주입이 허용된다.
+         *
+         * 지금 속도를 모른다는 것이 사실이므로 증거를 내린다. 게이트들은
+         * speed_seen 을 fail-closed 로 읽으므로(!speed_seen -> 거부) 이것이
+         * 닫는 방향이다. vehicle_speed_kph 는 마지막으로 알던 값 그대로 두어
+         * 화면이 갑자기 0 으로 튀지 않게 한다 — 표시는 speed_seen 으로 "모름"
+         * 을 말할 수 있다. */
+        state->speed_seen = false;
     }
 
     /* Separate decode, separate success: DI_uiSpeed needs one more byte than

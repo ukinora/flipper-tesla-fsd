@@ -260,7 +260,13 @@ static void can_set_all_listen_only(bool listen_only) {
 // is the safe direction.
 static bool can_mode_settled(bool listen_only) {
     for (uint8_t i = 0; i < CAN_ACTIVE_BUS_COUNT; i++) {
-        if (!g_can_ok[i] || !g_can[i]) continue;   // nothing to check on this one
+        if (!g_can_ok[i] || !g_can[i]) continue;   // never came up; not ours to judge
+        // 🔴 A controller that WAS up and is now uninstalled has not "settled" —
+        // it failed its reinstall. isListenOnly() answers SHUT for it (safe, and
+        // true: it cannot transmit), so without this line a failed switch looks
+        // exactly like a successful one. mode_apply() would return true, the BLE
+        // revoke path would clear its retry state, and the bus would stay dead.
+        if (!g_can[i]->isOperational()) return false;
         if (g_can[i]->isListenOnly() != listen_only) return false;
     }
     return true;
@@ -277,7 +283,12 @@ static bool can_mode_settled(bool listen_only) {
 static void can_mark_unsettled(bool want_listen_only) {
     for (uint8_t i = 0; i < CAN_ACTIVE_BUS_COUNT; i++) {
         if (!g_can_ok[i] || !g_can[i]) continue;
-        if (g_can[i]->isListenOnly() != want_listen_only) {
+        // Same two questions as can_mode_settled(): is it there, and is it in the
+        // mode we asked for. An uninstalled controller answers SHUT to the second
+        // one, so checking only that would leave a dead bus flagged as fine — the
+        // exact case this function exists to catch.
+        if (!g_can[i]->isOperational() ||
+            g_can[i]->isListenOnly() != want_listen_only) {
             g_can_ok[i] = false;
             Serial.printf("[CAN] %s did not take the mode — flagged for re-init\n",
                           can_bus_name(bus_id_from_index(i)));

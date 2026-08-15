@@ -174,6 +174,12 @@ public:
     // Reporting shut is also simply true: twai_transmit() fails when uninstalled.
     bool isListenOnly() const override { return !installed_ || listen_only_; }
 
+    // See CanDriver::isOperational(). A failed (re)install leaves installed_
+    // false while isListenOnly() answers SHUT — safe for a TX gate, but
+    // indistinguishable from a clean switch to Listen-Only. This is how callers
+    // tell "it refuses to transmit" from "it is not there".
+    bool isOperational() const override { return installed_; }
+
     void setAcceptanceFilter(bool single, uint32_t id) override {
         if (filter_single_ == single && (!single || filter_id_ == id)) return;
         filter_single_ = single;
@@ -364,6 +370,12 @@ public:
     /* Reports SHUT when the controller was never installed: an uninstalled
      * driver cannot transmit either, and this must never read as open. */
     bool isListenOnly() const override { return !installed_ || listen_only_; }
+
+    // See CanDriver::isOperational(). A failed (re)install leaves installed_
+    // false while isListenOnly() answers SHUT — safe for a TX gate, but
+    // indistinguishable from a clean switch to Listen-Only. This is how callers
+    // tell "it refuses to transmit" from "it is not there".
+    bool isOperational() const override { return installed_; }
 
     void setAcceptanceFilter(bool single, uint32_t id) override {
         if (!installed_) return;

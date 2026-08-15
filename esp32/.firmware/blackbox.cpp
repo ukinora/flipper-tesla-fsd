@@ -255,12 +255,29 @@ static int bb_scan_count() {
  * power cut mid-write (this module is on a switched feed that dies with the car)
  * or transient corruption, and the stored data at that moment may include the
  * one-shot capture taken before the TSL came out — which cannot be retaken. */
-static bool fs_ever_mounted(void) {
+/* 세 가지 답을 돌려준다. bool 두 값으로는 부족하다는 것이 이 함수의 요점이다.
+ *
+ * 🔴 처음에는 begin() 실패를 그냥 false("마운트한 적 없다")로 반환했다. 그러면
+ * NVS 자체가 이상할 때 "새 보드" 로 읽혀 포맷이 허용된다 — 즉 판단 근거를 잃은
+ * 상황에서 가장 파괴적인 쪽을 고른다. 가드의 목적과 정반대다. */
+enum class FsHistory { NEVER_MOUNTED, MOUNTED_BEFORE, UNKNOWN };
+
+static FsHistory fs_history(void) {
     Preferences p;
-    if (!p.begin("fsd", /*readOnly=*/true)) return false;
-    bool v = p.getBool("fsmnt", false);
+    // 읽기 전용으로 못 열리는 경우가 둘이다: 네임스페이스가 아직 없거나(정말
+    // 첫 부팅), NVS 가 상한 것. 쓰기 모드로 한 번 더 물어 그 둘을 가른다 —
+    // 쓰기로도 안 열리면 NVS 쪽 문제이므로 아무것도 단정하지 않는다.
+    if (!p.begin("fsd", /*readOnly=*/true)) {
+        if (!p.begin("fsd", /*readOnly=*/false)) return FsHistory::UNKNOWN;
+        bool has = p.isKey("fsmnt");
+        bool v   = has && p.getBool("fsmnt", false);
+        p.end();
+        return v ? FsHistory::MOUNTED_BEFORE : FsHistory::NEVER_MOUNTED;
+    }
+    bool has = p.isKey("fsmnt");
+    bool v   = has && p.getBool("fsmnt", false);
     p.end();
-    return v;
+    return v ? FsHistory::MOUNTED_BEFORE : FsHistory::NEVER_MOUNTED;
 }
 
 static void fs_mark_mounted(void) {
@@ -285,14 +302,26 @@ static void backend_init() {
         // erases the camera database, the learning file and every stored capture.
         // Formatting is now allowed exactly once in a board's life: when it has
         // never successfully mounted, i.e. it really is blank.
-        if (fs_ever_mounted()) {
-            Serial.println("[BB] 🔴 LittleFS mount FAILED and this board has mounted before.");
-            Serial.println("[BB] NOT formatting — stored captures would be lost.");
+        const FsHistory hist = fs_history();
+        if (hist != FsHistory::NEVER_MOUNTED) {
+            Serial.println("[BB] 🔴 LittleFS mount FAILED — NOT formatting.");
+            Serial.println(hist == FsHistory::MOUNTED_BEFORE
+                ? "[BB] This board has mounted before; stored captures would be lost."
+                : "[BB] NVS is unreadable, so we cannot tell whether data exists. "
+                  "Refusing to guess.");
             Serial.println("[BB] Blackbox and the camera database are disabled this boot.");
             Serial.println("[BB] If the data is expendable: erase flash over USB and reflash.");
             return;
         }
-        Serial.println("[BB] LittleFS mount failed on a board that has never mounted — formatting once");
+        // 🔴 여기까지 와도 "정말 빈 보드" 라고 확신할 수는 없다. fsmnt 키는 이
+        // 가드와 함께 생겼으므로, 그 이전 펌웨어에서 올라온 보드는 캡처를 갖고도
+        // NEVER_MOUNTED 로 보인다. 다만 그 보드는 **직전 부팅에서 마운트에
+        // 성공했을** 것이고, 그러면 아래에서 키가 심어져 다음부터는 보호된다.
+        // 지금 이 자리는 "마운트도 실패했고 이력도 없다" 이므로 빈 보드일
+        // 가능성이 가장 높다 — 포맷하되, 무엇을 하는지 크게 남긴다.
+        Serial.println("[BB] 🔴 LittleFS mount failed and no mount history — treating as a blank board.");
+        Serial.println("[BB] FORMATTING. If this board should have had data, stop and reflash "
+                       "before taking any capture.");
         g_fs_ok = LittleFS.begin(true);
     }
     if (!g_fs_ok) { Serial.println("[BB] LittleFS mount failed"); return; }
@@ -723,8 +752,8 @@ void blackbox_busoff(uint32_t now_ms) {
     if (e == EVT_BUSOFF) blackbox_arm(BB_TRIG_BUSOFF, &snap, now_ms);
 }
 
-void blackbox_mark(uint32_t now_ms) {
-    if (g_state == nullptr) return;
+uint32_t blackbox_mark(uint32_t now_ms) {
+    if (g_state == nullptr) return 0;
     FSDState snap;
     bb_enter();
     FSDEventType e = fsd_events_inject(g_state, EVT_MANUAL, now_ms);
@@ -732,6 +761,21 @@ void blackbox_mark(uint32_t now_ms) {
     bb_exit();
     if (e == EVT_MANUAL) blackbox_arm(BB_TRIG_MANUAL, &snap, now_ms);
     else Serial.println("[BB] mark suppressed (cooldown)");
+
+    /* 🔴 무엇이 실제로 일어났는지 돌려준다.
+     *
+     * 예전에는 void 였고, BLE 는 "성공 + (이전 개수 + 1)" 을 무조건 답했다.
+     * 둘 다 예측이지 사실이 아니다:
+     *   - cooldown 이 삼키면 아무것도 생기지 않는데도 성공이라고 답했다;
+     *   - 캡처는 post-roll 이 끝나야 파일이 되므로, 답한 그 순간에는 개수가
+     *     아직 이전 값이다. 그 사이 DUMP_START 를 보내면 latest 는 **직전
+     *     캡처**를 준다 — 그리고 화면에는 다운로드 성공이라고 뜬다.
+     *
+     * 반환값 = 파일이 생기기까지 남은 ms (0 이면 아무것도 무장되지 않았다).
+     * 호출자는 이것으로 "지금 받으면 엉뚱한 것을 받는다" 를 알 수 있다. */
+    if (!g_armed) return 0;
+    uint32_t left = (uint32_t)(g_flush_at_ms - now_ms);
+    return left ? left : 1u;   // armed 인데 0 을 돌려주지 않는다
 }
 
 // Build the .json summary from g_snap + the windowed frame/bus counts + timeline.

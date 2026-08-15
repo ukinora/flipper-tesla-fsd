@@ -2443,6 +2443,16 @@ static void test_speed_observer(void) {
      * display field riding in the same frame. */
     CHECK(s.ui_speed == 25, "ui speed still decodes from an SNA frame");
 
+    /* 🔴 SNA must also WITHDRAW the evidence, not merely fail to refresh it.
+     *
+     * Rejecting SNA fixed one thing and broke another. Before the rejection, SNA
+     * decoded to 287.6 and fsd_profile_tx_allowed()'s "must be stationary" check
+     * closed on it -- accidentally, but it closed. After, nothing is written, so
+     * a car that had just stopped leaves 0.0 behind and the gate reads
+     * "stationary AND fresh" for the whole freshness window while the speed is
+     * in fact unknown. Clearing speed_seen is what makes that fail closed. */
+    CHECK(!s.speed_seen, "SNA withdraws the speed evidence (speed_seen false)");
+
     /* One below the marker is still a reading. We reject SNA itself, not
      * "implausibly fast" -- ev-open-can-tools bounds at 4062, but that is their
      * constant rather than a measurement, and adopting someone else's numbers
@@ -2451,6 +2461,28 @@ static void test_speed_observer(void) {
     f.buffer[2] = 0xFF; /* raw = 0xFFE = 4094 */
     fsd_drive_observe_speed(&s, &f, 4000u);
     CHECK(s.last_speed_tick_ms == 4000u, "4094 is below SNA and still decodes");
+    CHECK(s.speed_seen, "a real reading restores the evidence");
+
+    /* The gate this protects: stationary + fresh must not survive an SNA. */
+    {
+        FSDState g;
+        fsd_state_init(&g, TeslaHW_HW3);
+        g.op_mode = OpMode_Active;
+        CANFRAME sf;
+        memset(&sf, 0, sizeof(sf));
+        sf.canId = CAN_ID_DI_SPEED;
+        sf.data_lenght = 8;
+        sf.buffer[1] = (uint8_t)((500u & 0x0Fu) << 4);   /* raw 500 -> 0.0 km/h */
+        sf.buffer[2] = (uint8_t)((500u >> 4) & 0xFFu);
+        fsd_drive_observe_speed(&g, &sf, 1000u);
+        CHECK(fsd_profile_tx_allowed(&g, 1100u), "stationary + fresh allows replay");
+
+        sf.buffer[1] = 0xF0;
+        sf.buffer[2] = 0xFF;                            /* SNA */
+        fsd_drive_observe_speed(&g, &sf, 1200u);
+        CHECK(!fsd_profile_tx_allowed(&g, 1300u),
+              "SNA closes the stationary interlock even inside the freshness window");
+    }
 
     /* Wrong frame must produce nothing -- the gear observer read the wrong frame
      * for weeks (PR #18) because it trusted the dispatcher. */
