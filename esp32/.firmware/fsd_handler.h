@@ -158,6 +158,17 @@ bool fsd_handle_isa_speed_chime(CanFrame *frame);
 #define FSD_NAG_KILLER_ENABLED 1
 #endif
 
+/* May the ignore_ota flag override the "no TX during a Tesla OTA" rule?
+ *
+ * Default 1 preserves upstream's escape hatch. tesla-can-mod's T-2CAN sets 0,
+ * which makes this build's fsd_can_transmit() byte-for-byte equivalent to the
+ * fsd_logic twin that the host tests actually compile — the two had drifted, so
+ * a test asserting "we stay quiet during an OTA" passed while the firmware did
+ * not. A flag that only exists in the untested copy is the worst place for it. */
+#ifndef FSD_ALLOW_IGNORE_OTA
+#define FSD_ALLOW_IGNORE_OTA 1
+#endif
+
 /** Build an echo of EPAS3P_sysStatus (0x370) with counter+1 and handsOnLevel=1.
  *  Writes result into *out.  Returns true if echo should be sent.
  *  Always returns false when FSD_NAG_KILLER_ENABLED is 0. */

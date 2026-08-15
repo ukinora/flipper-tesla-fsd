@@ -111,7 +111,24 @@ bool fsd_can_transmit(const FSDState *state) {
     // OpMode must not inherit TX permission by default. Unchanged for the three
     // modes that exist today.
     if (!fsd_mode_opens_tx(state->op_mode)) return false;
+    // 🔴 The two fsd_can_transmit() twins disagreed here, and the host tests only
+    // ever compiled the strict one.
+    //
+    // fsd_logic/fsd_handler.c:  if (state->tesla_ota_in_progress) return false;
+    // this file (until now):    ... && !state->ignore_ota
+    //
+    // So "we do not transmit while Tesla is installing firmware" passed green in
+    // CI while the firmware, with ignore_ota set, transmitted. And ignore_ota is
+    // an NVS key ("ignota") that survives a reflash. fsd_body.c:59 already noted
+    // it "never consults ignore_ota" — that defence just never reached here.
+    //
+    // FSD_ALLOW_IGNORE_OTA=0 (this board, platformio.ini) makes the twins
+    // identical. Boards that want the escape hatch keep it by default.
+#if FSD_ALLOW_IGNORE_OTA
     if (state->tesla_ota_in_progress && !state->ignore_ota) return false;
+#else
+    if (state->tesla_ota_in_progress) return false;
+#endif
     if (state->rx_stale) return false;  // deaf bus: injecting achieves nothing
     return true;
 }

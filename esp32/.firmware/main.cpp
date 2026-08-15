@@ -374,6 +374,27 @@ static bool send_on_bus(CanBusId bus, const CanFrame &frame) {
         return false;
     }
 
+    // 🔴 0x229 — the right stalk, i.e. GEAR SELECTION. Refused here for the same
+    // reason as the body IDs: this board has an emitter for it and no business
+    // using it.
+    //
+    // arm_gear_ap_double_press_sequence() really does transmit FULL_DOWN /
+    // CENTER / FULL_DOWN / CENTER on 0x229 to re-engage AP, gated only by
+    // fsd_can_transmit() and continuous_ap. CLAUDE.md calls 0x229 a "펌웨어 TX
+    // denylist" entry, but that denial lives in fsd_profile_id_blocked() — which
+    // serves the text-profile parser, and fsd_profile.c is not even in this
+    // variant's build_src_filter. The documented protection did not exist here.
+    //
+    // continuous_ap has no way to be switched on in this build (no BLE command,
+    // no serial command, dashboard removed) — but its NVS key "contap" survives
+    // reflashing, so a board that once ran a WiFi build with it enabled boots
+    // with it true. Cheap backstop, real path.
+    if (frame.id == CAN_ID_SCCM_RSTALK) {
+        Serial.printf("[TX] refused 0x%03X — gear-lever frames are not sent by this board\n",
+                      (unsigned)frame.id);
+        return false;
+    }
+
     CanDriver *driver = can_for_bus(bus);
     bool ok = driver ? driver->send(frame) : false;
     // Single TX chokepoint: every injected/modified frame (0x3EE, 0x3FD, the

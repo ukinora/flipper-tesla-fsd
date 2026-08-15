@@ -178,7 +178,30 @@ static uint32_t bb_seq_from_name(const char* base) {
     return u ? (uint32_t)strtoul(u + 1, nullptr, 10) : 0u;
 }
 
+/* Is this a capture somebody asked for by hand?
+ *
+ * 🔴 Manual captures are never evicted. The one the operator takes before the
+ * TSL comes out is a manual capture, and it cannot be retaken.
+ *
+ * Without this, retention deleted it FIRST. Two things stacked up:
+ *  - eviction picks the smallest <ms>, and the manual capture is taken before
+ *    the teardown, so it is the oldest by construction;
+ *  - unplugging the connector during teardown provokes bus-off, which arms
+ *    automatic captures. Five of those and the manual one is gone, silently.
+ *
+ * <ms> is millis(), which also resets to 0 on reboot — so a capture taken after
+ * a reboot looks OLDER than one taken before it, and eviction order inverts.
+ * Pinning manual captures sidesteps that for the file that matters; the
+ * automatic ones are diagnostic and losing the wrong one is survivable.
+ */
+static bool bb_is_manual(const char* base) {
+    const char* u = strrchr(base, '_');
+    return u && strcmp(u + 1, "manual") == 0;
+}
+
 // Keep only the newest BLACKBOX_RETAIN events (smallest <ms> deleted first).
+// Manual captures are counted but never chosen for deletion; when only manual
+// ones remain, oldest_base stays empty and the loop exits.
 static void bb_enforce_retention() {
     for (;;) {
         File dir = BB_FS.open(BLACKBOX_DIR);
@@ -192,7 +215,9 @@ static void bb_enforce_retention() {
                 bb_basename(nm, base, sizeof(base));
                 uint32_t s = bb_seq_from_name(base);
                 count++;
-                if (s < oldest) { oldest = s; strncpy(oldest_base, base, sizeof(oldest_base) - 1); }
+                if (!bb_is_manual(base) && s < oldest) {
+                    oldest = s; strncpy(oldest_base, base, sizeof(oldest_base) - 1);
+                }
             }
             e.close();
         }
@@ -376,16 +401,37 @@ static size_t backend_read_chunk(const char* name, bool json, size_t offset,
 
 // Newest = last entry the directory hands back. Capture names are timestamped,
 // so listing order tracks age closely enough for "give me the one I just took".
+/* 🔴 "latest" has to mean newest, not last-listed.
+ *
+ * This used to keep whatever the directory walk happened to hand over last.
+ * LittleFS does not promise creation order, so on a board with more than one
+ * stored capture the BLE download — which is the ONLY way to get a capture off
+ * this module, and has no "list" or "fetch by name" command — could serve an
+ * older one while reporting success. The operator sees a completed download,
+ * removes the TSL, and only later finds the file is the wrong capture.
+ *
+ * Pick the largest <ms> instead. Same caveat as retention: millis() resets on
+ * reboot, so "newest" is only ordered within one power cycle. That is the case
+ * that matters here (mark, then download in the same session), and the manual
+ * capture is pinned against eviction anyway.
+ */
 static bool backend_latest_name(char* out, size_t cap) {
     if (!g_fs_ok || !out || cap == 0) return false;
     File dir = BB_FS.open(BLACKBOX_DIR);
     if (!dir) return false;
     bool found = false;
+    uint32_t newest = 0;
     for (File e = dir.openNextFile(); e; e = dir.openNextFile()) {
         const char* nm = e.name();
         if (strstr(nm, ".json")) {
-            bb_basename(nm, out, cap);
-            found = true;
+            char base[40];
+            bb_basename(nm, base, sizeof(base));
+            uint32_t s = bb_seq_from_name(base);
+            if (!found || s >= newest) {
+                newest = s;
+                snprintf(out, cap, "%s", base);
+                found = true;
+            }
         }
         e.close();
     }

@@ -252,6 +252,17 @@ bool fsd_sp_apply_scroll(const FsdSpeedProfile* sp, FsdSpAction act,
     // Last line of defence. check_inputs() already rejects a bad table, but this
     // is the function that actually writes to the wire, so it re-checks rather
     // than trusting a caller to have gone through the state machine.
+    //
+    // 🔴 It only re-checked the RANGE. The comment claimed a re-check and the
+    // code delivered a third of one: FSD_SP_ENCODING_DEFAULT has
+    // tick_toward_higher = 1, which passes every bound below, so calling this
+    // directly built a modified 0x3C2 out of an UNVERIFIED encoding — the exact
+    // thing FsdSpEncoding.verified exists to prevent. The Intel HW3
+    // emergency-brake incident is why that flag is there.
+    //
+    // fsd_sp_encoding_ok() is the same predicate check_inputs() uses, so the two
+    // paths can no longer disagree about what "safe to emit" means.
+    if(!fsd_sp_encoding_ok(&sp->enc)) return false;
     if(sp->enc.tick_toward_higher == 0) return false;
     if(sp->enc.tick_toward_higher > FSD_SP_DETENT_MAX) return false;
     if(sp->enc.tick_toward_higher < FSD_SP_DETENT_MIN) return false;
