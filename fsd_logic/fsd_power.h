@@ -74,6 +74,7 @@ typedef enum {
     FSD_PWR_ALWAYS_ON,   /* bus quiet a long time and we are still running */
     FSD_PWR_BROWNOUT,    /* supply sagged -- a wiring verdict, not a switching one */
     FSD_PWR_CRASH,       /* we fell over; says nothing about the supply */
+    FSD_PWR_NO_BUS,      /* never heard a frame -- the CAN pair, not the car */
 } FsdPwrVerdict;
 
 /**
@@ -81,11 +82,22 @@ typedef enum {
  *
  * `quiet_ms` is a DURATION, not a timestamp: how long the bus had been quiet
  * at the moment of the write. 0 means the bus was still carrying traffic.
+ *
+ * 🔴 `seen_any` exists because 0 means TWO opposite things without it.
+ * fsd_pwr_quiet_ms() deliberately returns 0 when no frame was ever received --
+ * it must not claim the bus fell silent when it was never heard at all. But the
+ * verdict then cannot tell that apart from "the bus was busy right to the end",
+ * and answers NO_SLEEP: a claim about the CAR, from a session that only ever
+ * observed the WIRING. Swap CAN-H and CAN-L and the module hears nothing for an
+ * hour, then reports that the car never slept.
  */
 typedef struct {
     bool valid;
     uint32_t uptime_ms;
     uint32_t quiet_ms;
+    /* New field goes last on purpose: the existing positional initialisers keep
+     * meaning what they say, and an omitted field zeroes to the cautious value. */
+    bool seen_any;
 } FsdPwrRecord;
 
 /**

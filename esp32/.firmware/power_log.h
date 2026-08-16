@@ -52,3 +52,23 @@ void power_log_tick(uint32_t now_ms, uint32_t last_rx_ms, bool seen_any);
 
 /** The verdict as it stands, for the serial banner and future BLE reporting. */
 FsdPwrVerdict power_log_verdict(void);
+
+/**
+ * Print the whole picture on demand: reset reason, the record that was read at
+ * boot, the boot verdict, and where this session currently stands.
+ *
+ * 🔴 THIS EXISTS BECAUSE THE BOOT BANNER CANNOT BE READ (2026-08-17).
+ *
+ * The board has native USB. Plugging the cable in starts the boot AND the USB
+ * enumeration at the same time; the banner is printed around 400 ms and the
+ * host cannot open the port for one to two seconds. Measured twice on the bench
+ * with a capture script that reopens the port every 200 ms -- the reboot was
+ * confirmed both times (the port dropped, and the 20 s factory-reset window was
+ * seen closing afterwards) and the banner was gone both times. It is not a race
+ * that can be won.
+ *
+ * That matters far past the bench: 차량-방문-체크리스트 A-1 is a ONE-HOUR test in
+ * the car whose final step is "plug USB back in and read the first line". With
+ * only a banner there is nothing to read, and the hour is spent for nothing.
+ */
+void power_log_print(void);

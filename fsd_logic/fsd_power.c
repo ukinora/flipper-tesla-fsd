@@ -13,6 +13,20 @@ uint32_t fsd_pwr_quiet_ms(uint32_t now_ms, uint32_t last_rx_ms, bool seen_any) {
      * correct across the wrap. A signed comparison would briefly report a bus
      * that had been quiet for weeks. */
     uint32_t gap = now_ms - last_rx_ms;
+
+    /* 🔴 ...but the same arithmetic cannot tell "49 days elapsed" from "the
+     * stamp is 1 ms in the future", and the second one really happens: loop()
+     * samples now = millis() before draining RX, and process_frame() stamps
+     * last_rx_ms during the drain with a later millis(). The wrapped gap then
+     * clears FSD_PWR_ALWAYS_ON_MS and fsd_pwr_live_verdict() announces
+     * ALWAYS-ON -- a verdict about the car's 12V feed manufactured by a race in
+     * our own loop, in the one file whose whole job is not doing that.
+     *
+     * Anything past half the range is backwards, not elapsed: this never
+     * measures 24 days. Seen 21,113 times in a 40 s bench replay (2026-08-17),
+     * the first time this board ever received CAN. */
+    if(gap > 0x80000000u) return 0u;
+
     if(gap < FSD_PWR_QUIET_MS) return 0u;
     return gap;
 }
@@ -34,6 +48,22 @@ FsdPwrVerdict fsd_pwr_verdict(FsdPwrReset reset, const FsdPwrRecord* prev) {
         return FSD_PWR_CRASH;
 
     case FSD_PWR_RESET_POWERON:
+        /* 🔴 The trap one level below the next one. quiet_ms == 0 arrives here
+         * from TWO opposite situations, and only one of them says anything
+         * about the car:
+         *
+         *   the bus was busy right to the end  -> the car stayed awake
+         *   we never heard a single frame      -> we know nothing about the car
+         *
+         * fsd_pwr_quiet_ms() collapses the second into 0 deliberately, so that
+         * an unwired module cannot look like a sleeping car. But NO_SLEEP is a
+         * claim about the CAR, and a session that never heard the bus only ever
+         * observed the WIRING. Swap CAN-H and CAN-L at the tap -- which the
+         * checklist lists as a real possibility -- and an hour of silence gets
+         * reported as "the car never slept", sending the operator to the sentry
+         * settings for a wiring fault. */
+        if(!prev->seen_any) return FSD_PWR_NO_BUS;
+
         /* 🔴 The trap. Coming back from a power cut looks like proof of a
          * switched feed, but only if the car actually slept. Sentry left on, a
          * scheduled charge, or someone opening the app all keep the bus alive;
@@ -74,6 +104,8 @@ const char* fsd_pwr_verdict_str(FsdPwrVerdict v) {
     case FSD_PWR_ALWAYS_ON: return "ALWAYS-ON - the feed outlives the car";
     case FSD_PWR_BROWNOUT: return "BROWNOUT - check the wiring, not the switching";
     case FSD_PWR_CRASH: return "we crashed - says nothing about the supply";
+    case FSD_PWR_NO_BUS:
+        return "NO CAN HEARD - suspect the CAN pair (H/L swapped?), not the car";
     case FSD_PWR_UNKNOWN:
     default: return "no verdict yet";
     }
