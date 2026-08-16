@@ -9,6 +9,16 @@ dist/
 __pycache__/
 *.pyc
 
-# host unit-test binary (test/Makefile)
+# host unit-test binaries (test/Makefile).
+# Only test_fsd_core was listed, which was enough while these ran in CI only.
+# Building them locally (Windows/MinGW, 2026-08-17) drops seven executables here
+# — and on Windows they carry a .exe the Linux names do not.
 test/test_fsd_core
+test/test_speed_profile
+test/test_camera
+test/test_gps
+test/test_body
+test/test_button
+test/test_wire
+test/*.exe
 *.dSYM/
