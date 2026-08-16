@@ -64,6 +64,28 @@ static bool       g_can_ok[CAN_ACTIVE_BUS_COUNT] = {};       // true once begin(
 static uint32_t   g_can_last_retry_ms[CAN_ACTIVE_BUS_COUNT] = {}; // periodic re-init
 #define CAN_REINIT_INTERVAL_MS  30000u
 
+// ── Buses we deliberately do not bring up ────────────────────────────────────
+//
+// 🔴 A dead controller is NOT neutral if you leave it initialised.
+//
+// Measured 2026-08-17: with a bus that its TWAI controller could not decode,
+// can0 raised error interrupts without pause. twai_intr_handler_main preempted
+// the loop mid-SPI-read of the OTHER controller, over and over, until the
+// interrupt watchdog panicked CPU1 and rebooted the board -- in a loop. The
+// working bus was collateral damage: can1 read 39,999 frames fine on its own
+// and could not be read at all once can0 was on the same wire.
+//
+// So this is not "skip a feature we do not need". It is the difference between
+// a module that runs on one bus and a module that will not run at all.
+//
+// Bit i disables index i. Default 0 = the normal dual-bus build.
+#ifndef FSD_DISABLED_BUS_MASK
+#define FSD_DISABLED_BUS_MASK 0u
+#endif
+static inline bool can_bus_disabled(uint8_t index) {
+    return ((FSD_DISABLED_BUS_MASK) >> index) & 1u;
+}
+
 // ── OTA self-test ────────────────────────────────────────────────────────────
 //
 // 🔴 THIS OVERRIDE IS WHAT MAKES THE REST OF THE FILE RUN AT ALL.
@@ -204,6 +226,46 @@ static void serial_command_tick() {
                                   (unsigned)before,
                                   (unsigned)blackbox_capture_count());
                 }
+            } else if (serial_cmd_equals(buf, "bbfree")) {
+                uint32_t f = blackbox_free_bytes();
+                Serial.printf("[BB] 남은 공간 %lu KB · 저장된 캡처 %d 개\n",
+                              (unsigned long)(f / 1024u), blackbox_event_count());
+            } else if (strncmp(buf, "bbclear", 7) == 0) {
+                // 🔴 blackbox_delete_all() existed but had NO reachable caller:
+                // the only one was the web dashboard, removed in PR #28. Same
+                // shape as the bug PR #40 fixed, where the recorder could not
+                // be switched on. One capture fills the 3.5 MB partition, so
+                // without this the disk can only be cleared by erasing flash
+                // from a PC — after every single capture. Not a workflow that
+                // survives contact with a car.
+                //
+                // Guarded by an explicit "yes" because this deletes the ONE
+                // capture taken before the TSL comes out, and that one cannot
+                // be taken again. A typo must not be enough.
+                const char *arg = buf + 7;
+                while (*arg == ' ') arg++;
+                if (strcmp(arg, "yes") == 0) {
+                    blackbox_delete_all();
+                    Serial.printf("[BB] 저장된 캡처를 전부 지웠다 — 남은 공간 %lu KB\n",
+                                  (unsigned long)(blackbox_free_bytes() / 1024u));
+                } else {
+                    Serial.printf("[BB] ⚠️ 캡처 %d 개를 전부 지운다. 되돌릴 수 없다.\n",
+                                  blackbox_event_count());
+                    Serial.println("[BB]    먼저 폰이나 USB 로 받아 두었는지 확인한다.");
+                    Serial.println("[BB]    정말 지우려면: bbclear yes");
+                }
+            } else if (serial_cmd_equals(buf, "pwr")) {
+                // 🔴 The verdict used to exist only in the boot banner, and on
+                // this board that banner cannot be read after a physical power
+                // cycle: native USB means the boot (~400 ms) and the host's
+                // enumeration (1-2 s) race, and the boot always wins. Measured
+                // twice on the bench 2026-08-17 with a script that reopens the
+                // port every 200 ms.
+                //
+                // 차량-방문-체크리스트 A-1 ends with "plug USB back in and read
+                // the first line" -- a ONE-HOUR test in the car with nothing
+                // readable at the end of it. This is that missing line.
+                power_log_print();
             } else if (serial_cmd_equals(buf, "owner")) {
                 ble_owner_print();
             } else if (serial_cmd_equals(buf, "ownerclear")) {
@@ -231,6 +293,9 @@ static void serial_command_tick() {
                 Serial.println("[SER] Commands: ip | btnscan | btnbind <addr> | btnstat");
                 Serial.println("[SER]   bbon / bboff  — capture recorder on/off (persisted)");
                 Serial.println("[SER]   mark          — record a window around NOW");
+                Serial.println("[SER]   bbfree        — capture space left");
+                Serial.println("[SER]   bbclear yes   — delete ALL captures (irreversible)");
+                Serial.println("[SER]   pwr           — 12V verdict: switched or always-on");
                 Serial.println("[SER]   owner / ownerpair / ownerclear");
             } else {
                 Serial.println("[SER] Unknown command. Type: help");
@@ -1905,6 +1970,16 @@ void setup() {
 
     for (uint8_t i = 0; i < CAN_ACTIVE_BUS_COUNT; i++) {
         CanBusId bus = bus_id_from_index(i);
+        if (can_bus_disabled(i)) {
+            // Loud on purpose, every boot. A silently missing bus is exactly
+            // the kind of thing that gets debugged for an hour later.
+            Serial.printf("[CAN] %s DISABLED by build flag "
+                          "(FSD_DISABLED_BUS_MASK) — not initialised\n",
+                          can_bus_name(bus));
+            g_can[i] = nullptr;      // every other loop already skips a null
+            g_can_ok[i] = false;
+            continue;
+        }
         g_can[i] = can_driver_create(bus);
         g_can_ok[i] = g_can[i] && g_can[i]->begin(true);
         g_can_last_retry_ms[i] = millis();
@@ -2003,6 +2078,11 @@ void setup() {
 // Returns why the image is not acceptable yet, or nullptr when it is.
 static const char* ota_selftest_failure(void) {
     for (uint8_t i = 0; i < CAN_ACTIVE_BUS_COUNT; i++) {
+        // 🔴 A bus we chose not to bring up must not fail the self-test. Without
+        // this the image would sit in PENDING_VERIFY, never be accepted, and the
+        // bootloader would roll back to the previous firmware after five
+        // minutes — i.e. straight back to the build that crash-loops.
+        if (can_bus_disabled(i)) continue;
         if (!g_can_ok[i]) return "a CAN controller did not come up";
     }
     if (!blackbox_storage_ok()) return "storage did not mount";
@@ -2117,6 +2197,18 @@ void loop() {
         // Bus-off just fired → arm a black-box capture via the event-core (#124).
         if (g_can[i]->busOffEvent()) blackbox_busoff(now);
     }
+
+    // 🔴 Re-sample the clock. `now` was taken before the drain, and
+    // process_frame() stamps g_state.last_rx_ms with its own, later millis() —
+    // so every consumer below would compare a stamp from the FUTURE against a
+    // stale `now`, and unsigned subtraction turns that into ~49.7 days.
+    //
+    // Measured 2026-08-17, the first time this board ever received CAN: the
+    // liveness flag right below flipped 21,155 times in a 40 s replay, [PWR]
+    // announced ALWAYS-ON 21,113 times, and 60,000 lines of that buried every
+    // other message. The pure helpers now refuse a backwards delta too, but the
+    // clock is where the skew is actually created.
+    now = millis();
 
     // Bus liveness, derived once per loop — process_frame() only runs when a
     // frame arrives, so a bus that went quiet would never be noticed there.

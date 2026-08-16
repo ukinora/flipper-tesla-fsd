@@ -2208,6 +2208,20 @@ static void test_rx_stale(void) {
     CHECK(fsd_rx_is_stale(&s, 0x00000000u + 0xFF + FSD_RX_STALE_MS),
           "across the wrap, past the limit -> stale");
 
+    // 🔴 The stamp can be a hair AHEAD of `now`. loop() samples now = millis()
+    // once at the top, THEN drains RX, and process_frame() stamps last_rx_ms
+    // with its own, later millis(). Unsigned subtraction turns that 1 ms into
+    // ~49.7 days and the bus reads as stale at the exact moment it is busiest.
+    //
+    // Measured on the bench 2026-08-17, the first time this board ever received
+    // CAN: "bus quiet" / "bus back" flipped 21,155 times in a 40 s replay and
+    // buried every other line in 60,000 of serial. rx_stale gates TX, so the
+    // safety input was the opposite of the truth whenever data was flowing.
+    s.last_rx_ms = 1001;
+    CHECK(!fsd_rx_is_stale(&s, 1000), "stamp 1 ms ahead of now -> fresh, not 49 days stale");
+    s.last_rx_ms = 6000;
+    CHECK(!fsd_rx_is_stale(&s, 1000), "stamp well ahead of now -> still fresh");
+
     // Not latched: the bus coming back clears it. A car sleeping and waking is
     // normal, and a latch would need a manual reset every morning.
     s.last_rx_ms = 20000;
@@ -2245,8 +2259,12 @@ static void test_rx_stale(void) {
 static void test_power_verdict(void) {
     printf("\n-- power: switched or always-on --\n");
 
-    FsdPwrRecord slept = {true, 2400000u, 1200000u};  // up 40 min, quiet 20 min
-    FsdPwrRecord awake = {true, 2400000u, 0u};        // up 40 min, bus never quiet
+    // seen_any is spelled out: a session that reports how long the bus was
+    // quiet must, by definition, have heard the bus at some point.
+    FsdPwrRecord slept = {.valid = true, .uptime_ms = 2400000u,
+                          .quiet_ms = 1200000u, .seen_any = true};
+    FsdPwrRecord awake = {.valid = true, .uptime_ms = 2400000u,
+                          .quiet_ms = 0u, .seen_any = true};
 
     // The whole point: quiet bus, then the supply died.
     CHECK(fsd_pwr_verdict(FSD_PWR_RESET_POWERON, &slept) == FSD_PWR_SWITCHED,
@@ -2258,6 +2276,28 @@ static void test_power_verdict(void) {
     // confident answer to a question that was never asked.
     CHECK(fsd_pwr_verdict(FSD_PWR_RESET_POWERON, &awake) == FSD_PWR_NO_SLEEP,
           "power cut but the bus never went quiet -> inconclusive");
+
+    // 🔴 The same trap one level down. "Never heard a frame" also arrives here
+    // as quiet_ms == 0 -- fsd_pwr_quiet_ms() returns 0 in that case on purpose,
+    // so that a module which was never wired to the car cannot look like a car
+    // that fell asleep. But NO_SLEEP is a claim about the CAR, and this session
+    // only ever observed the WIRING.
+    //
+    // Concretely: CAN-H and CAN-L swapped at the tap. The module hears nothing
+    // for an hour, the car sleeps, the feed dies. Reporting "the car never
+    // slept" sends the operator to the sentry settings for a wiring fault, and
+    // the checklist already flags H/L reversal as a real possibility.
+    FsdPwrRecord never_heard = {.valid = true, .uptime_ms = 2400000u,
+                                .quiet_ms = 0u, .seen_any = false};
+    CHECK(fsd_pwr_verdict(FSD_PWR_RESET_POWERON, &never_heard) == FSD_PWR_NO_BUS,
+          "power cut and we never heard the bus -> blame the pair, not the car");
+
+    // A sagging supply does not need the bus to be heard: the rail is the
+    // evidence. Silence must not downgrade a brownout into a wiring guess.
+    FsdPwrRecord sag_no_bus = {.valid = true, .uptime_ms = 60000u,
+                               .quiet_ms = 0u, .seen_any = false};
+    CHECK(fsd_pwr_verdict(FSD_PWR_RESET_BROWNOUT, &sag_no_bus) == FSD_PWR_BROWNOUT,
+          "brownout stands on its own even if no frame was ever heard");
 
     // A sagging supply is a wiring verdict, not a switching one. Thin tap wire,
     // a cold crimp, or an e-fuse near its limit all land here, and all of them
@@ -2272,7 +2312,8 @@ static void test_power_verdict(void) {
           "reset pin says nothing about the supply");
 
     // Nothing recorded yet -- first boot, or NVS cleared.
-    FsdPwrRecord none = {false, 0u, 0u};
+    FsdPwrRecord none = {.valid = false, .uptime_ms = 0u, .quiet_ms = 0u,
+                         .seen_any = false};
     CHECK(fsd_pwr_verdict(FSD_PWR_RESET_POWERON, &none) == FSD_PWR_UNKNOWN,
           "no record -> unknown");
     CHECK(fsd_pwr_verdict(FSD_PWR_RESET_POWERON, NULL) == FSD_PWR_UNKNOWN,
@@ -2291,7 +2332,7 @@ static void test_power_verdict(void) {
     // Every value has to be printable, or the serial line reports a number.
     for (int r = 0; r <= FSD_PWR_RESET_EXTERNAL; r++)
         CHECK(fsd_pwr_reset_str((FsdPwrReset)r)[0] != '\0', "reset %d has a name", r);
-    for (int v = 0; v <= FSD_PWR_CRASH; v++)
+    for (int v = 0; v <= FSD_PWR_NO_BUS; v++)
         CHECK(fsd_pwr_verdict_str((FsdPwrVerdict)v)[0] != '\0', "verdict %d has a name", v);
 }
 
@@ -2322,6 +2363,17 @@ static void test_power_quiet_ms(void) {
           fsd_pwr_quiet_ms(50u, 0xFFFFFF00u, true));
 
     // ... and a long one across the wrap is reported as the whole gap.
+    // 🔴 Same race as fsd_rx_is_stale(): loop() hands us a `now` sampled before
+    // the RX drain, and last_rx_ms is stamped during it. One millisecond of
+    // skew becomes ~49.7 days, and fsd_pwr_live_verdict() then announces
+    // ALWAYS-ON -- a verdict about the car's 12V feed manufactured by a race in
+    // our own loop. Seen 21,113 times in a 40 s bench replay (2026-08-17).
+    CHECK(fsd_pwr_quiet_ms(1000u, 1001u, true) == 0u,
+          "stamp 1 ms ahead of now -> not quiet, got %u",
+          fsd_pwr_quiet_ms(1000u, 1001u, true));
+    CHECK(fsd_pwr_live_verdict(fsd_pwr_quiet_ms(1000u, 1001u, true)) == FSD_PWR_UNKNOWN,
+          "a backwards delta must not manufacture ALWAYS-ON");
+
     CHECK(fsd_pwr_quiet_ms(20000u, 0xFFFFFF00u, true) == 20256u,
           "long gap across the wrap, got %u",
           fsd_pwr_quiet_ms(20000u, 0xFFFFFF00u, true));

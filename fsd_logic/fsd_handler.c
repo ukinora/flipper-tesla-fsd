@@ -47,7 +47,24 @@ bool fsd_rx_is_stale(const FSDState* state, uint32_t now_ms) {
     // stamp as "just now" would hand out a free TX window for the first
     // FSD_RX_STALE_MS after boot, so call it stale instead.
     if(state->last_rx_ms == 0) return true;
-    return (uint32_t)(now_ms - state->last_rx_ms) >= FSD_RX_STALE_MS;
+
+    uint32_t gap = (uint32_t)(now_ms - state->last_rx_ms);
+
+    /* 🔴 The stamp can sit AHEAD of now_ms. loop() samples now = millis() once
+     * at the top and THEN drains RX, and process_frame() stamps last_rx_ms with
+     * its own, later millis(). Unsigned subtraction turns that one millisecond
+     * into ~49.7 days, so the bus reads as STALE at the exact moment it is
+     * busiest -- and rx_stale gates TX.
+     *
+     * Anything past half the range is a backwards delta, not elapsed time:
+     * nothing here measures 24 days. Treat it as "a frame just landed", which
+     * is what it actually means.
+     *
+     * Measured 2026-08-17, the first time this board ever received CAN: "bus
+     * quiet"/"bus back" flipped 21,155 times during a 40 s replay. */
+    if(gap > 0x80000000u) return false;
+
+    return gap >= FSD_RX_STALE_MS;
 }
 
 bool fsd_can_transmit(const FSDState* state) {

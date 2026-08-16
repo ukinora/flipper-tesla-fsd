@@ -152,3 +152,13 @@ size_t blackbox_read_chunk(const char* name, bool json, size_t offset,
 bool   blackbox_latest_name(char* out, size_t cap);
 bool   blackbox_delete(const char* name);
 void   blackbox_delete_all();
+
+/** Free bytes left for captures, 0xFFFFFFFF when the backend does not police it.
+ *
+ * 🔴 One capture is about 3 MB against a 3.5 MB partition (measured
+ * 2026-08-17), so "how much room is left" is not a curiosity — it is the
+ * difference between the next `mark` working and being refused. */
+uint32_t blackbox_free_bytes();
+
+/** How many captures are stored on disk right now. */
+int blackbox_event_count();
