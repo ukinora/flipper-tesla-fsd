@@ -25,17 +25,50 @@
 // so main.cpp / prefs.cpp share one source of truth.
 
 // ── Tunable window ───────────────────────────────────────────────────────────
+// 6 s total, split 5 pre / 1 post (was 10/5 = 15 s; changed 2026-08-17).
+//
+// Why shrink: capture bytes are linear in window length, and on this fork both
+// costs that matter are bytes. Measured 2026-08-17 on the bench —
+//   * a 15 s window filled the whole 40000-frame ring: ~3.1 MB claimed against
+//     a 3.5 MB partition, i.e. ONE capture on disk and the next one refused;
+//   * BLE download runs 8-14 KB/s, so that capture takes 3.5-6 minutes to pull.
+// The car procedure (차량-방문-체크리스트.md B-2.5) is three repeats per action,
+// A and B sets, many actions — at 15 s that is hours of downloading, with a
+// delete-between-every-capture dance because only one fits.
+//
+// Why the split is lopsided rather than 3/3: for BB_TRIG_MANUAL — the trigger
+// the pre-teardown TSL capture actually uses — the operator performs the action
+// and THEN reaches for `mark`. The pre-roll is the evidence; the post-roll holds
+// nothing but the operator's own hand. So the pre-roll gets what is left after
+// giving the post-roll the minimum that keeps a flush honest.
+//
+// 🔴 The cost is the operator's reaction budget: 5 s from the end of the action
+// to `mark`, not 10 s. Overrun it and the capture still succeeds, still
+// downloads, and simply does not contain the gesture — which for the one-shot
+// pre-teardown capture is discovered at home, after the TSL is out. blackbox_arm()
+// therefore prints the pre-roll, and the field checklist states the budget.
+// If it turns out to be too tight in the car, this is a build flag:
+//     build_flags = -D BLACKBOX_PRE_MS=8000
 #ifndef BLACKBOX_PRE_MS
-#define BLACKBOX_PRE_MS   10000u   // pre-roll kept before the trigger
+#define BLACKBOX_PRE_MS    5000u   // pre-roll kept before the trigger
 #endif
 #ifndef BLACKBOX_POST_MS
-#define BLACKBOX_POST_MS   5000u   // post-roll recorded after the trigger
+#define BLACKBOX_POST_MS   1000u   // post-roll recorded after the trigger
 #endif
+// Floors, not preferences. A pre-roll under ~2 s cannot span a human noticing
+// they finished the action and pressing the button, so a manual capture would
+// systematically miss what it exists to record. A post-roll under ~500 ms lands
+// inside one loop() period, so blackbox_tick() can flush before any post-trigger
+// frame arrives — and blackbox_mark()'s "ms until the file exists" return value
+// would tell the app to download a file that is not written yet.
+static_assert(BLACKBOX_PRE_MS  >= 2000u, "pre-roll too short to hold a human reaction");
+static_assert(BLACKBOX_POST_MS >= 500u,  "post-roll too short: flush races the loop");
 // Ring capacity in frames @ 19 B/frame (BBFrame carries a 1-byte RX/TX tag).
-// PSRAM (runtime-detected) holds a full ~15 s window at a busy bus rate. The
-// internal-RAM fallback must cover the window on its own — PSRAM is never
+// PSRAM (runtime-detected) holds the window many times over at a busy bus rate.
+// The internal-RAM fallback must cover the window on its own — PSRAM is never
 // required and no build enables it:
-//   - S3-class (512 KB SRAM): 6000 frames ≈ 114 KB → ≥15 s even at ~400 f/s.
+//   - S3-class (512 KB SRAM): 6000 frames ≈ 114 KB → ≥15 s even at ~400 f/s,
+//     so it covers the 6 s window with room to spare.
 //     Only paired with the persistent disk backends here, which stream the ring
 //     straight to file (no frozen copy), so the ring is the whole footprint.
 //   - Classic ESP32: 3000 frames ≈ 57 KB safety cap. These are the volatile
@@ -365,8 +398,8 @@ static uint32_t bb_free_bytes() {
 
 /* Would this capture fit? Answering NO is a feature.
  *
- * 🔴 A 15 s window on a busy bus is tens of thousands of frames, so ONE capture
- * can be 1.5-2 MB against a 3.5 MB partition -- two of them fill it. And
+ * 🔴 Even a 6 s window on a busy bus is thousands of frames, so a capture is
+ * still ~1 MB against a 3.5 MB partition -- a few of them fill it. And
  * retention cannot rescue us: bb_enforce_retention() deliberately never deletes
  * a MANUAL capture, because the one-shot capture taken before the TSL comes out
  * must not be evicted by a later automatic one. Correct, and it means that once
@@ -768,7 +801,7 @@ static void bb_record(CanBusId bus, const CanFrame& frame, uint32_t now_ms, uint
     if (g_cap == 0 || g_state == nullptr || !g_state->blackbox_enabled) return;
     // Store only the key diagnostic IDs (fsd_blackbox_filter.h). On a busy full
     // bus (~3300 f/s) recording everything fills the ring in ~1.8 s, truncating
-    // the 10 s pre / 5 s post window; the filter drops the stored rate ~15x so
+    // the 5 s pre / 1 s post window; the filter drops the stored rate ~15x so
     // the whole window survives. Define BLACKBOX_CAPTURE_ALL to keep every frame.
     if (!fsd_blackbox_should_record(frame.id)) return;
     if (ring_next(g_head) == g_tail) g_tail = ring_next(g_tail);  // evict oldest
@@ -808,8 +841,12 @@ void blackbox_arm(BBTrigger trig, const FSDState* snap, uint32_t now_ms) {
     g_trig_ms = now_ms;
     g_flush_at_ms = now_ms + BLACKBOX_POST_MS;
     if (snap) g_snap = *snap; else g_snap = *g_state;
-    Serial.printf("[BB] armed by %s @ %lums — post-roll %ums\n",
-                  trig_name_uc(trig), (unsigned long)now_ms, BLACKBOX_POST_MS);
+    // Both halves of the window, not just the post-roll. At the car the pre-roll
+    // is the number the operator needs: it is how long they had between finishing
+    // the action and pressing `mark`, and nothing later in the flow reveals it.
+    Serial.printf("[BB] armed by %s @ %lums — window %ums pre / %ums post\n",
+                  trig_name_uc(trig), (unsigned long)now_ms,
+                  BLACKBOX_PRE_MS, BLACKBOX_POST_MS);
 }
 
 void blackbox_busoff(uint32_t now_ms) {
