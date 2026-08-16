@@ -337,6 +337,56 @@ static void backend_init() {
 
 // Persist one event. `frame_count`/per-bus counts already computed by the caller;
 // `write` is invoked to stream candump lines into the open .log.
+/* Bytes a stored frame costs on disk. MEASURED, not estimated.
+ *
+ * 2026-08-17: a freshly formatted 3.5 MB partition, one capture of 39,999
+ * frames, 536 KB left afterwards -> ~75 bytes per frame once the candump line,
+ * the .json summary and LittleFS overhead are all counted. The line itself
+ * ("(0.000000) can1 3C2#0102030405060708\n") is only ~45 of that.
+ *
+ * 80 rounds that UP on purpose: this number only ever gates "do we have room",
+ * and refusing one capture too early is much cheaper than corrupting the
+ * filesystem. An estimate that is too LOW is the dangerous direction -- it lets
+ * a write start that cannot finish. */
+#define BB_BYTES_PER_LINE 80u
+
+/* Never fill the last of the partition. LittleFS needs room to manoeuvre and
+ * its behaviour at the very edge is what bit us. */
+#define BB_STORE_MARGIN   (64u * 1024u)
+
+static uint32_t bb_free_bytes() {
+#if defined(BLACKBOX_BACKEND_LITTLEFS)
+    size_t total = BB_FS.totalBytes(), used = BB_FS.usedBytes();
+    return (total > used) ? (uint32_t)(total - used) : 0u;
+#else
+    return 0xFFFFFFFFu;   // SD: not our problem to police
+#endif
+}
+
+/* Would this capture fit? Answering NO is a feature.
+ *
+ * 🔴 A 15 s window on a busy bus is tens of thousands of frames, so ONE capture
+ * can be 1.5-2 MB against a 3.5 MB partition -- two of them fill it. And
+ * retention cannot rescue us: bb_enforce_retention() deliberately never deletes
+ * a MANUAL capture, because the one-shot capture taken before the TSL comes out
+ * must not be evicted by a later automatic one. Correct, and it means that once
+ * manual captures fill the disk, nothing is deletable.
+ *
+ * Writing anyway is not a soft failure. Running LittleFS out of room while it
+ * is mid-write leaves the filesystem inconsistent, and after that EVERY capture
+ * fails -- observed 2026-08-17, when the allocator started dividing by zero and
+ * panicked the board. Refusing early keeps what is already saved. */
+static bool bb_store_fits(uint32_t frames, size_t json_len, const char* base) {
+    uint32_t need = frames * BB_BYTES_PER_LINE + (uint32_t)json_len + BB_STORE_MARGIN;
+    uint32_t have = bb_free_bytes();
+    if (have >= need) return true;
+    Serial.printf("[BB] 🔴 저장 거부 %s — 약 %lu KB 필요한데 %lu KB 남았다\n",
+                  base, (unsigned long)(need / 1024u), (unsigned long)(have / 1024u));
+    Serial.println("[BB]    캡처를 폰/USB 로 먼저 빼낸 뒤 지우고 다시 시도한다.");
+    Serial.println("[BB]    (수동 캡처는 자동으로 지워지지 않는다 — 일부러 그렇게 뒀다)");
+    return false;
+}
+
 static void backend_store(const char* base, const char* json,
                           void (*emit)(File&)) {
     if (!g_fs_ok) return;
@@ -412,6 +462,26 @@ static void backend_stream_body(WiFiClient& client, const char* name, bool json)
 }
 #endif
 
+/* ⚠️ SLOW, AND DELIBERATELY LEFT THAT WAY FOR NOW (2026-08-17).
+ *
+ * Open + seek + read + close on EVERY chunk. Measured over BLE: a 1,320,604 B
+ * capture took 1 min 21 s — **13.9 KB/s**, roughly a seventh of what MTU 255
+ * allows. At ~250 B per chunk that is 5,300 open/seek/close cycles, and
+ * LittleFS seek walks a CTZ skip-list from the start of the file, so it gets
+ * SLOWER the further the transfer goes. The transfer is strictly sequential;
+ * we re-derive a position we were just at.
+ *
+ * 🔴 A cached sequential handle WAS tried the same day and BROKE THE TRANSFER:
+ * `[BLE] bulk start … (1320604 B)` appeared and then nothing — not one chunk
+ * went out, and the phone gave up after its 5 s stall timeout. Reverted rather
+ * than left half-working, because this path is the ONLY way a capture leaves
+ * the module (the web dashboard that used to be the other one went in PR #28),
+ * and the TSL capture cannot be taken twice.
+ *
+ * Whoever picks this up: instrument the pump first. The evidence says
+ * ble_bulk_pump() ran but `g_ch_bulk->notify()` never succeeded — read_chunk
+ * returning 0 would have printed "bulk done", and it did not. Find out why
+ * notify started failing before changing this function again. */
 static size_t backend_read_chunk(const char* name, bool json, size_t offset,
                                  uint8_t* out, size_t cap) {
     if (!g_fs_ok || !out || cap == 0) return 0;
@@ -889,6 +959,7 @@ static void do_flush() {
     }
 
 #if defined(BLACKBOX_BACKEND_LITTLEFS) || defined(BLACKBOX_BACKEND_SD)
+    if (!bb_store_fits(count, strlen(json), base)) return;   // nothing written
     g_emit_lo = lo; g_emit_hi = hi;
     backend_store(base, json, disk_emit);
 #else
@@ -911,6 +982,18 @@ static void do_flush() {
     g_captures++;
     Serial.printf("[BB] flushed %s  frames=%lu (can0=%lu can1=%lu)\n",
                   base, (unsigned long)count, (unsigned long)bus0, (unsigned long)bus1);
+#if defined(BLACKBOX_BACKEND_LITTLEFS)
+    /* Say how much room is left, every time. Without this the operator only
+     * finds out at the moment a capture is refused -- which in the car is the
+     * one moment there is no time to deal with it. */
+    {
+        uint32_t have = bb_free_bytes();
+        uint32_t per  = (count ? count : 1u) * BB_BYTES_PER_LINE;
+        Serial.printf("[BB] 남은 공간 %lu KB — 이만한 캡처 약 %lu 개분\n",
+                      (unsigned long)(have / 1024u),
+                      (unsigned long)(per ? (have / per) : 0u));
+    }
+#endif
 }
 
 void blackbox_tick(uint32_t now_ms) {
@@ -997,6 +1080,10 @@ bool blackbox_delete(const char* name) {
 }
 
 void blackbox_delete_all() { backend_delete_all(); }
+
+uint32_t blackbox_free_bytes() { return bb_free_bytes(); }
+
+int blackbox_event_count() { return backend_count(); }
 
 bool blackbox_storage_ok() {
 #if defined(BLACKBOX_BACKEND_LITTLEFS) || defined(BLACKBOX_BACKEND_SD)
