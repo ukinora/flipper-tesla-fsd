@@ -1081,7 +1081,20 @@ bool blackbox_delete(const char* name) {
 
 void blackbox_delete_all() { backend_delete_all(); }
 
-uint32_t blackbox_free_bytes() { return bb_free_bytes(); }
+uint32_t blackbox_free_bytes() {
+    // 🔴 bb_free_bytes() only exists inside the LittleFS/SD section. The RAM
+    // backend has no filesystem to run out of — the ring IS the storage — so
+    // there is nothing to police and 0xFFFFFFFF ("plenty") is the honest answer.
+    //
+    // Broke five boards in CI when this called bb_free_bytes() unguarded
+    // (2026-08-17). The board we use builds LittleFS, so a local build said
+    // nothing.
+#if defined(BLACKBOX_BACKEND_LITTLEFS) || defined(BLACKBOX_BACKEND_SD)
+    return bb_free_bytes();
+#else
+    return 0xFFFFFFFFu;
+#endif
+}
 
 int blackbox_event_count() { return backend_count(); }
 
