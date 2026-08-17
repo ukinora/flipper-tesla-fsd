@@ -80,6 +80,10 @@ static FsdBusHealth g_can_health[CAN_ACTIVE_BUS_COUNT] = {};
 // cable being seated, the operator has to touch the car anyway.
 static bool       g_can_stormed[CAN_ACTIVE_BUS_COUNT] = {};
 
+// Defined further down, next to the other CAN helpers; declared here because the
+// serial command table above needs it.
+static void debug_log_bus_stats();
+
 // ── Buses we deliberately do not bring up ────────────────────────────────────
 //
 // 🔴 A dead controller is NOT neutral if you leave it initialised.
@@ -242,6 +246,8 @@ static void serial_command_tick() {
                                   (unsigned)before,
                                   (unsigned)blackbox_capture_count());
                 }
+            } else if (serial_cmd_equals(buf, "canstat")) {
+                debug_log_bus_stats();
             } else if (serial_cmd_equals(buf, "canquar")) {
                 can_quar_print();
             } else if (serial_cmd_equals(buf, "canclear")) {
@@ -385,6 +391,7 @@ static void serial_command_tick() {
                 Serial.println("[SER] Commands: ip | btnscan | btnbind <addr> | btnstat");
                 Serial.println("[SER]   bbon / bboff  — capture recorder on/off (persisted)");
                 Serial.println("[SER]   mark          — record a window around NOW");
+                Serial.println("[SER]   canstat       — 버스별 RX/TX/오류 (어느 버스가 받았나)");
                 Serial.println("[SER]   canquar       — CAN 버스 격리 상태");
                 Serial.println("[SER]   canclear      — 격리 해제 (다음 부팅부터)");
                 Serial.println("[SER]   bbfree        — capture space left");
@@ -738,17 +745,41 @@ static GearSequenceSendResult arm_gear_ap_double_press_sequence(uint32_t now) {
     return gear_sequence_tick(now, "CONT-AP");
 }
 
-#if defined(CAN_DRIVER_T2CAN_DUAL)
+/* Per-bus counters — the answer to "which bus actually received that?".
+ *
+ * 🔴 This existed with NO caller until 2026-08-17, and the cost was a full day.
+ * The only per-bus evidence available was the black-box flush line, which needs
+ * `bbon` -> traffic -> `mark` -> wait for the post-roll, and the obvious-looking
+ * alternative is a trap:
+ *
+ *     [CAN] bus back — TX allowed
+ *
+ * reads like a per-bus liveness report and is NOT. It is derived from
+ * g_state.last_rx_ms, a SINGLE timestamp stamped by process_frame() for any bus
+ * (see the liveness block in loop()). With both connectors on one bench bus it
+ * fires when EITHER controller hears something, so a dead bus and a healthy one
+ * produce identical output. An external review used exactly that line to certify
+ * a channel that receives nothing.
+ *
+ * Reachable as `canstat`. Loops over CAN_ACTIVE_BUS_COUNT so it is honest on
+ * single-bus boards too, and prints null drivers as "off" rather than as zeros
+ * that look like a live-but-silent bus. */
 static void debug_log_bus_stats() {
-    Serial.printf("[CAN] RX can0=%lu can1=%lu TX can0=%lu can1=%lu Err can0=%lu can1=%lu\n",
-                  (unsigned long)(g_can[0] ? g_can[0]->rxCount() : 0),
-                  (unsigned long)(g_can[1] ? g_can[1]->rxCount() : 0),
-                  (unsigned long)(g_can[0] ? g_can[0]->txCount() : 0),
-                  (unsigned long)(g_can[1] ? g_can[1]->txCount() : 0),
-                  (unsigned long)(g_can[0] ? g_can[0]->errorCount() : 0),
-                  (unsigned long)(g_can[1] ? g_can[1]->errorCount() : 0));
+    for (uint8_t i = 0; i < CAN_ACTIVE_BUS_COUNT; i++) {
+        const char *name = can_bus_name(bus_id_from_index(i));
+        if (!g_can[i]) {
+            Serial.printf("[CAN] %s: 꺼져 있다 (빌드 플래그 또는 격리)\n", name);
+            continue;
+        }
+        Serial.printf("[CAN] %s: RX=%lu TX=%lu Err=%lu %s\n",
+                      name,
+                      (unsigned long)g_can[i]->rxCount(),
+                      (unsigned long)g_can[i]->txCount(),
+                      (unsigned long)g_can[i]->errorCount(),
+                      g_can_ok[i] ? (g_can[i]->isListenOnly() ? "Listen-Only" : "Active")
+                                  : "초기화 실패");
+    }
 }
-#endif
 
 static const char *hw_to_str(TeslaHWVersion hw) {
     switch (hw) {
@@ -2359,7 +2390,14 @@ void loop() {
         bool heard = (g_state.rx_count > 0);  // suppress the boot-time edge
         state_exit();
         if (changed && heard) {
-            Serial.printf("[CAN] bus %s\n", stale ? "quiet — TX held off" : "back — TX allowed");
+            // "any bus" is not decoration. This is ONE global timestamp
+            // (g_state.last_rx_ms), stamped by process_frame() for whichever
+            // controller heard something. With two connectors on one bus a dead
+            // controller and a healthy one produce identical output — which is
+            // how an external review certified a channel that receives nothing
+            // (2026-08-17). Per-bus evidence is `canstat`.
+            Serial.printf("[CAN] any bus %s  (버스별은 'canstat')\n",
+                          stale ? "quiet — TX held off" : "back — TX allowed");
         }
     }
 
