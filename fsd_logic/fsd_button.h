@@ -50,12 +50,17 @@ extern "C" {
 
 /* How many buttons are tracked at once.
  *
- * 8 because the plan is up to eight single-button remotes, one logical button
- * each (2026-08-18) — ble_central.cpp maps slot index straight to button index,
- * so BLE_CENTRAL_MAX_BUTTONS and this must agree. The cost is one FsdBtnState
- * per slot, which is a couple of dozen bytes. */
+ * 5 single-button remotes, one logical button each — ble_central.cpp maps slot
+ * index straight to button index, so BLE_CENTRAL_MAX_BUTTONS and this must
+ * agree. The cost is one FsdBtnState per slot, a couple of dozen bytes.
+ *
+ * 🔴 The number comes from the RADIO, not from this file. The Arduino core's
+ * prebuilt controller allows six simultaneous links and the phone holds one.
+ * It was 8 for a day (2026-08-18) and that boot-looped the board — the
+ * static_assert that now catches it lives in esp32/.firmware/ble_central.h,
+ * because that is where the budget is visible. */
 #ifndef FSD_BTN_MAX
-#define FSD_BTN_MAX 8
+#define FSD_BTN_MAX 5
 #endif
 
 /* Shorter than this is contact bounce or a dropped report, not a press. */

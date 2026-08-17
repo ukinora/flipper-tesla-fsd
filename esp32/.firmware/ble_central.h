@@ -71,11 +71,49 @@
 /** How many remotes can be bound at once. Slot index IS the logical button
  *  index, so this and FSD_BTN_MAX are the same number.
  *
- *  Eight is the radio's ceiling, not a target: the ESP controller allows nine
- *  simultaneous links and the phone holds one. Bind only what is used — every
- *  extra link is radio time the phone's transfers give up. */
+ *  🔴 FIVE IS MEASURED, NOT CHOSEN. The Arduino core ships a controller built
+ *  for six simultaneous links (CONFIG_BT_CTRL_BLE_MAX_ACT=6) and the phone
+ *  holds one of them. This was 8 for a day, which boot-looped the board — see
+ *  the static_assert below.
+ *
+ *  Bind only what is used even so: every extra link is radio time the phone's
+ *  transfers give up, and the one-shot TSL capture goes over that link. */
 #ifndef BLE_CENTRAL_MAX_BUTTONS
-#define BLE_CENTRAL_MAX_BUTTONS 8
+#define BLE_CENTRAL_MAX_BUTTONS 5
+#endif
+
+/* ── The slot count is not free. It is spent out of the radio's link budget ──
+ *
+ * 🔴 This was a boot loop, not a warning (2026-08-18). Asking NimBLE for more
+ * links than the controller was BUILT with gives
+ *
+ *     E BLE_INIT: Invalid value of ble_max_act
+ *     assert failed: npl_freertos_mutex_pend
+ *
+ * every boot, forever. The controller is a PREBUILT library in the Arduino
+ * core: CONFIG_BT_CTRL_BLE_MAX_ACT is fixed at compile time of that library and
+ * a -D of ours cannot move it. Nothing warned — it built clean and shipped.
+ *
+ * So the relationship is made a compile error instead. Note it is NOT the same
+ * as "does it boot": a too-large MAX_CONNECTIONS still boots (measured: 7 boots
+ * fine on a controller built for 6) and then the extra remote simply never
+ * connects, with nothing in the log. Booting proves nothing here.
+ *
+ * The phone holds one link at all times, hence the +1. */
+#if defined(BLE_SERVER_ENABLED) && defined(CONFIG_BT_NIMBLE_MAX_CONNECTIONS)
+
+static_assert(BLE_CENTRAL_MAX_BUTTONS + 1 <= CONFIG_BT_NIMBLE_MAX_CONNECTIONS,
+              "BLE_CENTRAL_MAX_BUTTONS + the phone exceeds "
+              "CONFIG_BT_NIMBLE_MAX_CONNECTIONS (platformio.ini)");
+
+#ifdef CONFIG_BT_CTRL_BLE_MAX_ACT
+static_assert(CONFIG_BT_NIMBLE_MAX_CONNECTIONS <= CONFIG_BT_CTRL_BLE_MAX_ACT,
+              /* ASCII only: the toolchain escapes non-ASCII in this message,
+                 and this is read at the moment something is already wrong. */
+              "CONFIG_BT_NIMBLE_MAX_CONNECTIONS exceeds the PREBUILT controller "
+              "(CONFIG_BT_CTRL_BLE_MAX_ACT) - this boot-loops the board");
+#endif
+
 #endif
 
 #ifdef BLE_SERVER_ENABLED
