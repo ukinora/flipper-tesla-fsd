@@ -2181,6 +2181,7 @@ static void test_blackbox_filter(void) {
     CHECK(fsd_blackbox_should_record(0x3E2u), "0x3E2 map light state");
     CHECK(fsd_blackbox_should_record(0x119u), "0x119 window requests (T2 output cand.)");
     CHECK(fsd_blackbox_should_record(0x3E9u), "0x3E9 DAS_bodyControls (body actuation)");
+    CHECK(fsd_blackbox_should_record(0x249u), "0x249 SCCM_leftStalk (wash/wipe trigger cand.)");
 
     // Chatty non-diagnostic frames are dropped (the ~15x rate cut).
     CHECK(!fsd_blackbox_should_record(CAN_ID_BMS_HV_BUS),  "0x132 BMS dropped");
