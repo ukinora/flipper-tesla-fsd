@@ -230,6 +230,75 @@ static void serial_command_tick() {
                 uint32_t f = blackbox_free_bytes();
                 Serial.printf("[BB] 남은 공간 %lu KB · 저장된 캡처 %d 개\n",
                               (unsigned long)(f / 1024u), blackbox_event_count());
+            } else if (serial_cmd_equals(buf, "bbread")) {
+                // Diagnostic: time the capture READ path with no radio in it.
+                //
+                // The BLE download measures 8-14 KB/s and the standing
+                // explanation was "blackbox_read_chunk() reopens and reseeks the
+                // file for every chunk". That was never measured -- and a fix
+                // built on it (cache the handle) broke downloads outright and
+                // had to be reverted. So measure before touching anything: this
+                // pumps the same chunks the BLE pump would, and whatever it
+                // reports is the ceiling the radio can never exceed.
+                //
+                // Two numbers, because they answer different questions:
+                //   seek@offset — one read at 0/25/50/75%. If reopen+seek is the
+                //                 cost, this grows with offset (LittleFS walks a
+                //                 CTZ skip list from the start of the file).
+                //   sequential  — sustained KB/s over a bounded run.
+                char nm[40];
+                size_t total = 0;
+                if (!blackbox_latest_name(nm, sizeof(nm))) {
+                    Serial.println("[BB] 캡처가 없다 — 먼저 mark 한다");
+                } else if (!blackbox_file_size(nm, false, &total) || total == 0) {
+                    Serial.printf("[BB] %s.log 크기를 못 읽었다\n", nm);
+                } else {
+                    static uint8_t rbuf[BLE_BULK_MAX_PAYLOAD];
+                    Serial.printf("[BB] read test %s.log (%lu B, chunk %u B)\n",
+                                  nm, (unsigned long)total,
+                                  (unsigned)sizeof(rbuf));
+                    for (int q = 0; q < 4; q++) {
+                        size_t off = (total / 4u) * (size_t)q;
+                        uint32_t a = micros();
+                        size_t n = blackbox_read_chunk(nm, false, off, rbuf,
+                                                       sizeof(rbuf));
+                        uint32_t dt = micros() - a;
+                        uint32_t o = 0, sk = 0, rd = 0, cl = 0;
+                        blackbox_read_phases(nm, false, off, &o, &sk, &rd, &cl);
+                        Serial.printf("[BB]   @%3d%% off=%-8lu %lu us  "
+                                      "(open %lu / seek %lu / read %lu / close %lu) %u B\n",
+                                      q * 25, (unsigned long)off,
+                                      (unsigned long)dt, (unsigned long)o,
+                                      (unsigned long)sk, (unsigned long)rd,
+                                      (unsigned long)cl, (unsigned)n);
+                    }
+                    // Bounded so a slow path cannot stall loop() indefinitely --
+                    // BLE notifies and the recorder tick both live here.
+                    const uint32_t BUDGET_MS = 10000u;
+                    size_t off = 0, chunks = 0;
+                    uint32_t t0 = millis(), worst = 0;
+                    while (off < total && (millis() - t0) < BUDGET_MS) {
+                        uint32_t a = micros();
+                        size_t n = blackbox_read_chunk(nm, false, off, rbuf,
+                                                       sizeof(rbuf));
+                        uint32_t dt = micros() - a;
+                        if (dt > worst) worst = dt;
+                        if (n == 0) break;
+                        off += n;
+                        chunks++;
+                    }
+                    uint32_t ms = millis() - t0;
+                    if (ms == 0) ms = 1;
+                    Serial.printf("[BB]   sequential %lu B in %lu ms = %lu KB/s"
+                                  "  (%lu chunks, worst %lu us)\n",
+                                  (unsigned long)off, (unsigned long)ms,
+                                  (unsigned long)(off / ms * 1000u / 1024u),
+                                  (unsigned long)chunks, (unsigned long)worst);
+                    if (off < total)
+                        Serial.printf("[BB]   (%lu B 남기고 %lu ms 예산 소진)\n",
+                                      (unsigned long)(total - off),
+                                      (unsigned long)BUDGET_MS);
+                }
             } else if (strncmp(buf, "bbclear", 7) == 0) {
                 // 🔴 blackbox_delete_all() existed but had NO reachable caller:
                 // the only one was the web dashboard, removed in PR #28. Same
@@ -294,6 +363,7 @@ static void serial_command_tick() {
                 Serial.println("[SER]   bbon / bboff  — capture recorder on/off (persisted)");
                 Serial.println("[SER]   mark          — record a window around NOW");
                 Serial.println("[SER]   bbfree        — capture space left");
+                Serial.println("[SER]   bbread        — time the capture read path (no BLE)");
                 Serial.println("[SER]   bbclear yes   — delete ALL captures (irreversible)");
                 Serial.println("[SER]   pwr           — 12V verdict: switched or always-on");
                 Serial.println("[SER]   owner / ownerpair / ownerclear");

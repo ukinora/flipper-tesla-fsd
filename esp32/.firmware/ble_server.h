@@ -147,6 +147,18 @@
 // ~500 B per notification and a 23-byte default still works, just slowly.
 #define BLE_BULK_MAX_PAYLOAD   500u
 #define BLE_BULK_CHUNKS_PER_TICK 4u
+/* Minimum gap between bursts, in ms — the capture download's speed limit.
+ *
+ * BLE_BULK_CHUNKS_PER_TICK notifications go out per burst, so this sets the
+ * notification RATE, which is what actually breaks: Android silently drops
+ * notifications above a few hundred per second and there is no ATT ack to
+ * notice it. Measured 2026-08-17 — unpaced (~650/s) lost frames mid-transfer;
+ * 4 per 20 ms is ~200/s.
+ *
+ * Raise it if a capture still arrives with a sequence gap. Lower it only with a
+ * full download to prove it, and remember the traffic that matters is a capture
+ * that cannot be recorded a second time. */
+#define BLE_BULK_TICK_MS         20u
 
 // ── Upload framing (Upload characteristic, write) ────────────────────────────
 // The mirror image of Bulk: the phone pushes camera.bin to the module. The
