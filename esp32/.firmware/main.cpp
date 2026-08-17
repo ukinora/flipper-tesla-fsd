@@ -2289,6 +2289,15 @@ void loop() {
         // a controller that cannot decode what it hears and interrupts forever,
         // which no recovery path addresses — the board simply dies (see the
         // FSD_DISABLED_BUS_MASK comment for the measurement).
+        //
+        // ⚠️ In practice this only ever fires on a TWAI bus, and that is fine.
+        // The MCP2515 driver's errorCount() counts TX failures only
+        // (can_driver.cpp), and we run Listen-Only, so its counter never moves —
+        // the guard is inert on that channel. It is inert where it is not
+        // needed: the MCP is polled over SPI, so a bus it cannot read degrades
+        // to "no frames", which the liveness gate already handles. It is TWAI
+        // whose interrupt handler can starve the loop and take the board down.
+        // Do not read a healthy `can1` here as evidence the guard works.
         if (fsd_bus_sample(&g_can_health[i], g_can[i]->errorCount(), millis())
                 == FSD_BUS_STORM) {
             Serial.printf("[CAN] 🔴 %s 에러 폭주 — 이 버스를 내린다 "
