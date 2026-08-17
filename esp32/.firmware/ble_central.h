@@ -45,6 +45,39 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* ── Sizes, defined for EVERY board ───────────────────────────────────────────
+ *
+ * 🔴 These live ABOVE the #ifdef on purpose. Do not move them inside it.
+ *
+ * The stub branch below keeps the whole API callable on boards without BLE, so
+ * a caller can loop over the slots without guarding — and capability.cpp and
+ * main.cpp both do exactly that. If the count only exists on the BLE side, the
+ * call still compiles there and the LOOP BOUND does not, which is how seven of
+ * the eight board builds broke at once (2026-08-18).
+ *
+ * Only lilygo-t2can defines BLE_SERVER_ENABLED, so a local build of our own
+ * board proves nothing about this. */
+
+/** How many scan results are kept for the app to read. */
+#ifndef BLE_CENTRAL_MAX_FOUND
+#define BLE_CENTRAL_MAX_FOUND 8
+#endif
+
+/** Default scan length when a caller does not say. */
+#ifndef BLE_CENTRAL_SCAN_SECS
+#define BLE_CENTRAL_SCAN_SECS 5
+#endif
+
+/** How many remotes can be bound at once. Slot index IS the logical button
+ *  index, so this and FSD_BTN_MAX are the same number.
+ *
+ *  Eight is the radio's ceiling, not a target: the ESP controller allows nine
+ *  simultaneous links and the phone holds one. Bind only what is used — every
+ *  extra link is radio time the phone's transfers give up. */
+#ifndef BLE_CENTRAL_MAX_BUTTONS
+#define BLE_CENTRAL_MAX_BUTTONS 8
+#endif
+
 #ifdef BLE_SERVER_ENABLED
 
 /** Start the client. Call after ble_server_init() — NimBLEDevice::init() must
@@ -55,18 +88,49 @@ void ble_central_init(void);
 void ble_central_tick(uint32_t now_ms);
 
 /** Scan for `secs` and print what is found. On demand only — scanning costs
- *  radio time the server shares. Returns false if a scan is already running. */
+ *  radio time the server shares. Returns false if a scan is already running.
+ *
+ *  🔴 BLOCKS for `secs`. Never call this from a BLE callback — use
+ *  ble_central_request_scan() there. */
 bool ble_central_scan(uint8_t secs);
 
-/** Remember this peer and connect to it. Address is "aa:bb:cc:dd:ee:ff".
- *  Persisted, so a button survives the car sleeping. Empty string forgets. */
-bool ble_central_bind(const char* addr_str);
+/** Park a scan for loop() to run. Safe from a BLE characteristic callback. */
+void ble_central_request_scan(uint8_t secs);
 
-/** The bound address, or "" when none. */
-const char* ble_central_bound_addr(void);
+/** True while a parked scan is running. */
+bool ble_central_scanning(void);
 
-/** True while a button is connected. */
-bool ble_central_connected(void);
+/** How many devices the last scan kept (capped at BLE_CENTRAL_MAX_FOUND). */
+uint8_t ble_central_found_count(void);
+
+/** Read one result. Pointers stay valid until the next scan. */
+bool ble_central_found(uint8_t i, const char** addr, const char** name, int8_t* rssi);
+
+/** Bind an address into the first free slot. Returns the slot, or -1 when all
+ *  are taken. Re-binding an address already held returns its existing slot
+ *  rather than consuming a second one. Persisted. */
+int ble_central_add(const char* addr_str);
+
+/** Bind the Nth device from the last scan. Returns the slot, or -1. */
+int ble_central_add_found(uint8_t scan_index);
+
+/** Drop one slot: disconnect, free the client, clear NVS. */
+bool ble_central_forget(uint8_t slot);
+
+/** Drop every slot. */
+void ble_central_forget_all(void);
+
+/** Address bound to a slot, or "" when the slot is free. */
+const char* ble_central_slot_addr(uint8_t slot);
+
+/** Whether that slot's remote is connected right now. */
+bool ble_central_slot_connected(uint8_t slot);
+
+/** How many slots hold an address. */
+uint8_t ble_central_bound_count(void);
+
+/** True when at least one remote is connected. */
+bool ble_central_any_connected(void);
 
 /** Raw-report logging: prints every notification as hex. On by default until a
  *  report layout is confirmed, because that log IS the measurement. */
@@ -76,15 +140,26 @@ void ble_central_set_verbose(bool on);
 uint16_t ble_central_notify_count(void);
 uint16_t ble_central_short_presses(void);
 uint16_t ble_central_long_presses(void);
+uint16_t ble_central_double_presses(void);
 
 #else // no BLE on this variant
 
 static inline void ble_central_init(void) {}
 static inline void ble_central_tick(uint32_t) {}
 static inline bool ble_central_scan(uint8_t) { return false; }
-static inline bool ble_central_bind(const char*) { return false; }
-static inline const char* ble_central_bound_addr(void) { return ""; }
-static inline bool ble_central_connected(void) { return false; }
+static inline void ble_central_request_scan(uint8_t) {}
+static inline bool ble_central_scanning(void) { return false; }
+static inline uint8_t ble_central_found_count(void) { return 0; }
+static inline bool ble_central_found(uint8_t, const char**, const char**, int8_t*) { return false; }
+static inline uint16_t ble_central_double_presses(void) { return 0; }
+static inline int ble_central_add(const char*) { return -1; }
+static inline int ble_central_add_found(uint8_t) { return -1; }
+static inline bool ble_central_forget(uint8_t) { return false; }
+static inline void ble_central_forget_all(void) {}
+static inline const char* ble_central_slot_addr(uint8_t) { return ""; }
+static inline bool ble_central_slot_connected(uint8_t) { return false; }
+static inline uint8_t ble_central_bound_count(void) { return 0; }
+static inline bool ble_central_any_connected(void) { return false; }
 static inline void ble_central_set_verbose(bool) {}
 static inline uint16_t ble_central_notify_count(void) { return 0; }
 static inline uint16_t ble_central_short_presses(void) { return 0; }

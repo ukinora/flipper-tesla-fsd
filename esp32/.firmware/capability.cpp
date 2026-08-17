@@ -6,6 +6,7 @@
  * Pure RX / read-only — never transmits.
  */
 
+#include "ble_central.h"
 #include "capability.h"
 #include "config.h"
 #include "../../fsd_logic/fsd_capability.h"  // fsd_capability_eval
@@ -119,7 +120,7 @@ String capability_status_json() {
     }
 
     String j;
-    j.reserve(896);
+    j.reserve(1536); // + buttons
     j  = "{";
     j += "\"state\":";   j += (int)st;       j += ',';
     j += "\"ms_left\":"; j += ms_left;       j += ',';
@@ -162,6 +163,46 @@ String capability_status_json() {
         j += "\"hw_unconfirmed\":"; j += r.hw_unconfirmed ? "true" : "false"; j += ',';
         j += "\"hint\":\"";         j += hint_str(r.bus_hint);  j += "\"}";
     }
-    j += "]}";
+    j += "],";
+
+    /* Bluetooth buttons.
+     *
+     * 🔴 This document is where scan results reach the phone. A separate
+     * characteristic would have been tidier, but this one already answers
+     * "what does the module see" and the app already re-reads it on demand —
+     * and the alternative was the app having no way at all, which is what it
+     * had. The scan itself is a command (BLE_CMD_BTN_SCAN); this is the answer.
+     *
+     * `verified` is the same gate ble_central.cpp applies to reports: false
+     * means a press is a log line and nothing more. The app must not present a
+     * bound button as working while it is false. */
+    j += "\"buttons\":{";
+    j += "\"scanning\":"; j += ble_central_scanning() ? "true" : "false"; j += ',';
+    j += "\"connected\":"; j += ble_central_any_connected() ? "true" : "false"; j += ',';
+    j += "\"verified\":false,";
+    j += "\"bound\":[";
+    for (uint8_t i = 0; i < BLE_CENTRAL_MAX_BUTTONS; i++) {
+        const char* a = ble_central_slot_addr(i);
+        if (!a || !a[0]) continue;
+        if (j[j.length() - 1] != '[') j += ',';
+        j += "{\"slot\":";      j += (int)i; j += ',';
+        j += "\"addr\":\"";    j += a;      j += "\",";
+        j += "\"connected\":";  j += ble_central_slot_connected(i) ? "true" : "false";
+        j += '}';
+    }
+    j += "],";
+    j += "\"slots\":"; j += (int)BLE_CENTRAL_MAX_BUTTONS; j += ','; 
+    j += "\"found\":[";
+    for (uint8_t i = 0; i < ble_central_found_count(); i++) {
+        const char* addr = "";
+        const char* name = "";
+        int8_t rssi = 0;
+        if (!ble_central_found(i, &addr, &name, &rssi)) break;
+        if (i) j += ',';
+        j += "{\"addr\":\""; j += addr;  j += "\",";
+        j += "\"name\":\"";  j += name;  j += "\",";
+        j += "\"rssi\":";     j += (int)rssi; j += '}';
+    }
+    j += "]}}";
     return j;
 }

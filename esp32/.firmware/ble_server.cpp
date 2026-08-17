@@ -20,6 +20,7 @@
 #include "../../fsd_logic/fsd_autonomy.h"
 #include "../../fsd_logic/fsd_wire.h"
 #include "blackbox.h"
+#include "ble_central.h"
 #include "ble_owner.h"
 #include "camera_store.h"
 #include "camera_task.h"
@@ -122,6 +123,19 @@ static volatile uint8_t  g_mode_req         = 0;
 // so like SET_MODE these are applied from loop() and answered with what really
 // happened rather than with what was asked for.
 static volatile bool     g_bb_req_pending   = false;
+
+/* Button bind, parked for loop().
+ *
+ * ble_central_add() writes NVS, and ble_central.cpp states the rule outright:
+ * "Both callers are the serial console and the loop task, never a BLE
+ * callback".
+ *
+ * Encoding, so one slot carries both requests:
+ *    >= 0   bind the Nth device from the last scan
+ *      -1   forget every slot
+ *   -2 - N  forget slot N  */
+static volatile int16_t  g_btn_req          = 0;
+static volatile bool     g_btn_req_pending  = false;
 static volatile uint8_t  g_bb_req           = 0;
 static volatile bool     g_bb_mark_pending  = false;
 // Declared size of the camera.bin currently being uploaded (0 = none).
@@ -387,6 +401,32 @@ static void ble_bulk_pump(uint32_t now_ms) {
             ble_send_result(BLE_CMD_DUMP_START, BLE_RES_OK, (uint16_t)(g_bulk_seq));
         }
     }
+}
+
+/* Apply a parked button bind, and answer with what actually happened.
+ *
+ * Runs from loop(), which is where NVS writes belong. The answer carries the
+ * index so a late reply cannot be mistaken for a different request. */
+static void ble_apply_btn_request(void) {
+    if (!g_btn_req_pending) return;
+    const int16_t idx = g_btn_req;
+    g_btn_req_pending = false;
+
+    bool ok;
+    uint8_t cmd;
+    if (idx >= 0) {
+        ok  = ble_central_add_found((uint8_t)idx) >= 0;
+        cmd = BLE_CMD_BTN_BIND;
+    } else if (idx == -1) {
+        ble_central_forget_all();
+        ok  = true;
+        cmd = BLE_CMD_BTN_FORGET;
+    } else {
+        ok  = ble_central_forget((uint8_t)(-2 - idx));
+        cmd = BLE_CMD_BTN_FORGET;
+    }
+    ble_send_result(cmd, ok ? BLE_RES_OK : BLE_RES_REJECTED,
+                    (uint16_t)(idx < 0 ? 0 : idx));
 }
 
 // Apply a SET_MODE the BLE task parked for us, and answer with the truth.
@@ -661,6 +701,27 @@ class CommandCB : public NimBLECharacteristicCallbacks {
             g_mode_req_pending = true;
             break;
         }
+
+        case BLE_CMD_BTN_SCAN:
+            /* Only parks a flag, so it is safe here — the scan itself blocks for
+             * seconds and runs on loop(). Results land in the capability JSON. */
+            ble_central_request_scan(arg);
+            ble_send_result(cmd, BLE_RES_OK, arg ? arg : BLE_CENTRAL_SCAN_SECS);
+            break;
+
+        case BLE_CMD_BTN_BIND:
+            if (g_btn_req_pending) { ble_send_result(cmd, BLE_RES_BUSY, 0); break; }
+            g_btn_req         = (int16_t)arg;
+            g_btn_req_pending = true;
+            break;
+
+        case BLE_CMD_BTN_FORGET:
+            // arg = slot to drop; 0xFF drops every slot.
+            if (g_btn_req_pending) { ble_send_result(cmd, BLE_RES_BUSY, 0); break; }
+            g_btn_req         = (arg == 0xFFu) ? (int16_t)-1
+                                               : (int16_t)(-2 - (int16_t)arg);
+            g_btn_req_pending = true;
+            break;
 
         case BLE_CMD_CAP_RECHECK:
             capability_start(millis());
@@ -988,6 +1049,7 @@ void ble_server_tick(uint32_t now_ms) {
     // over 5 Hz chunks would take minutes.
     ble_bulk_pump(now_ms);
     ble_apply_mode_request();      // answers only after the driver moved
+    ble_apply_btn_request();       // NVS write belongs on this task, not the BLE one
     ble_apply_blackbox_request();
     ble_refresh_capability();
     ble_revoke_active_if_stale(now_ms);

@@ -65,6 +65,19 @@
 #define BLE_CMD_SET_AUTONOMY 0x41u  // arg: 0/1 — operator intent, persisted
 #define BLE_CMD_PING         0x50u
 
+/* ── Bluetooth button (BLE Central) ───────────────────────────────────────────
+ *
+ * 🔴 These exist because the button was reachable only over USB. ble_central.cpp
+ * has had scan/bind since PR #21, but only as SERIAL commands — and the phone
+ * has no serial port, so the app's button screen had nothing to call.
+ *
+ * The results are published in the capability JSON rather than a new
+ * characteristic: that document already answers "what does the module see",
+ * and the app already re-reads it on demand. */
+#define BLE_CMD_BTN_SCAN     0x60u  // arg: seconds (0 = default). Runs on loop().
+#define BLE_CMD_BTN_BIND     0x61u  // arg: index into the last scan's results
+#define BLE_CMD_BTN_FORGET   0x62u  // arg: slot to drop, 0xFF = all
+
 // ── Camera / autonomy status (read + notify) ─────────────────────────────────
 // A separate characteristic rather than more bytes in State: State is a fixed
 // 20 and full, and widening it would bump the wire version for every client.

@@ -50,6 +50,19 @@ FsdBtnEvent fsd_btn_report(FsdButtons* b, uint8_t idx, bool pressed, uint32_t no
         return FSD_BTN_EV_NONE; // already reported as a LONG while held
     }
 
+    /* This IS a short press. Whether it is reported now depends on whether a
+     * twin might still be coming — see fsd_button.h. */
+    if(s->want_double) {
+        if(s->tap_pending) {
+            s->tap_pending = false;
+            s->doubles++;
+            return FSD_BTN_EV_DOUBLE;
+        }
+        s->tap_pending = true;
+        s->pending_ms = now_ms;
+        return FSD_BTN_EV_NONE; // withheld; fsd_btn_tick() releases it
+    }
+
     s->shorts++;
     return FSD_BTN_EV_SHORT;
 }
@@ -57,7 +70,20 @@ FsdBtnEvent fsd_btn_report(FsdButtons* b, uint8_t idx, bool pressed, uint32_t no
 FsdBtnEvent fsd_btn_tick(FsdButtons* b, uint8_t idx, uint32_t now_ms) {
     if(!b || idx >= FSD_BTN_MAX) return FSD_BTN_EV_NONE;
     FsdBtnState* s = &b->btn[idx];
-    if(!s->down || s->stuck) return FSD_BTN_EV_NONE;
+
+    /* A withheld tap is only released while the button is UP. If it is down
+     * again the second press is still in progress, and letting the window
+     * expire underneath it would produce a SHORT and then a DOUBLE from one
+     * gesture — the mapped action would fire twice. */
+    if(!s->down) {
+        if(s->tap_pending && (uint32_t)(now_ms - s->pending_ms) >= FSD_BTN_DOUBLE_MS) {
+            s->tap_pending = false;
+            s->shorts++;
+            return FSD_BTN_EV_SHORT;
+        }
+        return FSD_BTN_EV_NONE;
+    }
+    if(s->stuck) return FSD_BTN_EV_NONE;
 
     const uint32_t held = (uint32_t)(now_ms - s->down_ms);
 
@@ -66,14 +92,28 @@ FsdBtnEvent fsd_btn_tick(FsdButtons* b, uint8_t idx, uint32_t now_ms) {
     if(held >= FSD_BTN_STUCK_MS) {
         s->stuck = true;
         s->last_hold_ms = clamp16(held);
+        s->tap_pending = false; // a wedged button does not complete a gesture
         return FSD_BTN_EV_STUCK;
     }
     if(!s->long_fired && held >= FSD_BTN_LONG_MS) {
         s->long_fired = true;
         s->longs++;
+        /* Tap-then-hold is a hold. Dropping the waiting tap loses it, which is
+         * better than surfacing it after the LONG: one gesture, one event. */
+        s->tap_pending = false;
         return FSD_BTN_EV_LONG;
     }
     return FSD_BTN_EV_NONE;
+}
+
+void fsd_btn_set_double(FsdButtons* b, uint8_t idx, bool on) {
+    if(!b || idx >= FSD_BTN_MAX) return;
+    b->btn[idx].want_double = on;
+    if(!on) b->btn[idx].tap_pending = false; // nothing left to wait for
+}
+
+bool fsd_btn_double_enabled(const FsdButtons* b, uint8_t idx) {
+    return (b && idx < FSD_BTN_MAX) ? b->btn[idx].want_double : false;
 }
 
 bool fsd_btn_is_stuck(const FsdButtons* b, uint8_t idx) {
@@ -86,6 +126,9 @@ uint16_t fsd_btn_shorts(const FsdButtons* b, uint8_t idx) {
 }
 uint16_t fsd_btn_longs(const FsdButtons* b, uint8_t idx) {
     return (b && idx < FSD_BTN_MAX) ? b->btn[idx].longs : 0;
+}
+uint16_t fsd_btn_doubles(const FsdButtons* b, uint8_t idx) {
+    return (b && idx < FSD_BTN_MAX) ? b->btn[idx].doubles : 0;
 }
 uint16_t fsd_btn_bounces(const FsdButtons* b, uint8_t idx) {
     return (b && idx < FSD_BTN_MAX) ? b->btn[idx].bounces : 0;
@@ -100,6 +143,7 @@ const char* fsd_btn_event_str(FsdBtnEvent e) {
     case FSD_BTN_EV_SHORT: return "short";
     case FSD_BTN_EV_LONG: return "long";
     case FSD_BTN_EV_STUCK: return "stuck";
+    case FSD_BTN_EV_DOUBLE: return "double";
     }
     return "?";
 }

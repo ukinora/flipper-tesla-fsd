@@ -13,15 +13,24 @@
  *
  * The caller says "button N is down / up, at time T". This says what that was.
  *
- * NO DOUBLE-PRESS, DELIBERATELY
- * -----------------------------
- * Supporting it would cost every SHORT press a delay of the double-press window
- * — a tap could not be reported until we knew a second one was not coming. For
- * "step the speed profile" that latency is the whole feel of the control, and
- * LONG already provides a second action per button without costing anything.
+ * DOUBLE-PRESS IS OPT-IN, PER BUTTON
+ * ----------------------------------
+ * This file used to refuse double-press outright, and the reasoning was sound:
+ * supporting it costs every SHORT the width of the window, because a tap cannot
+ * be reported until a second one is known not to be coming. For "step the speed
+ * profile" that latency is the whole feel of the control.
  *
- * (T2's gesture detector does implement double-press, on a car button we do not
- * own and cannot change. Different problem: there the two taps ARE the signal.)
+ * The reasoning still holds — so the COST is opt-in rather than the feature
+ * being absent. fsd_btn_set_double() turns it on for one button, and only that
+ * button pays. A button with nothing mapped to a double press behaves exactly
+ * as it did: SHORT on release, no delay, byte for byte the same path.
+ *
+ * Turn it on only where a second action is actually mapped. "It might be useful
+ * later" is not a reason to make every tap wait.
+ *
+ * (T2's gesture detector implements its own double-press, on a car button we do
+ * not own and cannot change. Different problem: there the two taps ARE the
+ * signal, and there is no latency budget to protect.)
  *
  * WHAT A PRESS DOES TODAY
  * -----------------------
@@ -39,10 +48,14 @@
 extern "C" {
 #endif
 
-/* How many buttons are tracked at once. A remote with up/down is two; the cap
- * exists so the struct has a size, not because four is a target. */
+/* How many buttons are tracked at once.
+ *
+ * 8 because the plan is up to eight single-button remotes, one logical button
+ * each (2026-08-18) — ble_central.cpp maps slot index straight to button index,
+ * so BLE_CENTRAL_MAX_BUTTONS and this must agree. The cost is one FsdBtnState
+ * per slot, which is a couple of dozen bytes. */
 #ifndef FSD_BTN_MAX
-#define FSD_BTN_MAX 4
+#define FSD_BTN_MAX 8
 #endif
 
 /* Shorter than this is contact bounce or a dropped report, not a press. */
@@ -59,11 +72,20 @@ extern "C" {
  * by an actual release. */
 #define FSD_BTN_STUCK_MS 10000u
 
+/* How long a tap waits for its twin, on buttons where double-press is enabled.
+ * Shorter than FSD_BTN_LONG_MS on purpose: a hold must still be a hold, and the
+ * wait a person feels on a single tap is exactly this number. */
+#define FSD_BTN_DOUBLE_MS 300u
+
 typedef enum {
     FSD_BTN_EV_NONE = 0,
     FSD_BTN_EV_SHORT, // pressed and released inside the long threshold
     FSD_BTN_EV_LONG,  // still held at the long threshold; fires once
     FSD_BTN_EV_STUCK, // held past all reason; fires once, then silence
+    /* Two qualifying taps inside FSD_BTN_DOUBLE_MS. Only on buttons where
+     * fsd_btn_set_double() turned it on — appended last so the existing values
+     * do not shift. */
+    FSD_BTN_EV_DOUBLE,
 } FsdBtnEvent;
 
 typedef struct {
@@ -71,8 +93,12 @@ typedef struct {
     uint32_t down_ms;
     bool long_fired;
     bool stuck;
+    bool want_double;    // opt-in; false means the old, undelayed path
+    bool tap_pending;    // a SHORT is being withheld while its twin might arrive
+    uint32_t pending_ms; // when that tap was released
     uint16_t shorts;
     uint16_t longs;
+    uint16_t doubles;
     uint16_t bounces; // presses too brief to count — a link-quality signal
     uint16_t last_hold_ms;
 } FsdBtnState;
@@ -101,9 +127,20 @@ FsdBtnEvent fsd_btn_tick(FsdButtons* b, uint8_t idx, uint32_t now_ms);
  *  seen to release. */
 bool fsd_btn_is_stuck(const FsdButtons* b, uint8_t idx);
 
+/** Watch for double presses on this button. OFF after init.
+ *
+ *  Turning it on delays THIS button's SHORT by FSD_BTN_DOUBLE_MS — the tap can
+ *  only be reported once a second one is known not to be coming. Other buttons
+ *  are unaffected. Turning it off drops any tap that is currently waiting. */
+void fsd_btn_set_double(FsdButtons* b, uint8_t idx, bool on);
+
+/** Whether this button is watching for double presses. */
+bool fsd_btn_double_enabled(const FsdButtons* b, uint8_t idx);
+
 /** Counters, for the serial line and a future BLE surface. */
 uint16_t fsd_btn_shorts(const FsdButtons* b, uint8_t idx);
 uint16_t fsd_btn_longs(const FsdButtons* b, uint8_t idx);
+uint16_t fsd_btn_doubles(const FsdButtons* b, uint8_t idx);
 uint16_t fsd_btn_bounces(const FsdButtons* b, uint8_t idx);
 uint16_t fsd_btn_last_hold_ms(const FsdButtons* b, uint8_t idx);
 
