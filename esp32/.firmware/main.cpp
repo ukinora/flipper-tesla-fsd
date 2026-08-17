@@ -2155,10 +2155,20 @@ void setup() {
             Serial.println("[CAN] 500 kbps — Listen-Only");
         }
     }
+    // 🔴 The banner used to print the NAG and LED lines unconditionally, so on
+    // a board with FSD_NAG_KILLER_ENABLED=0 and no LED it advertised two things
+    // that do not exist. Boot output is the first thing anyone reads when a
+    // board misbehaves; a line that is false there costs real time, and this
+    // repo has already lost a day to a diagnostic that did not know what it was
+    // ("[CAN] bus back" read as per-bus when it is global).
     Serial.println("[BTN] Single click : toggle Listen-Only / Active");
+#if FSD_NAG_KILLER_ENABLED
     Serial.println("[BTN] Long press 3s: toggle NAG Killer");
+#endif
     Serial.println("[BTN] Double click : toggle BMS serial output");
+#if PIN_LED >= 0
     Serial.println("[LED] Blue=Listen  Green=Active  Yellow=OTA  Red=Error");
+#endif
 
     // ── WiFi + Web dashboard (non-fatal if WiFi fails) ───────────────────────
 #if defined(FSD_NO_WIFI)
