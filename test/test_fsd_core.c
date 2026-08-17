@@ -22,6 +22,7 @@
 #include "fsd_can_ops.h"
 #include "fsd_blackbox_filter.h"
 #include "fsd_blackbox_summary.h"
+#include "fsd_bushealth.h"
 #include "fsd_readcache.h"
 #include "fsd_capability.h"
 #include "fsd_capture.h"
@@ -2244,6 +2245,110 @@ static void test_readcache(void) {
           "long names that differ only at the tail do not alias");
 }
 
+// ── CAN error-storm guard ───────────────────────────────────────────────────
+// 🔴 Measured 2026-08-17: a controller that could not decode its bus raised
+// error interrupts without pause, preempted the loop mid-SPI-read of the OTHER
+// controller, and the interrupt watchdog rebooted the board — in a loop. The
+// healthy bus was unusable purely because the sick one shared the board.
+//
+// This decides when to give up on a bus. Both directions cost something real:
+// missing a storm loses the whole module, and a false alarm shuts down a
+// working bus — and at the car either one loses the one-shot capture. So the
+// uncertain cases are pinned here rather than left to judgement.
+static void test_bus_storm(void) {
+    FsdBusHealth h;
+    fsd_bus_reset(&h);
+
+    // The first sample has nothing to subtract from — it must never accuse.
+    CHECK(fsd_bus_sample(&h, 1000000u, 1000u) == FSD_BUS_OK,
+          "first sample only takes a baseline");
+
+    // A window shorter than the minimum is not judged; a handful of errors in a
+    // few ms is a bus hiccup, not a storm.
+    CHECK(fsd_bus_sample(&h, 1000999u, 1000u + FSD_BUS_WINDOW_MS - 1u) == FSD_BUS_OK,
+          "short window is not judged");
+
+    // Sustained storm: FSD_BUS_STRIKES bad windows in a row, and not one sooner.
+    fsd_bus_reset(&h);
+    uint32_t t = 0, e = 0;
+    fsd_bus_sample(&h, e, t);
+    for (uint32_t i = 1; i <= FSD_BUS_STRIKES; i++) {
+        t += FSD_BUS_WINDOW_MS;
+        e += FSD_BUS_ERR_PER_S * 10u;          // far over the limit
+        FsdBusVerdict v = fsd_bus_sample(&h, e, t);
+        if (i < FSD_BUS_STRIKES)
+            CHECK(v == FSD_BUS_OK, "strike %u of %u must not fire yet",
+                  i, FSD_BUS_STRIKES);
+        else
+            CHECK(v == FSD_BUS_STORM, "sustained storm fires on strike %u", i);
+    }
+
+    // One clean window clears the strikes — otherwise a bus that hiccuped once
+    // per minute would eventually be shut down for no reason.
+    fsd_bus_reset(&h);
+    t = 0; e = 0;
+    fsd_bus_sample(&h, e, t);
+    for (uint32_t i = 0; i < FSD_BUS_STRIKES - 1u; i++) {
+        t += FSD_BUS_WINDOW_MS; e += FSD_BUS_ERR_PER_S * 10u;
+        fsd_bus_sample(&h, e, t);
+    }
+    t += FSD_BUS_WINDOW_MS;                    // clean window, no new errors
+    CHECK(fsd_bus_sample(&h, e, t) == FSD_BUS_OK, "clean window is OK");
+    t += FSD_BUS_WINDOW_MS; e += FSD_BUS_ERR_PER_S * 10u;
+    CHECK(fsd_bus_sample(&h, e, t) == FSD_BUS_OK,
+          "one bad window after a clean one does not fire — strikes reset");
+
+    // A quiet bus never fires, however long it runs.
+    fsd_bus_reset(&h);
+    t = 0;
+    fsd_bus_sample(&h, 0u, t);
+    for (int i = 0; i < 50; i++) {
+        t += FSD_BUS_WINDOW_MS * 2u;
+        CHECK(fsd_bus_sample(&h, 0u, t) == FSD_BUS_OK, "silent bus stays OK");
+    }
+
+    // 🔴 The counter is per driver-installation, so a reinstall makes it go
+    // BACKWARDS. Read as an unsigned delta that is a colossal rate and would
+    // shut down a bus we just successfully brought back up.
+    fsd_bus_reset(&h);
+    fsd_bus_sample(&h, 5000u, 0u);
+    CHECK(fsd_bus_sample(&h, 3u, FSD_BUS_WINDOW_MS) == FSD_BUS_OK,
+          "counter going backwards re-baselines instead of accusing");
+    // ...and the re-baseline must be usable: a storm right after still fires.
+    t = FSD_BUS_WINDOW_MS; e = 3u;
+    for (uint32_t i = 1; i <= FSD_BUS_STRIKES; i++) {
+        t += FSD_BUS_WINDOW_MS; e += FSD_BUS_ERR_PER_S * 10u;
+        if (i == FSD_BUS_STRIKES)
+            CHECK(fsd_bus_sample(&h, e, t) == FSD_BUS_STORM,
+                  "still detects a storm after a re-baseline");
+        else
+            fsd_bus_sample(&h, e, t);
+    }
+
+    // Exactly at the threshold is not a storm — the limit is what is allowed.
+    fsd_bus_reset(&h);
+    t = 0; e = 0;
+    fsd_bus_sample(&h, e, t);
+    for (int i = 0; i < 10; i++) {
+        t += 1000u;                             // exactly one second
+        e += FSD_BUS_ERR_PER_S;                 // exactly the allowed rate
+        CHECK(fsd_bus_sample(&h, e, t) == FSD_BUS_OK, "at the limit is allowed");
+    }
+
+    // Fires once, not every window after. The caller shuts the bus down on the
+    // verdict; repeating it would spam the log and re-run the shutdown path.
+    fsd_bus_reset(&h);
+    t = 0; e = 0;
+    fsd_bus_sample(&h, e, t);
+    for (uint32_t i = 0; i < FSD_BUS_STRIKES; i++) {
+        t += FSD_BUS_WINDOW_MS; e += FSD_BUS_ERR_PER_S * 10u;
+        fsd_bus_sample(&h, e, t);
+    }
+    t += FSD_BUS_WINDOW_MS; e += FSD_BUS_ERR_PER_S * 10u;
+    CHECK(fsd_bus_sample(&h, e, t) == FSD_BUS_OK,
+          "verdict is not repeated on the very next window");
+}
+
 // ── bus liveness gate ───────────────────────────────────────────────────────
 // rx_count only grows, so it cannot tell a quiet bus from a busy one. A pulled
 // connector or a sleeping gateway must hold TX off — transmitting into a bus we
@@ -3057,6 +3162,7 @@ int main(void) {
     test_profile_db();
     test_blackbox_summary();
     test_readcache();
+    test_bus_storm();
     test_can_ops();
     test_additive_checksum();
     test_candump_format();

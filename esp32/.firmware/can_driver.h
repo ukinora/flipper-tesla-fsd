@@ -94,6 +94,19 @@ public:
      *  Deactivate/Activate toggle. No-op while the bus is healthy. */
     virtual void serviceHealth() {}
 
+    /** Stop this controller and release it. Not usable again until begin().
+     *
+     *  Exists for the error-storm guard (fsd_bushealth.h): a TWAI controller
+     *  that cannot decode its bus interrupts without pause and takes the whole
+     *  board down, healthy bus included, so the only cure is to take it off the
+     *  bus entirely — stopping the polling is not enough when the damage comes
+     *  from its interrupt handler.
+     *
+     *  Default no-op, which is the honest behaviour for a polled SPI controller:
+     *  there is no interrupt storm to silence, and the caller has already
+     *  stopped reading it. */
+    virtual void shutdown() {}
+
     virtual ~CanDriver() = default;
 };
 

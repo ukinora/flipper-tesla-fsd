@@ -22,6 +22,7 @@
 #include "can_signals.h"
 #include "fsd_handler.h"
 #include "../../fsd_logic/fsd_autonomy.h"
+#include "../../fsd_logic/fsd_bushealth.h"
 #include "../../fsd_logic/fsd_selftest.h"
 #include "can_driver.h"
 #include "led.h"
@@ -63,6 +64,20 @@ static CanDriver *g_can[CAN_ACTIVE_BUS_COUNT] = {};
 static bool       g_can_ok[CAN_ACTIVE_BUS_COUNT] = {};       // true once begin() succeeds
 static uint32_t   g_can_last_retry_ms[CAN_ACTIVE_BUS_COUNT] = {}; // periodic re-init
 #define CAN_REINIT_INTERVAL_MS  30000u
+
+// Error-storm guard, one per bus (fsd_bushealth.h). A controller that cannot
+// decode its bus interrupts without pause and takes the whole board down with
+// it — including the healthy bus. When one trips, we shut it down and stay up
+// on the other.
+static FsdBusHealth g_can_health[CAN_ACTIVE_BUS_COUNT] = {};
+// 🔴 Latched for this power cycle, deliberately.
+//
+// The periodic re-init below exists to rescue a bus that failed at boot, and
+// without this flag it would happily bring a storming controller straight back
+// every 30 s — re-entering the exact failure it was just pulled out of, forever.
+// A power cycle re-tries, which is the right granularity: if the cause was a
+// cable being seated, the operator has to touch the car anyway.
+static bool       g_can_stormed[CAN_ACTIVE_BUS_COUNT] = {};
 
 // ── Buses we deliberately do not bring up ────────────────────────────────────
 //
@@ -2266,6 +2281,26 @@ void loop() {
         g_can[i]->serviceHealth();
         // Bus-off just fired → arm a black-box capture via the event-core (#124).
         if (g_can[i]->busOffEvent()) blackbox_busoff(now);
+
+        // 🔴 Error storm → drop this bus before it drops the board.
+        //
+        // Bus-off above is a different thing: that is the controller taking
+        // itself off the wire after too many TX errors, and it recovers. This is
+        // a controller that cannot decode what it hears and interrupts forever,
+        // which no recovery path addresses — the board simply dies (see the
+        // FSD_DISABLED_BUS_MASK comment for the measurement).
+        if (fsd_bus_sample(&g_can_health[i], g_can[i]->errorCount(), millis())
+                == FSD_BUS_STORM) {
+            Serial.printf("[CAN] 🔴 %s 에러 폭주 — 이 버스를 내린다 "
+                          "(그대로 두면 보드가 재부팅을 반복한다)\n",
+                          can_bus_name(bus));
+            Serial.println("[CAN]    배선을 확인한다: H/L 반대, 종단, 비트레이트.");
+            Serial.println("[CAN]    다른 버스는 계속 동작한다. 되살리려면 전원을 껐다 켠다.");
+            g_can[i]->shutdown();
+            g_can_ok[i] = false;
+            g_can_stormed[i] = true;
+            continue;   // nothing more to do with this bus this tick
+        }
     }
 
     // 🔴 Re-sample the clock. `now` was taken before the drain, and
@@ -2383,7 +2418,9 @@ void loop() {
 
     // ── Periodic re-init when a CAN driver failed at boot ────────────────────
     for (uint8_t i = 0; i < CAN_ACTIVE_BUS_COUNT; i++) {
-        if (!g_can_ok[i] && g_can[i] &&
+        // A stormed bus is NOT retried — see g_can_stormed. Bringing it back
+        // walks straight into the failure it was pulled out of.
+        if (!g_can_ok[i] && !g_can_stormed[i] && g_can[i] &&
             (now - g_can_last_retry_ms[i]) >= CAN_REINIT_INTERVAL_MS) {
             g_can_last_retry_ms[i] = now;
             Serial.printf("[CAN] Retrying %s driver init...\n",

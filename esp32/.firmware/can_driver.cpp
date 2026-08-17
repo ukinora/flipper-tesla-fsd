@@ -116,6 +116,10 @@ public:
         return info.rx_missed_count + info.bus_error_count + info.tx_failed_count;
     }
 
+    // Take the controller off the bus for good (this power cycle). The storm
+    // guard calls this; uninstalling is what actually stops the interrupts.
+    void shutdown() override { stop_and_uninstall(); }
+
     // Bus-off auto-recovery. Without this, once TX errors push the TWAI TEC past
     // the limit the controller goes BUS_OFF and twai_receive() stops returning
     // frames forever (RX frames/s drops to 0) until a manual mode toggle reinstalls

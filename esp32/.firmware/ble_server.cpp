@@ -945,6 +945,26 @@ void ble_server_init(FSDState *state, portMUX_TYPE *state_mux) {
     NimBLEAdvertising *adv = NimBLEDevice::getAdvertising();
     adv->addServiceUUID(BLE_UUID_SERVICE);
     adv->enableScanResponse(true);
+
+    // 🔴 Put the name in the SCAN RESPONSE, explicitly. It cannot fit anywhere
+    // else, and without this the module advertises anonymously.
+    //
+    // An advertisement is 31 bytes. Flags take 3 and our 128-bit service UUID
+    // takes 18 (16 + type + length), leaving 10 — and "T2CAN-XXXX" needs 12 with
+    // its own header. So the name is dropped from the advertisement, and merely
+    // enabling a scan response does not put it there: the response goes out
+    // empty unless something fills it.
+    //
+    // What that looked like: the phone listed the module as "(이름 미확인)"
+    // beside a bare MAC address (measured 2026-08-17). The app can still find us
+    // — it matches on the service UUID, which is why scanning worked at all —
+    // but at the car, picking the right device out of a list of MAC addresses is
+    // exactly the kind of small friction that wastes a visit, and a nameless
+    // device is indistinguishable from somebody else's beacon.
+    NimBLEAdvertisementData scanData;
+    scanData.setName(name);
+    if (!adv->setScanResponseData(scanData))
+        Serial.println("[BLE] scan response set FAILED — name will not be visible");
     // Keep the result. Until now nothing checked it, so a radio that failed to
     // start looked exactly like one that worked -- and the OTA self-test needs
     // to tell those apart before it accepts an image whose only control channel
