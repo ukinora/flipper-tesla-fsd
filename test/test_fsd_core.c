@@ -23,6 +23,7 @@
 #include "fsd_blackbox_filter.h"
 #include "fsd_blackbox_summary.h"
 #include "fsd_bushealth.h"
+#include "fsd_canquar.h"
 #include "fsd_readcache.h"
 #include "fsd_capability.h"
 #include "fsd_capture.h"
@@ -2245,6 +2246,88 @@ static void test_readcache(void) {
           "long names that differ only at the tail do not alias");
 }
 
+// ── CAN 버스 격리 (부팅 경로) ────────────────────────────────────────────────
+// 🔴 폭주 안전장치(아래)를 실물에 대고 돌렸더니 **안 들었다** (2026-08-17):
+// can0 이 올라온 뒤 패닉까지 loop 이 0번 돌았다. loop 에서 도는 검사는 원리상
+// 이 고장을 못 잡는다.
+//
+// 그래서 판정을 loop 이 필요 없는 곳 — 부팅 경로 — 으로 옮긴다. 부팅은 폭주가
+// 시작되기 전에 확실히 실행된다. "지난번에 이 버스를 켰다가 보드가 패닉했다"
+// 를 기억하고 안 켜는 것이 전부다.
+//
+// 잘못 격리하면 멀쩡한 버스를 잃는다. 그래서 애매한 경우는 전부 격리하지 않는
+// 쪽으로 떨어뜨린다.
+static void test_can_quarantine(void) {
+    FsdCanQuar q;
+    fsd_canquar_reset(&q);
+    const uint8_t N = 2;   // can0, can1
+
+    // 정상 부팅은 아무것도 하지 않고 카운터를 지운다.
+    FsdCanQuarResult r = fsd_canquar_boot(&q, false, 0x3, N);
+    CHECK(r.newly == 0 && q.quarantined == 0 && q.panics == 0,
+          "정상 부팅은 격리하지 않고 카운터를 지운다");
+
+    // 패닉이지만 미검증 버스가 없다 = 버스 기동과 무관한 패닉이다.
+    // 여기서 격리하면 엉뚱한 버스를 잃는다.
+    q.panics = 1;
+    r = fsd_canquar_boot(&q, true, 0x0, N);
+    CHECK(r.newly == 0 && q.quarantined == 0 && q.panics == 0,
+          "미검증 버스가 없는 패닉은 격리하지 않는다");
+
+    // 한 번의 패닉으로는 격리하지 않는다 — 우연한 패닉 하나에 버스를 잃으면 안 된다.
+    fsd_canquar_reset(&q);
+    r = fsd_canquar_boot(&q, true, 0x3, N);
+    CHECK(r.newly == 0 && q.quarantined == 0 && q.panics == 1,
+          "패닉 1회로는 격리하지 않는다");
+
+    // 연속 2회 → 가장 낮은 번호의 미검증 버스를 격리한다.
+    r = fsd_canquar_boot(&q, true, 0x3, N);
+    CHECK(r.newly == 0x1 && q.quarantined == 0x1,
+          "연속 패닉 2회 → can0 격리 (got newly=0x%X quar=0x%X)",
+          r.newly, q.quarantined);
+    CHECK(q.panics == 0, "격리한 뒤에는 카운터를 다시 0 에서 센다");
+
+    // 그래도 계속 패닉하면 다음 버스를 격리한다. 이미 격리된 것은 건너뛴다.
+    r = fsd_canquar_boot(&q, true, 0x2, N);
+    CHECK(r.newly == 0 && q.panics == 1, "다음 라운드도 1회로는 격리하지 않는다");
+    r = fsd_canquar_boot(&q, true, 0x2, N);
+    CHECK(r.newly == 0x2 && q.quarantined == 0x3,
+          "두 번째 라운드 → can1 도 격리 (got newly=0x%X quar=0x%X)",
+          r.newly, q.quarantined);
+
+    // 전부 격리된 뒤에는 더 할 것이 없다. 없는 버스 번호를 만들어내면 안 된다.
+    r = fsd_canquar_boot(&q, true, 0x0, N);
+    r = fsd_canquar_boot(&q, true, 0x0, N);
+    CHECK(r.newly == 0 && q.quarantined == 0x3,
+          "전부 격리된 상태에서 새 비트를 만들지 않는다");
+
+    // 버스 개수를 넘는 비트는 무시한다 — NVS 가 오염돼도 없는 버스를 켜거나
+    // 끄려 들면 안 된다.
+    fsd_canquar_reset(&q);
+    fsd_canquar_boot(&q, true, 0xFF, N);
+    r = fsd_canquar_boot(&q, true, 0xFF, N);
+    CHECK(r.newly == 0x1 && q.quarantined == 0x1,
+          "버스 개수 밖의 비트는 무시한다 (got 0x%X)", r.newly);
+
+    // 정상 부팅 한 번이 카운터를 지운다 — 격리는 유지된다.
+    fsd_canquar_reset(&q);
+    fsd_canquar_boot(&q, true, 0x3, N);      // panics = 1
+    q.quarantined = 0x2;
+    r = fsd_canquar_boot(&q, false, 0x1, N);
+    CHECK(q.panics == 0 && q.quarantined == 0x2,
+          "정상 부팅은 카운터만 지우고 격리는 남긴다");
+
+    // 격리 해제는 명시적으로만. 스스로 풀리면 폭주로 되돌아간다.
+    fsd_canquar_clear(&q);
+    CHECK(q.quarantined == 0 && q.panics == 0, "clear 는 전부 푼다");
+
+    // can0 만 있는 보드(단일 버스)에서도 동작해야 한다.
+    fsd_canquar_reset(&q);
+    fsd_canquar_boot(&q, true, 0x1, 1);
+    r = fsd_canquar_boot(&q, true, 0x1, 1);
+    CHECK(r.newly == 0x1 && q.quarantined == 0x1, "단일 버스 보드에서도 격리된다");
+}
+
 // ── CAN error-storm guard ───────────────────────────────────────────────────
 // 🔴 Measured 2026-08-17: a controller that could not decode its bus raised
 // error interrupts without pause, preempted the loop mid-SPI-read of the OTHER
@@ -3163,6 +3246,7 @@ int main(void) {
     test_blackbox_summary();
     test_readcache();
     test_bus_storm();
+    test_can_quarantine();
     test_can_ops();
     test_additive_checksum();
     test_candump_format();
