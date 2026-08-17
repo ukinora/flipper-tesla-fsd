@@ -21,10 +21,27 @@
  * This decides, from the driver's own cumulative error counter, when to give up
  * on one bus so the other keeps working.
  *
- * ⚠️ Best-effort by construction. It is polled from the loop, so a storm severe
- * enough to starve the loop outright will still take the board down first. It
- * turns "always dies" into "usually survives on one bus" — worth having, and
- * NOT a reason to drop the compile-time mask for a channel known to be dead.
+ * ⚠️ Best-effort by construction, and MEASURED NOT TO HELP against the one
+ * fault we can reproduce. It is polled from the loop, and on 2026-08-17 the
+ * reproducer was run against it deliberately:
+ *
+ *     19.7s  [CAN] can0 TWAI Listen-Only @ 500 kbps
+ *            ...not one line of loop output in between...
+ *     20.3s  Guru Meditation Error: Interrupt wdt timeout on CPU1
+ *
+ * The loop ran ZERO times between the controller coming up and the panic. No
+ * threshold tunes around that — the window and strike count are irrelevant when
+ * the code never executes. A dead transceiver produces exactly this.
+ *
+ * What it is still for: a bus that is bad but not that bad — a wrong bitrate or
+ * a marginal pair, where the loop keeps running and errors merely pile up. That
+ * case is plausible and untested; do not assume it works either.
+ *
+ * 🔴 So this is NOT a reason to drop the compile-time mask for a channel known
+ * to be dead, and it is not a safety net you can lean on in the car. The real
+ * fix for the starve-the-loop case has to live somewhere the loop is not
+ * required — i.e. in the boot path, refusing to bring up a bus that panicked
+ * the board last time.
  *
  * Header-only + dependency-free so the host test runs the same code as the
  * firmware.
