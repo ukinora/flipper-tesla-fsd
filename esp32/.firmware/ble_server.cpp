@@ -129,6 +129,10 @@ static volatile uint32_t g_upload_expect = 0;
 static char     g_bulk_name[40] = {};
 static size_t   g_bulk_offset = 0;
 static uint16_t g_bulk_seq    = 0;
+static uint32_t g_bulk_start_ms = 0;   // throughput accounting, reset per download
+static uint32_t g_bulk_busy   = 0;     // notify() refusals (radio queue full)
+static uint32_t g_bulk_stall  = 0;     // ticks that got nothing out at all
+static uint32_t g_bulk_next_ms = 0;    // pacing gate — earliest next burst
 
 // ── State serialisation (20 B, little-endian) ────────────────────────────────
 // Layout is fixed; the app parses by offset. Bump BLE_PROTO_VERSION on change.
@@ -244,8 +248,13 @@ static void ble_send_result(uint8_t cmd, uint8_t res, uint16_t extra) {
     if (!g_ch_result) return;
     uint8_t b[BLE_RESULT_LEN];
     fsd_wire_pack_result(cmd, res, extra, b);
+    // setValue keeps a reader current; the payload is ALSO handed to indicate()
+    // explicitly so the bytes are copied now rather than re-read later. Same
+    // defect class as the bulk path above — two results sent back-to-back (an
+    // upload burst answering while a command result is queued) would otherwise
+    // both carry the later value.
     g_ch_result->setValue(b, sizeof(b));
-    g_ch_result->indicate();  // ACKed: a lost command result would desync the app
+    g_ch_result->indicate(b, sizeof(b));  // ACKed: a lost result desyncs the app
 }
 
 // ── Bulk download ────────────────────────────────────────────────────────────
@@ -283,12 +292,18 @@ static uint8_t ble_bulk_start(bool json) {
     // If this one notify is dropped the app never learns the total size. It can
     // detect that (no seq 0) and just re-issue DUMP_START — cheaper than
     // carrying a retry path for a single frame sent on an idle queue.
-    g_ch_bulk->setValue(hdr, BLE_BULK_HDR + 4 + nlen);
-    g_ch_bulk->notify();
+    //
+    // 🔴 The payload goes to notify() directly — never setValue()+notify().
+    // See the comment in ble_bulk_pump() for what that costs.
+    g_ch_bulk->notify(hdr, BLE_BULK_HDR + 4 + nlen);
 
     g_bulk_json   = json;
     g_bulk_offset = 0;
     g_bulk_seq    = 1;
+    g_bulk_start_ms = millis();
+    g_bulk_next_ms  = 0;   // first burst goes immediately
+    g_bulk_busy   = 0;
+    g_bulk_stall  = 0;
     g_bulk_active = true;
     Serial.printf("[BLE] bulk start %s.%s (%u B)\n", g_bulk_name,
                   json ? "json" : "log", (unsigned)total);
@@ -297,9 +312,33 @@ static uint8_t ble_bulk_start(bool json) {
 
 // Push a few chunks per loop(). Stops early when notify() reports the queue is
 // full — the next tick resumes at the same offset, so nothing is lost.
-static void ble_bulk_pump() {
+//
+// 🔴 The counters are not decoration. The last attempt to speed this path up
+// broke it — "bulk start" printed and then not one chunk went out — and there
+// was no way to tell a stalled pump from a stalled radio from a read returning
+// zero. They are the difference between diagnosing that in one transfer and
+// guessing at it again. `stall` counts ticks where the radio refused the very
+// first chunk, which is exactly the shape that failure had.
+static void ble_bulk_pump(uint32_t now_ms) {
     if (!g_bulk_active) return;
     if (!g_connected || !g_bulk_subscribed) { g_bulk_active = false; return; }
+
+    // 🔴 Pace the bursts. Going as fast as the module can loses frames.
+    //
+    // Measured 2026-08-17: unpaced, the module pushed 811 KB in 4.9 s — about
+    // 650 notifications/s — and the phone reported a sequence gap partway
+    // through even with a 4096-frame buffer on the app side that was nowhere
+    // near full. The loss is above the link layer (the module saw busy 0) and
+    // above our buffer, i.e. in Android's own notification delivery. BLE
+    // notifications carry no ATT acknowledgement, so a dropped one is silent
+    // and unrecoverable — the app only ever sees the seq jump.
+    //
+    // 4 chunks per BLE_BULK_TICK_MS keeps the rate near 200/s, under a third of
+    // what demonstrably failed, while MTU 517 doubles the bytes each one
+    // carries. For a capture that cannot be taken twice, arriving intact beats
+    // arriving fastest.
+    if ((int32_t)(now_ms - g_bulk_next_ms) < 0) return;
+    g_bulk_next_ms = now_ms + BLE_BULK_TICK_MS;
 
     uint8_t frame[BLE_BULK_HDR + BLE_BULK_MAX_PAYLOAD];
     for (unsigned i = 0; i < BLE_BULK_CHUNKS_PER_TICK && g_bulk_active; i++) {
@@ -307,14 +346,44 @@ static void ble_bulk_pump() {
                                        frame + BLE_BULK_HDR, ble_bulk_payload_cap());
         frame[0] = (uint8_t)(g_bulk_seq & 0xFFu);
         frame[1] = (uint8_t)(g_bulk_seq >> 8);
-        g_ch_bulk->setValue(frame, BLE_BULK_HDR + n);
-        if (!g_ch_bulk->notify()) return;  // queue full — retry this offset later
+        // 🔴 notify(buf, len) — NOT setValue() + notify(). Measured 2026-08-17.
+        //
+        // The no-argument notify() ends in NimBLE's last branch:
+        //     ble_gatts_chr_updated(m_handle);
+        // which means "this characteristic changed, read its value and send it
+        // *later*". The bytes are NOT copied at call time. So four setValue()
+        // + notify() pairs in one tick all notify whatever m_value holds when
+        // the stack gets to them — the LAST chunk, several times over. The app
+        // sees seq jump and reports SEQUENCE_GAP on its second frame.
+        //
+        // This was latent for as long as the read path was slow: at 17.6 ms per
+        // chunk the stack always drained before the next setValue(). Making the
+        // read fast (blackbox.cpp read-ahead) exposed it the same day.
+        //
+        // The value-taking overload copies synchronously via
+        // ble_hs_mbuf_from_flat() and returns the real rc from
+        // ble_gattc_notify_custom(). ble_gatts_chr_updated() returns void, so
+        // the old call could ONLY ever return true — the backpressure check
+        // below was dead code, which is why `busy` stayed 0 while frames were
+        // being lost.
+        if (!g_ch_bulk->notify(frame, BLE_BULK_HDR + n)) {  // full — retry later
+            g_bulk_busy++;
+            if (i == 0) g_bulk_stall++;
+            return;
+        }
 
         g_bulk_offset += n;
         g_bulk_seq++;
         if (n == 0) {  // empty payload = EOF
             g_bulk_active = false;
-            Serial.printf("[BLE] bulk done (%u B)\n", (unsigned)g_bulk_offset);
+            uint32_t ms = millis() - g_bulk_start_ms;
+            if (ms == 0) ms = 1;
+            Serial.printf("[BLE] bulk done %u B in %lu ms = %lu KB/s "
+                          "(mtu %u, chunk %u B, busy %lu, stall %lu)\n",
+                          (unsigned)g_bulk_offset, (unsigned long)ms,
+                          (unsigned long)((uint32_t)g_bulk_offset / ms * 1000u / 1024u),
+                          (unsigned)g_mtu, (unsigned)ble_bulk_payload_cap(),
+                          (unsigned long)g_bulk_busy, (unsigned long)g_bulk_stall);
             ble_send_result(BLE_CMD_DUMP_START, BLE_RES_OK, (uint16_t)(g_bulk_seq));
         }
     }
@@ -786,6 +855,18 @@ void ble_server_init(FSDState *state, portMUX_TYPE *state_mux) {
     NimBLEDevice::init(name);
     NimBLEDevice::setPower(ESP_PWR_LVL_P9);
 
+    // 🔴 Ask for the biggest ATT MTU. The app already requests 517 and was
+    // getting 255 — that ceiling was ours, not the phone's (NimBLE defaults to
+    // 255 and nobody had raised it).
+    //
+    // This matters because the capture download is limited by NOTIFICATIONS PER
+    // SECOND, not by bytes: Android drops them above roughly a few hundred per
+    // second, and a dropped notification is silent (no ATT ack). Doubling the
+    // payload moves twice the bytes at the same notification rate — strictly
+    // better than sending more often. Measured 2026-08-17 at MTU 255: 250 B
+    // per notify.
+    NimBLEDevice::setMTU(517);
+
     // Bonding + Secure Connections, MITM deliberately OFF.
     //
     // The MITM bit used to be set here, and it made the module unusable: this
@@ -885,7 +966,7 @@ void ble_server_tick(uint32_t now_ms) {
 
     // Bulk runs every loop(), not on the 5 Hz State cadence — a ~100 KB capture
     // over 5 Hz chunks would take minutes.
-    ble_bulk_pump();
+    ble_bulk_pump(now_ms);
     ble_apply_mode_request();      // answers only after the driver moved
     ble_apply_blackbox_request();
     ble_refresh_capability();
@@ -910,7 +991,7 @@ void ble_server_tick(uint32_t now_ms) {
         uint8_t cs[BLE_CAMSTAT_LEN];
         ble_pack_camstat(cs, now_ms);
         g_ch_camstat->setValue(cs, sizeof(cs));
-        g_ch_camstat->notify();
+        g_ch_camstat->notify(cs, sizeof(cs));
     }
 
     if (now_ms - g_last_state_ms < BLE_STATE_PERIOD_MS) return;
@@ -926,7 +1007,7 @@ void ble_server_tick(uint32_t now_ms) {
     ble_pack_state(buf, g_fps);
 
     g_ch_state->setValue(buf, sizeof(buf));
-    g_ch_state->notify();
+    g_ch_state->notify(buf, sizeof(buf));
 }
 
 bool ble_server_connected(void) { return g_connected; }

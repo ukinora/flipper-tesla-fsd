@@ -22,6 +22,7 @@
 #include "fsd_can_ops.h"
 #include "fsd_blackbox_filter.h"
 #include "fsd_blackbox_summary.h"
+#include "fsd_readcache.h"
 #include "fsd_capability.h"
 #include "fsd_capture.h"
 #include "fsd_checksum.h"
@@ -2170,6 +2171,79 @@ static void test_blackbox_filter(void) {
     CHECK(!fsd_blackbox_should_record(0x7FF),              "0x7FF dropped");
 }
 
+// ── capture read-ahead cache ────────────────────────────────────────────────
+// Measured 2026-08-17 on the bench: one 500 B blackbox_read_chunk() costs
+// 17.6 ms, of which open is 10.6 ms and seek 6.5 ms — the read itself is 20 us.
+// So the fix is to open once per block and serve many chunks from RAM.
+//
+// This is the arithmetic that decides which bytes a chunk gets. It is worth
+// testing precisely because a bug here does not fail loudly: it hands back
+// plausible bytes from the wrong offset, and the capture is only found to be
+// corrupt after the TSL is out of the car.
+static void test_readcache(void) {
+    FsdReadCache c;
+    size_t idx = 0xDEAD;
+
+    // Fresh cache holds nothing.
+    fsd_rc_reset(&c);
+    CHECK(fsd_rc_serve(&c, "evt_1_manual", false, 0, 100, &idx) == 0,
+          "empty cache serves nothing");
+
+    // Block covering file bytes [1000, 5096).
+    fsd_rc_fill(&c, "evt_1_manual", false, 1000, 4096);
+
+    CHECK(fsd_rc_serve(&c, "evt_1_manual", false, 1000, 500, &idx) == 500 && idx == 0,
+          "hit at block start -> index 0");
+    CHECK(fsd_rc_serve(&c, "evt_1_manual", false, 1500, 500, &idx) == 500 && idx == 500,
+          "hit mid-block -> index is offset into block");
+
+    // Clamp at the end of the block: 5096-4900 = 196 bytes left, cap asks 500.
+    CHECK(fsd_rc_serve(&c, "evt_1_manual", false, 4900, 500, &idx) == 196 && idx == 3900,
+          "tail of block clamps to what is cached");
+
+    // Boundaries. One past the block is a miss; the last byte is a hit of 1.
+    CHECK(fsd_rc_serve(&c, "evt_1_manual", false, 5096, 500, &idx) == 0,
+          "one past the block end is a miss");
+    CHECK(fsd_rc_serve(&c, "evt_1_manual", false, 5095, 500, &idx) == 1 && idx == 4095,
+          "last cached byte serves exactly 1");
+    CHECK(fsd_rc_serve(&c, "evt_1_manual", false, 999, 500, &idx) == 0,
+          "one before the block start is a miss (no backward serve)");
+
+    // Identity must match: a different capture or the .json twin is a miss.
+    // Without this the pump could serve .log bytes for a .json request after a
+    // second download starts -- same offsets, different file.
+    CHECK(fsd_rc_serve(&c, "evt_2_manual", false, 1000, 500, &idx) == 0,
+          "different capture name is a miss");
+    CHECK(fsd_rc_serve(&c, "evt_1_manual", true, 1000, 500, &idx) == 0,
+          "same name but .json is a miss");
+
+    // cap of 0 asks for nothing and must not report a serve.
+    CHECK(fsd_rc_serve(&c, "evt_1_manual", false, 1000, 0, &idx) == 0,
+          "cap 0 serves nothing");
+
+    // A zero-length fill is not a usable block, even at the right offset.
+    fsd_rc_fill(&c, "evt_1_manual", false, 1000, 0);
+    CHECK(fsd_rc_serve(&c, "evt_1_manual", false, 1000, 500, &idx) == 0,
+          "empty block is a miss");
+
+    // reset() must actually invalidate -- this is what delete/disconnect call,
+    // and a stale hit there serves bytes of a file that no longer exists.
+    fsd_rc_fill(&c, "evt_1_manual", false, 0, 4096);
+    CHECK(fsd_rc_serve(&c, "evt_1_manual", false, 0, 10, &idx) == 10, "filled");
+    fsd_rc_reset(&c);
+    CHECK(fsd_rc_serve(&c, "evt_1_manual", false, 0, 10, &idx) == 0,
+          "reset invalidates the block");
+
+    // Names longer than the cache's field must not alias. Two distinct captures
+    // that share a prefix have to stay distinct.
+    char long_a[64], long_b[64];
+    memset(long_a, 'a', sizeof(long_a)); long_a[sizeof(long_a) - 1] = 0;
+    memcpy(long_b, long_a, sizeof(long_b)); long_b[sizeof(long_b) - 2] = 'b';
+    fsd_rc_fill(&c, long_a, false, 0, 4096);
+    CHECK(fsd_rc_serve(&c, long_b, false, 0, 10, &idx) == 0,
+          "long names that differ only at the tail do not alias");
+}
+
 // ── bus liveness gate ───────────────────────────────────────────────────────
 // rx_count only grows, so it cannot tell a quiet bus from a busy one. A pulled
 // connector or a sleeping gateway must hold TX off — transmitting into a bus we
@@ -2982,6 +3056,7 @@ int main(void) {
     test_capability();
     test_profile_db();
     test_blackbox_summary();
+    test_readcache();
     test_can_ops();
     test_additive_checksum();
     test_candump_format();

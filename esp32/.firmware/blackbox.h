@@ -165,3 +165,13 @@ uint32_t blackbox_free_bytes();
 
 /** How many captures are stored on disk right now. */
 int blackbox_event_count();
+
+/** Diagnostic: split one blackbox_read_chunk() into open / seek / read / close
+ *  microseconds. False when the backend keeps no file to time (RAM).
+ *
+ *  Exists because the download rate was "explained" for weeks by a cause nobody
+ *  had measured, and a fix built on that guess broke downloads and was reverted.
+ *  Whatever is slow, this says which call it is. */
+bool blackbox_read_phases(const char* name, bool json, size_t offset,
+                          uint32_t* open_us, uint32_t* seek_us,
+                          uint32_t* read_us, uint32_t* close_us);

@@ -15,6 +15,7 @@
 #include "../../fsd_logic/fsd_events.h"            // fsd_events_inject
 #include "../../fsd_logic/fsd_blackbox_summary.h"  // fsd_blackbox_format_json
 #include "../../fsd_logic/fsd_blackbox_filter.h"   // fsd_blackbox_should_record
+#include "../../fsd_logic/fsd_readcache.h"         // FsdReadCache (download path)
 #include <stdlib.h>
 #include <string.h>
 #if defined(BLACKBOX_BACKEND_LITTLEFS)
@@ -195,6 +196,32 @@ static bool g_fs_ok = false;
 // stalling the web task and dropping WiFi (#124). Kept current by recomputing
 // only inside the save/delete paths, which already touch the filesystem.
 static int  g_event_count = 0;
+
+// Read-ahead block for the capture download path — see backend_read_chunk() for
+// the measurements that justify it. Declared up here because the write and
+// delete paths above invalidate it, and they come first in this file.
+//
+// 🔴 Off by default on classic ESP32. It is a pure speed optimisation and it
+// costs static DRAM, which those boards do not have: adding 4 KB overflowed
+// esp32-lilygo's dram0_0_seg by 4,432 bytes, i.e. it had ~176 bytes spare. They
+// also do not need it — the fast path exists for the BLE capture download,
+// which is the S3 boards' job here; the classic boards download over the web
+// dashboard, which streams the file in one open (backend_stream_body).
+#ifndef BB_READAHEAD
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+#define BB_READAHEAD 4096u   /* one LittleFS block; ~8 BLE chunks per open */
+#else
+#define BB_READAHEAD 0u      /* no DRAM to spare — plain open/seek per chunk */
+#endif
+#endif
+
+#if BB_READAHEAD > 0
+static uint8_t      g_rc_buf[BB_READAHEAD];
+static FsdReadCache g_rc;
+#define BB_RC_DROP() fsd_rc_reset(&g_rc)
+#else
+#define BB_RC_DROP() ((void)0)
+#endif
 
 // Strip a directory prefix and a trailing extension → bare event basename.
 static void bb_basename(const char* path, char* out, size_t n) {
@@ -435,6 +462,9 @@ static void backend_store(const char* base, const char* json,
     else Serial.printf("[BB] .json open failed: %s\n", p);
 
     bb_enforce_retention();
+    // A new capture was just written and retention may have dropped others, so
+    // whatever is buffered describes a filesystem that no longer exists.
+    BB_RC_DROP();
     g_event_count = bb_scan_count();  // reflects the new event + any retention drop
 }
 
@@ -495,40 +525,118 @@ static void backend_stream_body(WiFiClient& client, const char* name, bool json)
 }
 #endif
 
-/* ⚠️ SLOW, AND DELIBERATELY LEFT THAT WAY FOR NOW (2026-08-17).
+/* Read one chunk, serving from a buffered block so the file work amortises.
  *
- * Open + seek + read + close on EVERY chunk. Measured over BLE: a 1,320,604 B
- * capture took 1 min 21 s — **13.9 KB/s**, roughly a seventh of what MTU 255
- * allows. At ~250 B per chunk that is 5,300 open/seek/close cycles, and
- * LittleFS seek walks a CTZ skip-list from the start of the file, so it gets
- * SLOWER the further the transfer goes. The transfer is strictly sequential;
- * we re-derive a position we were just at.
+ * ── What this used to be, and what was actually wrong ───────────────────────
+ * It opened, seeked, read `cap` bytes, and closed — every chunk. Over BLE a
+ * 1,320,604 B capture took 1 min 21 s (13.9 KB/s). The comment here blamed
+ * LittleFS seek "walking a CTZ skip-list from the start of the file, so it gets
+ * SLOWER the further the transfer goes", and a fix aimed at that (hold the File
+ * open across chunks) broke downloads outright and was reverted.
  *
- * 🔴 A cached sequential handle WAS tried the same day and BROKE THE TRANSFER:
- * `[BLE] bulk start … (1320604 B)` appeared and then nothing — not one chunk
- * went out, and the phone gave up after its 5 s stall timeout. Reverted rather
- * than left half-working, because this path is the ONLY way a capture leaves
- * the module (the web dashboard that used to be the other one went in PR #28),
- * and the TSL capture cannot be taken twice.
+ * 🔴 That explanation was never measured, and it is wrong. Timed on the bench
+ * 2026-08-17 (`bbread`), one 500 B chunk of an 811 KB capture:
  *
- * Whoever picks this up: instrument the pump first. The evidence says
- * ble_bulk_pump() ran but `g_ch_bulk->notify()` never succeeded — read_chunk
- * returning 0 would have printed "bulk done", and it did not. Find out why
- * notify started failing before changing this function again. */
+ *      offset        total     open      seek     read    close
+ *      0          16.0 ms   10.6 ms    4.4 ms   791 us   103 us
+ *      202,843    17.7 ms   10.6 ms    6.8 ms    20 us   102 us
+ *      405,686    17.5 ms   10.7 ms    6.6 ms    19 us    98 us
+ *      608,529    17.3 ms   10.6 ms    6.4 ms    21 us   104 us
+ *
+ * Seek does not grow with offset — 6.4 ms at 600 KB, 6.8 ms at 200 KB. And the
+ * read is 20 us: reading bytes was never the cost. It is open (61%) and seek
+ * (37%), both paid per call, which capped the whole path at 27 KB/s before the
+ * radio got a say.
+ *
+ * ── The fix ─────────────────────────────────────────────────────────────────
+ * Read a whole block per open and hand out chunks from RAM. One open+seek now
+ * covers BB_READAHEAD/cap chunks (~8 at the BLE payload size), so the amortised
+ * cost drops to ~2 ms and the bottleneck moves to the radio, which is where it
+ * belongs.
+ *
+ * Deliberately NOT a cached file handle. Nothing here outlives the call, so
+ * there is no handle to go stale against a delete, a retention sweep, or an
+ * unmount — the failure mode that made the previous attempt unshippable. A
+ * stale *buffer* is only wrong bytes, and fsd_rc_serve() refuses to serve
+ * across an identity change; the invalidation calls below close the rest.
+ *
+ * This path is the ONLY way a capture leaves the module (the web dashboard that
+ * was the other one went in PR #28) and the TSL capture cannot be taken twice,
+ * so verify with `bbread` — which exercises this function with no radio in the
+ * way — before trusting a change here. */
 static size_t backend_read_chunk(const char* name, bool json, size_t offset,
                                  uint8_t* out, size_t cap) {
     if (!g_fs_ok || !out || cap == 0) return 0;
+
+#if BB_READAHEAD > 0
+    size_t idx = 0;
+    size_t n = fsd_rc_serve(&g_rc, name, json, offset, cap, &idx);
+    if (n) { memcpy(out, g_rc_buf + idx, n); return n; }
+#endif
+
+    // Miss — refill the block from exactly where the caller asked, so a
+    // sequential walk hits on every chunk after the first of each block, and a
+    // random seek costs no more than the old code did.
     char p[64];
     snprintf(p, sizeof(p), BLACKBOX_DIR "/%s.%s", name, json ? "json" : "log");
     File f = BB_OPEN_R(p);
-    if (!f) return 0;
-    size_t n = 0;
+    if (!f) { BB_RC_DROP(); return 0; }
+    size_t got = 0;
+#if BB_READAHEAD > 0
     if (f.seek(offset)) {
-        int r = f.read(out, cap);
-        if (r > 0) n = (size_t)r;
+        int r = f.read(g_rc_buf, sizeof(g_rc_buf));
+        if (r > 0) got = (size_t)r;
     }
     f.close();
+
+    fsd_rc_fill(&g_rc, name, json, offset, got);   // got==0 resets, not fills
+    n = fsd_rc_serve(&g_rc, name, json, offset, cap, &idx);
+    if (!n) return 0;
+    memcpy(out, g_rc_buf + idx, n);
     return n;
+#else
+    // No read-ahead on this board: straight into the caller's buffer.
+    if (f.seek(offset)) {
+        int r = f.read(out, cap);
+        if (r > 0) got = (size_t)r;
+    }
+    f.close();
+    return got;
+#endif
+}
+
+bool blackbox_read_phases(const char* name, bool json, size_t offset,
+                          uint32_t* open_us, uint32_t* seek_us,
+                          uint32_t* read_us, uint32_t* close_us) {
+    if (!g_fs_ok || !name) return false;
+    // Stack, not static: this is a diagnostic and the DRAM it would cost is the
+    // difference between esp32-lilygo linking and not.
+    uint8_t scratch[256];
+    char p[64];
+    snprintf(p, sizeof(p), BLACKBOX_DIR "/%s.%s", name, json ? "json" : "log");
+
+    uint32_t a = micros();
+    File f = BB_OPEN_R(p);
+    uint32_t t_open = micros() - a;
+    if (!f) return false;
+
+    a = micros();
+    bool ok = f.seek(offset);
+    uint32_t t_seek = micros() - a;
+
+    a = micros();
+    if (ok) (void)f.read(scratch, sizeof(scratch));
+    uint32_t t_read = micros() - a;
+
+    a = micros();
+    f.close();
+    uint32_t t_close = micros() - a;
+
+    if (open_us)  *open_us  = t_open;
+    if (seek_us)  *seek_us  = t_seek;
+    if (read_us)  *read_us  = t_read;
+    if (close_us) *close_us = t_close;
+    return true;
 }
 
 // Newest = last entry the directory hands back. Capture names are timestamped,
@@ -577,6 +685,10 @@ static bool backend_delete(const char* name) {
     bool ok = false;
     snprintf(p, sizeof(p), BLACKBOX_DIR "/%s.log", name);  ok |= BB_FS.remove(p);
     snprintf(p, sizeof(p), BLACKBOX_DIR "/%s.json", name); ok |= BB_FS.remove(p);
+    // The read-ahead block may hold bytes of the file we just removed. Dropping
+    // it unconditionally (not only on ok) is the cautious order: the cost is one
+    // extra open, the cost of getting it wrong is serving a deleted capture.
+    BB_RC_DROP();
     if (ok) g_event_count = bb_scan_count();
     return ok;
 }
@@ -721,6 +833,14 @@ static bool backend_delete(const char* name) {
 static void backend_delete_all() { if (g_slot_used) backend_delete(g_slot_base); }
 
 static bool backend_is_volatile() { return true; }
+
+// No file exists on this backend -- the capture is a RAM slot, so there is no
+// open/seek/read/close to time. Declared in blackbox.h for every board, so it
+// needs a definition here too or the RAM boards fail to link.
+bool blackbox_read_phases(const char*, bool, size_t,
+                          uint32_t*, uint32_t*, uint32_t*, uint32_t*) {
+    return false;
+}
 
 #endif  // backend
 
