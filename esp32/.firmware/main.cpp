@@ -23,6 +23,7 @@
 #include "fsd_handler.h"
 #include "../../fsd_logic/fsd_autonomy.h"
 #include "../../fsd_logic/fsd_bushealth.h"
+#include "can_quar.h"
 #include "../../fsd_logic/fsd_selftest.h"
 #include "can_driver.h"
 #include "led.h"
@@ -241,6 +242,13 @@ static void serial_command_tick() {
                                   (unsigned)before,
                                   (unsigned)blackbox_capture_count());
                 }
+            } else if (serial_cmd_equals(buf, "canquar")) {
+                can_quar_print();
+            } else if (serial_cmd_equals(buf, "canclear")) {
+                // The only way back. Quarantine deliberately never lifts
+                // itself — coming back on its own is how the reboot loop
+                // happens in the first place.
+                can_quar_clear();
             } else if (serial_cmd_equals(buf, "bbfree")) {
                 uint32_t f = blackbox_free_bytes();
                 Serial.printf("[BB] 남은 공간 %lu KB · 저장된 캡처 %d 개\n",
@@ -377,6 +385,8 @@ static void serial_command_tick() {
                 Serial.println("[SER] Commands: ip | btnscan | btnbind <addr> | btnstat");
                 Serial.println("[SER]   bbon / bboff  — capture recorder on/off (persisted)");
                 Serial.println("[SER]   mark          — record a window around NOW");
+                Serial.println("[SER]   canquar       — CAN 버스 격리 상태");
+                Serial.println("[SER]   canclear      — 격리 해제 (다음 부팅부터)");
                 Serial.println("[SER]   bbfree        — capture space left");
                 Serial.println("[SER]   bbread        — time the capture read path (no BLE)");
                 Serial.println("[SER]   bbclear yes   — delete ALL captures (irreversible)");
@@ -2053,8 +2063,19 @@ void setup() {
     }
 #endif
 
+    // Judge the last boot before touching a controller: if enabling one of
+    // these panicked the board, this is where we find out and skip it.
+    can_quar_boot(CAN_ACTIVE_BUS_COUNT);
+
     for (uint8_t i = 0; i < CAN_ACTIVE_BUS_COUNT; i++) {
         CanBusId bus = bus_id_from_index(i);
+        if (can_quar_blocked(i)) {
+            Serial.printf("[CAN] %s 격리됨 — 켜지 않는다 ('canclear' 로 해제)\n",
+                          can_bus_name(bus));
+            g_can[i] = nullptr;
+            g_can_ok[i] = false;
+            continue;
+        }
         if (can_bus_disabled(i)) {
             // Loud on purpose, every boot. A silently missing bus is exactly
             // the kind of thing that gets debugged for an hour later.
@@ -2065,6 +2086,9 @@ void setup() {
             g_can_ok[i] = false;
             continue;
         }
+        // Persisted BEFORE begin(). If that call is the one that kills the
+        // board, this mark is the only thing that survives to say which bus.
+        can_quar_mark_trying(i);
         g_can[i] = can_driver_create(bus);
         g_can_ok[i] = g_can[i] && g_can[i]->begin(true);
         g_can_last_retry_ms[i] = millis();
@@ -2480,6 +2504,9 @@ void loop() {
         body_task_set_bus_tx_open(tx_open);
     }
     body_task_tick(now);   // T1/T2 detectors — measures, logs, sends nothing
+    // Survived long enough? Then these buses are not the reason for any
+    // future panic, and must not be quarantined for one.
+    can_quar_prove(now);
     ble_server_tick(now);  // push State notifications to the phone app
     ble_central_tick(now); // button link + press classification — no TX
 
