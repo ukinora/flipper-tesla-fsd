@@ -100,6 +100,20 @@ static const uint32_t FSD_BLACKBOX_KEY_IDS[] = {
     0x3E9u,  // DAS_bodyControls     — lights / hazards / turn / wipers. The
              //   other plausible home for a body actuation TSL might emit, and
              //   the second candidate for T1's output alongside 0x3F5.
+    0x249u,  // SCCM_leftStalk       — high beam / turn signal / wiper-wash
+             //   button. Two reasons, and the second is the load-bearing one:
+             //   (1) washWipeButtonStatus is a grade-B trigger candidate
+             //       (순정입력-트리거-후보.md), and the field procedure there
+             //       says to capture it — which was impossible until now.
+             //   (2) 키토스 implements "wiper 0.5 단" and "짧은 경적" by
+             //       replaying stalk input. If TSL does anything similar this
+             //       is where it rides, and TSL's full behaviour — not just
+             //       T1/T2/T3 — is what disappears at teardown.
+             //   ⚠️ This fork can BUILD 0x249 frames (fsd_handler.h:284-303:
+             //   high-beam strobe, turn signal, wiper wash). Recording it is
+             //   still read-only — the capture runs Listen-Only — but if an
+             //   emitter is ever wired, an A-B diff on this id would show our
+             //   own frames as well as TSL's. Note it before concluding.
 };
 
 #define FSD_BLACKBOX_KEY_ID_COUNT \
