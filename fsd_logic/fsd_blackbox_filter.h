@@ -75,6 +75,31 @@ static const uint32_t FSD_BLACKBOX_KEY_IDS[] = {
              //   what lets an A-B diff tell "TSL turned the light on" from
              //   "the car did it itself" without relying on someone writing it
              //   down by hand. Unverified bit layout (joshwardell, MIT).
+
+    /* ── Added 2026-08-17, before the teardown visit ─────────────────────────
+     *
+     * A doc sweep caught that T1's input set was only two thirds recorded:
+     * CLAUDE.md defines T1 as "rear door open/close -> cabin light" with
+     * inputs 0x102/0x103 latch+handle AND 0x311 anyDoorOpen — and 0x311 was
+     * not in this list. The other two cover the T2 output side, which has no
+     * confirmed frame at all yet, so leaving them out would mean the capture
+     * cannot even be searched for it.
+     *
+     * The bar for this list before a one-shot capture is not "we know we need
+     * it", it is "we would be unable to look". Everything here is a body /
+     * switch frame; none of it is powertrain-rate. */
+    0x311u,  // UI_warning           — anyDoorOpen (the third T1 input), plus
+             //   buckle and blinkers in the same frame. That makes it the
+             //   cheapest way to reconstruct "what state was the car in when
+             //   TSL acted", which an A-B diff needs to be readable at all.
+             //   Also the frame fsd_supervised_drive() reads for the belt.
+    0x119u,  // VCSEC_windowRequests — T2 is "close passenger window twice ->
+             //   passenger door opens". If TSL emits either half as a request
+             //   rather than a switch press, this is where it would ride.
+             //   Unproven: we have never seen TSL's T2 output frame.
+    0x3E9u,  // DAS_bodyControls     — lights / hazards / turn / wipers. The
+             //   other plausible home for a body actuation TSL might emit, and
+             //   the second candidate for T1's output alongside 0x3F5.
 };
 
 #define FSD_BLACKBOX_KEY_ID_COUNT \

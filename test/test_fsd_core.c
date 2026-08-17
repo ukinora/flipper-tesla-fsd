@@ -2166,6 +2166,22 @@ static void test_blackbox_filter(void) {
     CHECK(fsd_blackbox_should_record(CAN_ID_DAS_CONTROL),     "0x2B9 DAS_control in set");
     CHECK(fsd_blackbox_should_record(CAN_ID_DI_SYS_STATUS),   "0x118 state in set");
 
+    // ── The one-shot TSL capture set ────────────────────────────────────────
+    // Named one by one on purpose. The loop above passes for whatever happens
+    // to be in the array, so it cannot catch a deletion — and a deletion here
+    // is not visible until after the TSL is out of the car, when the capture
+    // cannot be retaken. Same shape as the CAN-id check that only compared the
+    // intersection and so missed the very edit it existed to catch (audit #10).
+    CHECK(fsd_blackbox_should_record(0x3C2u), "0x3C2 scroll — the whole point");
+    CHECK(fsd_blackbox_should_record(0x3C3u), "0x3C3 VCRIGHT switches (T2 input)");
+    CHECK(fsd_blackbox_should_record(0x102u), "0x102 VCLEFT doors (T1 input)");
+    CHECK(fsd_blackbox_should_record(0x103u), "0x103 VCRIGHT doors (T1 input)");
+    CHECK(fsd_blackbox_should_record(0x311u), "0x311 anyDoorOpen — T1's third input");
+    CHECK(fsd_blackbox_should_record(0x3F5u), "0x3F5 courtesy lighting (T1 output cand.)");
+    CHECK(fsd_blackbox_should_record(0x3E2u), "0x3E2 map light state");
+    CHECK(fsd_blackbox_should_record(0x119u), "0x119 window requests (T2 output cand.)");
+    CHECK(fsd_blackbox_should_record(0x3E9u), "0x3E9 DAS_bodyControls (body actuation)");
+
     // Chatty non-diagnostic frames are dropped (the ~15x rate cut).
     CHECK(!fsd_blackbox_should_record(CAN_ID_BMS_HV_BUS),  "0x132 BMS dropped");
     CHECK(!fsd_blackbox_should_record(CAN_ID_ESP_WHEELSPD),"0x175 wheel speeds dropped");
