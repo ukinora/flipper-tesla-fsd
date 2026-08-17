@@ -379,14 +379,24 @@ static void serial_command_tick() {
             } else if (strncmp(buf, "btnbind", 7) == 0) {
                 const char *arg = buf + 7;
                 while (*arg == ' ') arg++;
-                ble_central_bind(arg); // empty argument forgets the button
+                if (arg[0]) ble_central_add(arg);
+                else ble_central_forget_all();
             } else if (serial_cmd_equals(buf, "btnstat")) {
-                Serial.printf("[BTN] bound:%s connected:%s notifies:%u short:%u long:%u\n",
-                              ble_central_bound_addr()[0] ? ble_central_bound_addr() : "(none)",
-                              ble_central_connected() ? "yes" : "no",
+                Serial.printf("[BTN] %u/%u bound, notifies:%u short:%u double:%u long:%u\n",
+                              (unsigned)ble_central_bound_count(),
+                              (unsigned)BLE_CENTRAL_MAX_BUTTONS,
                               (unsigned)ble_central_notify_count(),
                               (unsigned)ble_central_short_presses(),
+                              (unsigned)ble_central_double_presses(),
                               (unsigned)ble_central_long_presses());
+                // One line per slot: with eight of them, a single summary hides
+                // which remote is the one that stopped answering.
+                for (uint8_t i = 0; i < BLE_CENTRAL_MAX_BUTTONS; i++) {
+                    const char *a = ble_central_slot_addr(i);
+                    if (!a || !a[0]) continue;
+                    Serial.printf("  %u %s %s\n", (unsigned)i, a,
+                                  ble_central_slot_connected(i) ? "connected" : "-");
+                }
             } else if (serial_cmd_equals(buf, "help") || serial_cmd_equals(buf, "?")) {
                 Serial.println("[SER] Commands: ip | btnscan | btnbind <addr> | btnstat");
                 Serial.println("[SER]   bbon / bboff  — capture recorder on/off (persisted)");
