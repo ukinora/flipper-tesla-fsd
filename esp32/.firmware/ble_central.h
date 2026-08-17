@@ -45,14 +45,18 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#ifdef BLE_SERVER_ENABLED
-
-/** Start the client. Call after ble_server_init() — NimBLEDevice::init() must
- *  already have happened, and this deliberately does not call it again. */
-void ble_central_init(void);
-
-/** Pump from loop(): drives reconnects and the button tick. Cheap when idle. */
-void ble_central_tick(uint32_t now_ms);
+/* ── Sizes, defined for EVERY board ───────────────────────────────────────────
+ *
+ * 🔴 These live ABOVE the #ifdef on purpose. Do not move them inside it.
+ *
+ * The stub branch below keeps the whole API callable on boards without BLE, so
+ * a caller can loop over the slots without guarding — and capability.cpp and
+ * main.cpp both do exactly that. If the count only exists on the BLE side, the
+ * call still compiles there and the LOOP BOUND does not, which is how seven of
+ * the eight board builds broke at once (2026-08-18).
+ *
+ * Only lilygo-t2can defines BLE_SERVER_ENABLED, so a local build of our own
+ * board proves nothing about this. */
 
 /** How many scan results are kept for the app to read. */
 #ifndef BLE_CENTRAL_MAX_FOUND
@@ -63,6 +67,25 @@ void ble_central_tick(uint32_t now_ms);
 #ifndef BLE_CENTRAL_SCAN_SECS
 #define BLE_CENTRAL_SCAN_SECS 5
 #endif
+
+/** How many remotes can be bound at once. Slot index IS the logical button
+ *  index, so this and FSD_BTN_MAX are the same number.
+ *
+ *  Eight is the radio's ceiling, not a target: the ESP controller allows nine
+ *  simultaneous links and the phone holds one. Bind only what is used — every
+ *  extra link is radio time the phone's transfers give up. */
+#ifndef BLE_CENTRAL_MAX_BUTTONS
+#define BLE_CENTRAL_MAX_BUTTONS 8
+#endif
+
+#ifdef BLE_SERVER_ENABLED
+
+/** Start the client. Call after ble_server_init() — NimBLEDevice::init() must
+ *  already have happened, and this deliberately does not call it again. */
+void ble_central_init(void);
+
+/** Pump from loop(): drives reconnects and the button tick. Cheap when idle. */
+void ble_central_tick(uint32_t now_ms);
 
 /** Scan for `secs` and print what is found. On demand only — scanning costs
  *  radio time the server shares. Returns false if a scan is already running.
@@ -82,19 +105,6 @@ uint8_t ble_central_found_count(void);
 
 /** Read one result. Pointers stay valid until the next scan. */
 bool ble_central_found(uint8_t i, const char** addr, const char** name, int8_t* rssi);
-
-/** Bind by position in the last scan — the app has an index, not an address. */
-bool ble_central_bind_index(uint8_t i);
-
-/** How many remotes can be bound at once. Slot index IS the logical button
- *  index, so this and FSD_BTN_MAX are the same number.
- *
- *  Eight is the radio's ceiling, not a target: the ESP controller allows nine
- *  simultaneous links and the phone holds one. Bind only what is used — every
- *  extra link is radio time the phone's transfers give up. */
-#ifndef BLE_CENTRAL_MAX_BUTTONS
-#define BLE_CENTRAL_MAX_BUTTONS 8
-#endif
 
 /** Bind an address into the first free slot. Returns the slot, or -1 when all
  *  are taken. Re-binding an address already held returns its existing slot
