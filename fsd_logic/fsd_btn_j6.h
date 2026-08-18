@@ -152,15 +152,21 @@ typedef struct {
 
 /* 🔴 THESE TWO ARE REFUSED ON PURPOSE. DO NOT MAP THEM.
  *
- * Each is emitted by TWO different gestures and the bytes are identical, so no
+ * ⭐ 5번 IS THE POWER BUTTON AND NOTHING ELSE (차주 결정, 2026-08-18). It is
+ * not an input on this remote — it turns the thing on and off, and that is all
+ * it is for. That is a DECISION, not a consequence of the collision below: if
+ * some future firmware made the two codes tellable apart, 5번 would still not
+ * be mapped. Do not read "we could not" as "we would have".
+ *
+ * The collision is the second reason, and it takes 1번/2번's long presses down
+ * with it. Each code is emitted by TWO different gestures, byte for byte, so no
  * amount of decoding separates them:
  *
  *    00 80 00  =  1번 길게  =  5번 톡 (홀수 번째)
  *    00 00 01  =  2번 길게  =  5번 톡 (짝수 번째)
  *
- * 5번 also happens to be the POWER button — a long press turns the remote off,
- * and a short one is easy to hit by accident while reaching for it. Mapping
- * either code means brushing the power button steps the speed profile.
+ * Mapping either one means brushing the POWER button steps the speed profile —
+ * and the hand reaches for that button every time the remote is switched on.
  *
  * 5번 alternates between the two codes on successive presses (7 in a row,
  * unbroken across sessions), which is why two measurements of it disagreed and
