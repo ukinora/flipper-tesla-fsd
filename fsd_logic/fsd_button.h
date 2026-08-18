@@ -48,19 +48,29 @@
 extern "C" {
 #endif
 
-/* How many buttons are tracked at once.
+/* How many LOGICAL buttons are tracked at once.
  *
- * 5 single-button remotes, one logical button each — ble_central.cpp maps slot
- * index straight to button index, so BLE_CENTRAL_MAX_BUTTONS and this must
- * agree. The cost is one FsdBtnState per slot, a couple of dozen bytes.
+ * 🔴 THIS IS NOT THE NUMBER OF REMOTES, and it used to be. The old rule was
+ * "slot index IS the button index", which held while the plan was several
+ * single-button remotes. The remote actually chosen (2026-08-18) is a Yiser J6:
+ * ONE radio link carrying NINE distinguishable buttons, because a press arrives
+ * as a synthesised swipe or tap rather than a key code (fsd_btn_j6.h).
  *
- * 🔴 The number comes from the RADIO, not from this file. The Arduino core's
- * prebuilt controller allows six simultaneous links and the phone holds one.
- * It was 8 for a day (2026-08-18) and that boot-looped the board — the
- * static_assert that now catches it lives in esp32/.firmware/ble_central.h,
- * because that is where the budget is visible. */
+ * So the two counts are now different things and neither bounds the other:
+ *
+ *   BLE_CENTRAL_MAX_BUTTONS  = simultaneous LINKS. Comes from the radio — the
+ *                              Arduino core's prebuilt controller allows six
+ *                              and the phone holds one. It was 8 for a day and
+ *                              that boot-looped the board; the static_assert
+ *                              that catches it is in ble_central.h, where the
+ *                              budget is visible.
+ *   FSD_BTN_MAX (here)       = logical buttons. Costs one FsdBtnState each, a
+ *                              couple of dozen bytes, and nothing else.
+ *
+ * 10 is FSD_J6_COUNT. fsd_btn_j6.h asserts the relationship at compile time
+ * rather than trusting these two numbers to be edited together. */
 #ifndef FSD_BTN_MAX
-#define FSD_BTN_MAX 5
+#define FSD_BTN_MAX 10
 #endif
 
 /* Shorter than this is contact bounce or a dropped report, not a press. */

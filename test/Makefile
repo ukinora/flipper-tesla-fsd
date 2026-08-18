@@ -47,6 +47,14 @@ BTN_SRC := test_button.c $(ROOT)/fsd_logic/fsd_button.c
 test_button: $(BTN_SRC) $(ROOT)/fsd_logic/fsd_button.h
 	$(CC) $(CFLAGS) -I$(ROOT)/fsd_logic $(BTN_SRC) -o $@
 
+# The J6 remote's report decoder. Pure bytes-in, button-out — the vectors in
+# test_btn_j6.c were captured from the remote, so this checks the decoder
+# against the DEVICE rather than against my reading of it.
+J6_SRC := test_btn_j6.c $(ROOT)/fsd_logic/fsd_btn_j6.c
+
+test_btn_j6: $(J6_SRC) $(ROOT)/fsd_logic/fsd_btn_j6.h $(ROOT)/fsd_logic/fsd_button.h
+	$(CC) $(CFLAGS) -I$(ROOT)/fsd_logic $(J6_SRC) -o $@
+
 # BLE payload packing. Also GENERATES fixtures/wire_vectors.json, which the
 # Android app's JVM tests parse — so the two implementations check each other
 # instead of both checking the prose in BLE-GATT-프로토콜.md.
@@ -55,16 +63,17 @@ WIRE_SRC := test_wire.c $(ROOT)/fsd_logic/fsd_wire.c
 test_wire: $(WIRE_SRC) $(ROOT)/fsd_logic/fsd_wire.h
 	$(CC) $(CFLAGS) -I$(ROOT)/fsd_logic $(WIRE_SRC) -o $@
 
-check: test_fsd_core test_speed_profile test_camera test_gps test_body test_button test_wire
+check: test_fsd_core test_speed_profile test_camera test_gps test_body test_button test_btn_j6 test_wire
 	./test_fsd_core
 	./test_speed_profile
 	./test_camera
 	./test_gps
 	./test_body
 	./test_button
+	./test_btn_j6
 	./test_wire
 
 clean:
-	rm -rf test_fsd_core test_speed_profile test_camera test_gps test_body test_button test_wire *.dSYM
+	rm -rf test_fsd_core test_speed_profile test_camera test_gps test_body test_button test_btn_j6 test_wire *.dSYM
 
 .PHONY: check clean
