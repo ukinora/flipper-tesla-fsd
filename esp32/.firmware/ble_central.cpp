@@ -46,6 +46,10 @@
 #define BLE_CENTRAL_RETRY_MS 5000u
 #define BLE_CENTRAL_MAX_RETRIES 5u
 
+/* After the fast tries, keep looking — just rarely. NEVER give up: a remote
+ * that is switched off or asleep is the ordinary case, not a fault. */
+#define BLE_CENTRAL_SLOW_RETRY_MS 60000u
+
 static Preferences g_prefs;
 static bool g_verbose = true;
 static uint32_t g_last_tick_ms = 0;
@@ -529,9 +533,27 @@ static void slot_drop(uint8_t i) {
 
 int ble_central_add(const char* addr_str) {
     if(!addr_str || !addr_str[0]) return -1;
-    // Already bound? Say which slot rather than taking a second one.
-    for(uint8_t i = 0; i < BLE_CENTRAL_MAX_BUTTONS; i++)
-        if(strcmp(g_slot[i].addr, addr_str) == 0) return (int)i;
+
+    /* Already bound? Do not take a second slot — but DO start trying again.
+     *
+     * 🔴 THIS USED TO RETURN AND NOTHING ELSE, which made the giving-up message
+     * a lie. After BLE_CENTRAL_MAX_RETRIES the client stops for good and prints
+     * "rebind to retry"; rebinding then hit this line, returned the slot number,
+     * and changed nothing. The remote stayed dead until someone thought to
+     * forget it first — and the app has no way to show that state at all, so
+     * from the phone it looks like a remote that simply never connects.
+     *
+     * A remote is normally out of retries because it was switched off, which is
+     * the ordinary way to use it. Asking to bind it again is exactly the moment
+     * to try once more. */
+    for(uint8_t i = 0; i < BLE_CENTRAL_MAX_BUTTONS; i++) {
+        if(strcmp(g_slot[i].addr, addr_str) != 0) continue;
+        if(g_slot[i].retries >= BLE_CENTRAL_MAX_RETRIES)
+            Serial.printf("[BTN] %u retrying %s\n", (unsigned)i, addr_str);
+        g_slot[i].retries = 0;
+        g_slot[i].last_try_ms = 0; // next tick, not five seconds from now
+        return (int)i;
+    }
 
     for(uint8_t i = 0; i < BLE_CENTRAL_MAX_BUTTONS; i++) {
         if(g_slot[i].addr[0]) continue;
@@ -737,14 +759,32 @@ void ble_central_tick(uint32_t now_ms) {
     for(uint8_t k = 0; k < BLE_CENTRAL_MAX_BUTTONS; k++) {
         CentralSlot* sl = &g_slot[k];
         if(!sl->addr[0] || sl->connected) continue;
-        if(sl->retries >= BLE_CENTRAL_MAX_RETRIES) continue; // stop; radio is shared
-        if((uint32_t)(now_ms - sl->last_try_ms) < BLE_CENTRAL_RETRY_MS) continue;
+
+        /* 🔴 THIS USED TO GIVE UP FOREVER after five tries, and that made the
+         * whole feature unusable (2026-08-19).
+         *
+         * A remote SLEEPS. That is not a fault, it is how the thing works — it
+         * stops advertising, and five attempts over twenty-five seconds is the
+         * entire window in which it can be caught. Miss it (the module rebooted
+         * while the remote was in a pocket, say) and the button is dead until
+         * someone thinks to forget and re-add it. From the phone that looks
+         * like a remote that simply never connects, with nothing to click.
+         *
+         * So the fast lane still backs off — five quick tries then stop
+         * hammering — but after that it keeps looking, rarely. One connect
+         * attempt a minute is nothing next to a button that never works. */
+        const uint32_t wait = (sl->retries >= BLE_CENTRAL_MAX_RETRIES)
+                                  ? BLE_CENTRAL_SLOW_RETRY_MS
+                                  : BLE_CENTRAL_RETRY_MS;
+        if((uint32_t)(now_ms - sl->last_try_ms) < wait) continue;
 
         sl->last_try_ms = now_ms;
         if(!try_connect(k)) {
             sl->retries++;
-            if(sl->retries >= BLE_CENTRAL_MAX_RETRIES)
-                Serial.printf("[BTN] %u giving up on %s - rebind to retry\n",
+            /* Once, at the transition. `>=` here would print every slow retry,
+             * forever — a line a minute for a remote sitting in a drawer. */
+            if(sl->retries == BLE_CENTRAL_MAX_RETRIES)
+                Serial.printf("[BTN] %u %s not answering - slowing to one try a minute\n",
                               (unsigned)k, sl->addr);
         } else {
             sl->retries = 0;

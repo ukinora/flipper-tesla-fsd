@@ -73,6 +73,13 @@ void capability_tick(uint32_t now_ms);
  * read nothing for as long as that build was on the board. */
 #define CAP_ATTR_MAX 512u
 
+/* How often the Capability document is rebuilt.
+ *
+ * 🔴 It was built ONCE, ten seconds after boot, and never again — so anything
+ * that changed later (a remote connecting, presses arriving, a scan finishing)
+ * could not reach the phone at all. */
+#define CAP_REFRESH_MS 1000u
+
 /* Room kept for what is written after the scan list. */
 #define CAP_TAIL_RESERVE 48u
 
