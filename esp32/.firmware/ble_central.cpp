@@ -11,6 +11,7 @@
 
 #ifdef BLE_SERVER_ENABLED
 
+#include "../../fsd_logic/fsd_btn_j6.h"
 #include "../../fsd_logic/fsd_button.h"
 
 #include <Arduino.h>
@@ -20,36 +21,24 @@
 
 // ── the device-specific table ────────────────────────────────────────────────
 
-/* Which byte of a notification carries the button, and which bit it is.
+/* IT MOVED, AND IT IS MEASURED NOW: fsd_logic/fsd_btn_j6.{h,c}.
  *
- * NOTHING HERE IS MEASURED. It cannot be: no button has been bought. The shape
- * is a guess at the most common case (a one-byte report, one bit per key), and
- * `verified` being false is what stops that guess from ever being treated as a
- * press. Exactly the FsdSpEncoding arrangement, for exactly the same reason.
+ * What used to sit here was an FsdBtnMap — one byte offset, one bit mask, and
+ * `verified = false` because no button had been bought. The remote that was
+ * eventually chosen (Yiser J6, 차주 결정 2026-08-18) cannot be described that
+ * way at all:
  *
- * ONE BUTTON PER DEVICE. This used to carry a mask per logical button, for one
- * remote with several keys. The plan changed (2026-08-18): up to eight separate
- * single-button remotes, each its own BLE device. So the table describes one
- * device's report and every bound device is scored through it — buy the same
- * model twice and it just works. A second MODEL would need its own entry, which
- * is a problem to solve when a second model exists.
+ *   - Seven buttons arrive on the SAME two report characteristics, so a mask
+ *     cannot tell them apart.
+ *   - It is not a keyboard. A press is a synthesised swipe or tap, so what
+ *     identifies a button is the DIRECTION a coordinate travelled or WHERE the
+ *     tap landed — not a bit.
+ *   - A long press comes back as a consumer-control code on the other
+ *     characteristic entirely.
  *
- * To fill it in: bind the button, watch the raw log through two presses, and
- * the offset and mask fall out. Then set verified.
- */
-typedef struct {
-    uint8_t report_len;  // expected notification length; 0 = accept any
-    uint8_t code_offset;
-    uint8_t press_mask;  // this bit set = the button is down
-    bool verified;
-} FsdBtnMap;
-
-static const FsdBtnMap FSD_BTN_MAP = {
-    .report_len = 0,
-    .code_offset = 0,
-    .press_mask = 0x01u,
-    .verified = false,
-};
+ * So the decoder is a real state machine, it lives in fsd_logic/ where it can
+ * be tested on the host against bytes captured from the device, and this file
+ * only routes what it decides. The 블루투스-버튼-조사.md table is the source. */
 
 // ── state ────────────────────────────────────────────────────────────────────
 
@@ -61,12 +50,22 @@ static Preferences g_prefs;
 static bool g_verbose = true;
 static uint32_t g_last_tick_ms = 0;
 
-/* One slot per bound remote. Slot index IS the logical button index, which is
- * why BLE_CENTRAL_MAX_BUTTONS and FSD_BTN_MAX are the same number.
+/* One slot per bound remote.
  *
- * Each slot keeps its own retry budget and its own clock: eight remotes waking
- * with the car must not all hammer the radio in one tick, and one that is out
- * of range must not stall the others.
+ * 🔴 SLOT INDEX IS NOT THE BUTTON INDEX ANY MORE. It was, while the plan was
+ * several single-button remotes. The J6 puts NINE buttons on ONE link, so the
+ * two counts are now separate things:
+ *
+ *    BLE_CENTRAL_MAX_BUTTONS  links   — a radio budget (ble_central.h)
+ *    FSD_BTN_MAX              buttons — an index space (fsd_button.h)
+ *
+ * The logical button index comes from fsd_btn_j6.h, not from the slot. Two
+ * identical remotes therefore drive the SAME buttons, which is the behaviour
+ * that was wanted anyway: a spare in the glovebox needs no configuration.
+ *
+ * Each slot keeps its own retry budget and its own clock: several remotes
+ * waking with the car must not all hammer the radio in one tick, and one that
+ * is out of range must not stall the others.
  */
 typedef struct {
     char addr[20];             // "" = free slot
@@ -78,6 +77,11 @@ typedef struct {
 static CentralSlot g_slot[BLE_CENTRAL_MAX_BUTTONS];
 
 static FsdButtons g_btns;
+
+/* Gesture state is PER REMOTE, not per button: a contact belongs to the device
+ * it came from. Sharing one would let two remotes interleave halves of a swipe
+ * into a direction neither person made. */
+static FsdJ6 g_j6[BLE_CENTRAL_MAX_BUTTONS];
 
 /* Last scan's results, kept so the PHONE can see them.
  *
@@ -256,6 +260,16 @@ static void slots_save(void) {
 void ble_central_init(void) {
     fsd_btn_init(&g_btns);
     memset(g_slot, 0, sizeof(g_slot));
+    for(uint8_t i = 0; i < BLE_CENTRAL_MAX_BUTTONS; i++) fsd_j6_init(&g_j6[i]);
+
+    /* 🔴 EVENT is the default and stays the default for eight of the nine.
+     * Only 6번 reports its release, and registering any of the others as LEVEL
+     * wedges it permanently: a hold it never ends becomes LONG at 0.6 s and
+     * STUCK at 10 s, and STUCK clears only on a release. Asking the table which
+     * ones are level — rather than listing them here — keeps that decision next
+     * to the measurement that justifies it. */
+    for(uint8_t b = 0; b < FSD_J6_COUNT; b++)
+        if(fsd_j6_is_level((FsdJ6Btn)b)) fsd_btn_set_kind(&g_btns, b, FSD_BTN_KIND_LEVEL);
 
     g_prefs.begin("btn", false);
     char key[8];
@@ -492,8 +506,17 @@ static void slot_drop(uint8_t i) {
     sl->connected = false;
     sl->retries = 0;
     sl->addr[0] = 0;
-    // The logical button goes with it, or a stuck press would outlive the remote.
-    fsd_btn_report(&g_btns, i, false, millis());
+
+    /* The gesture goes with the remote. A half-finished swipe left behind would
+     * be measured from its old start point the next time anything connects.
+     *
+     * 🔴 And the level button has to be let go explicitly. This used to release
+     * "button `i`" because the slot WAS the button; now the only button that
+     * can be held is 6번, and leaving it down here means the remote walks away
+     * mid-press and the module reports STUCK ten seconds later on a device that
+     * is no longer there. */
+    fsd_j6_init(&g_j6[i]);
+    fsd_btn_report(&g_btns, FSD_J6_B6, false, millis());
 }
 
 int ble_central_add(const char* addr_str) {
@@ -577,14 +600,16 @@ bool ble_central_scanning(void) { return g_scanning; }
 void ble_central_set_verbose(bool on) { g_verbose = on; }
 uint16_t ble_central_notify_count(void) { return g_notify_count; }
 
-static uint16_t sum_over_slots(uint16_t (*f)(const FsdButtons*, uint8_t)) {
+/* Over every logical button. It used to be over slots, back when those were the
+ * same thing; with the J6 that would count one button in nine. */
+static uint16_t sum_over_buttons(uint16_t (*f)(const FsdButtons*, uint8_t)) {
     uint32_t n = 0;
-    for(uint8_t i = 0; i < BLE_CENTRAL_MAX_BUTTONS; i++) n += f(&g_btns, i);
+    for(uint8_t b = 0; b < FSD_BTN_MAX; b++) n += f(&g_btns, b);
     return (n > 0xFFFFu) ? 0xFFFFu : (uint16_t)n;
 }
-uint16_t ble_central_short_presses(void)  { return sum_over_slots(fsd_btn_shorts); }
-uint16_t ble_central_long_presses(void)   { return sum_over_slots(fsd_btn_longs); }
-uint16_t ble_central_double_presses(void) { return sum_over_slots(fsd_btn_doubles); }
+uint16_t ble_central_short_presses(void)  { return sum_over_buttons(fsd_btn_shorts); }
+uint16_t ble_central_long_presses(void)   { return sum_over_buttons(fsd_btn_longs); }
+uint16_t ble_central_double_presses(void) { return sum_over_buttons(fsd_btn_doubles); }
 
 void ble_central_tick(uint32_t now_ms) {
     if((uint32_t)(now_ms - g_last_tick_ms) < BLE_CENTRAL_TICK_MS) return;
@@ -635,40 +660,47 @@ void ble_central_tick(uint32_t now_ms) {
             for(uint8_t k = 0; k < len; k++) Serial.printf(" %02X", rep.b[k]);
             Serial.println();
         }
-        /* THE GATE. Until the layout is confirmed against a real button, a
-         * report is a log line and nothing else. Guessing here would mean a
-         * random byte from an unknown peripheral counting as a press. */
-        if(FSD_BTN_MAP.verified &&
-           (FSD_BTN_MAP.report_len == 0 || len == FSD_BTN_MAP.report_len) &&
-           FSD_BTN_MAP.code_offset < len) {
-            /* Which entry point depends on what this button can say (see
-             * fsd_button.h). Feeding a level to an event button, or a pulse to
-             * a level one, is refused there rather than guessed — so the branch
-             * has to live here, at the only place that knows the kind.
-             *
-             * EVENT is the default, which is what the TSL remote measured on
-             * 2026-08-18 appears to be: it says a press happened and never that
-             * it ended. A notification IS the whole gesture. */
-            FsdBtnEvent e;
-            if(fsd_btn_kind(&g_btns, i) == FSD_BTN_KIND_LEVEL) {
-                const bool down =
-                    (rep.b[FSD_BTN_MAP.code_offset] & FSD_BTN_MAP.press_mask) != 0u;
-                e = fsd_btn_report(&g_btns, i, down, now_ms);
-            } else {
-                e = fsd_btn_pulse(&g_btns, i, now_ms);
+        /* THE GATE, and it is the decoder itself now. A report that is not this
+         * device's shape decodes to NONE, so an unknown peripheral's bytes stay
+         * a log line — the same protection the old `verified` flag gave, except
+         * it comes from recognising the device rather than from a promise. */
+        const FsdJ6Out g = fsd_j6_feed(&g_j6[i], rep.b, len, now_ms);
+        if(g.edge != FSD_J6_EDGE_NONE) {
+            const uint8_t b = (uint8_t)g.btn;
+
+            /* Which entry point depends on what the gesture said, and the two
+             * are not interchangeable: fsd_button.h refuses a level fed to an
+             * event button and a pulse fed to a level one, rather than guessing
+             * which was meant. A guess there double-counts a gesture. */
+            FsdBtnEvent e = FSD_BTN_EV_NONE;
+            switch(g.edge) {
+            case FSD_J6_EDGE_PULSE: e = fsd_btn_pulse(&g_btns, b, now_ms); break;
+            case FSD_J6_EDGE_DOWN:  e = fsd_btn_report(&g_btns, b, true, now_ms); break;
+            case FSD_J6_EDGE_UP:    e = fsd_btn_report(&g_btns, b, false, now_ms); break;
+            case FSD_J6_EDGE_NONE:  break; // unreachable; keeps the switch total
             }
+
+            /* The button's NAME, not its number. This line is read while
+             * working out which physical key does what, and "6 tap-hold" needs
+             * no lookup table where "5" needs the header open. */
             if(e != FSD_BTN_EV_NONE)
-                Serial.printf("[BTN] %u %s (%ums)\n", (unsigned)i,
-                              fsd_btn_event_str(e),
-                              (unsigned)fsd_btn_last_hold_ms(&g_btns, i));
+                Serial.printf("[BTN] slot%u %s -> %s (%ums)\n", (unsigned)i,
+                              fsd_j6_name(g.btn), fsd_btn_event_str(e),
+                              (unsigned)fsd_btn_last_hold_ms(&g_btns, b));
         }
     }
 
-    // LONG, DOUBLE and STUCK happen while nothing is being reported.
-    for(uint8_t i = 0; i < BLE_CENTRAL_MAX_BUTTONS; i++) {
-        const FsdBtnEvent e = fsd_btn_tick(&g_btns, i, now_ms);
+    /* LONG, DOUBLE and STUCK happen while nothing is being reported.
+     *
+     * Over BUTTONS, not slots. Getting this bound wrong is quiet in both
+     * directions — too low and the top buttons never produce a LONG, too high
+     * and it reads past the array — which is why the two counts are asserted
+     * against each other in fsd_btn_j6.h rather than kept in step by hand. */
+    for(uint8_t b = 0; b < FSD_BTN_MAX; b++) {
+        const FsdBtnEvent e = fsd_btn_tick(&g_btns, b, now_ms);
         if(e != FSD_BTN_EV_NONE)
-            Serial.printf("[BTN] %u %s\n", (unsigned)i, fsd_btn_event_str(e));
+            Serial.printf("[BTN] %s -> %s\n", fsd_j6_name((FsdJ6Btn)b),
+                          fsd_btn_event_str(e));
     }
 
     /* A press is CLASSIFIED and COUNTED here. Nothing acts on it: the only

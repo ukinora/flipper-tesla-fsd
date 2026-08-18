@@ -6,24 +6,29 @@
  * central for a button at the same time — NimBLE supports both roles at once,
  * and the cost of that is measured rather than assumed (see the PR).
  *
- * BUILT AS A BRING-UP TOOL FIRST, ON PURPOSE
- * ------------------------------------------
- * No button has been chosen yet, and a BLE button can be any of three things:
- * an HID-over-GATT keyboard or consumer-control, a vendor characteristic that
- * notifies a byte, or a device that changes its ADVERTISEMENT on press and
- * never accepts a connection at all. Which one it is decides most of the code.
- *
- * Writing a parser for a device nobody has is the same mistake as writing an
- * emitter for a frame nobody has captured. So the first job here is to LOOK:
+ * BUILT AS A BRING-UP TOOL FIRST, AND THAT PAID OFF
+ * -------------------------------------------------
+ * This was written before a button existed, so it was built to LOOK rather than
+ * to parse:
  *
  *    scan   -> print every advertiser: name, address, appearance, service UUIDs
  *    bind   -> remember one address in NVS
  *    connect-> subscribe to every notifying characteristic there is
  *    log    -> print the raw bytes of everything that arrives
  *
- * From that log the report layout is obvious in about a minute, and it goes in
- * the table below. Until then FSD_BTN_MAP.verified is false and no report is
- * interpreted as a press — the same discipline as FsdSpEncoding.
+ * A remote has since been chosen — a Yiser J6 (차주 결정, 2026-08-18) — and the
+ * looking is what made it usable. It is not a keyboard: a press arrives as a
+ * synthesised swipe or tap on a digitiser report, and nine distinguishable
+ * buttons come down ONE link. Subscribing to everything at once is how that
+ * became visible; a parser written for the device we assumed would have found
+ * nothing. The decoder is fsd_logic/fsd_btn_j6.h and the measurement is in
+ * 블루투스-버튼-조사.md.
+ *
+ * 🔴 The first reading of that remote was WRONG, and not because of the device.
+ * A swipe is up to nine notifications and this file kept one buffer per slot,
+ * so eight were overwritten before the loop looked. From what survived the
+ * remote appeared to emit nothing usable. Seeing less is not the same as there
+ * being less — hence the ring buffer below.
  *
  * PRESSES DO NOTHING YET
  * ----------------------
