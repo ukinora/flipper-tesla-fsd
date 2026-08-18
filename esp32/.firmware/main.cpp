@@ -383,6 +383,12 @@ static void serial_command_tick() {
                 while (*arg == ' ') arg++;
                 if (arg[0]) ble_central_raw(arg, 8);
                 else Serial.println("[SER] btnraw <addr>");
+            } else if (strncmp(buf, "btnchr", 6) == 0) {
+                // Bring-up: what can this thing do? subscribe_all() only ever
+                // looked at notifies, so a write target was invisible.
+                const char *arg = buf + 6;
+                while (*arg == ' ') arg++;
+                ble_central_chars(arg[0] ? (uint8_t)atoi(arg) : 0);
             } else if (strncmp(buf, "btnsec", 6) == 0) {
                 // Bring-up: is it withholding notifications until the link is
                 // encrypted? We never pair otherwise, so this rules it out.

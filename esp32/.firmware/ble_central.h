@@ -198,6 +198,14 @@ bool ble_central_raw(const char* addr_str, uint8_t secs);
  *  untouched — but it does spend one bond slot. */
 bool ble_central_secure(uint8_t slot);
 
+/** Print the connected remote's whole GATT table with properties, and the
+ *  current value of anything readable.
+ *
+ *  subscribe_all() only ever asked "what notifies". That is the right first
+ *  question and the wrong second one: a remote that stays silent may be waiting
+ *  to be written to, and a write target is invisible from a notify-only view. */
+bool ble_central_chars(uint8_t slot);
+
 /** Counters for the serial line and a future BLE surface. */
 uint16_t ble_central_notify_count(void);
 uint16_t ble_central_short_presses(void);
@@ -225,6 +233,7 @@ static inline bool ble_central_any_connected(void) { return false; }
 static inline void ble_central_set_verbose(bool) {}
 static inline bool ble_central_raw(const char*, uint8_t) { return false; }
 static inline bool ble_central_secure(uint8_t) { return false; }
+static inline bool ble_central_chars(uint8_t) { return false; }
 static inline uint16_t ble_central_notify_count(void) { return 0; }
 static inline uint16_t ble_central_short_presses(void) { return 0; }
 static inline uint16_t ble_central_long_presses(void) { return 0; }

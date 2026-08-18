@@ -324,6 +324,44 @@ bool ble_central_raw(const char* addr_str, uint8_t secs) {
     return true;
 }
 
+bool ble_central_chars(uint8_t slot) {
+    if(slot >= BLE_CENTRAL_MAX_BUTTONS) return false;
+    NimBLEClient* c = g_slot[slot].client;
+    if(!c || !c->isConnected()) {
+        Serial.printf("[BTN] %u: not connected\n", (unsigned)slot);
+        return false;
+    }
+    /* subscribe_all() only ever looked at what NOTIFIES. That was the right
+     * first question and it is the wrong second one: a remote that stays silent
+     * may be waiting to be written to, and a write target is invisible from
+     * here. So print the whole table, properties and all. */
+    Serial.printf("[BTN] %u: characteristics\n", (unsigned)slot);
+    for(auto* svc : c->getServices(true)) {
+        Serial.printf("  service %s\n", svc->getUUID().toString().c_str());
+        for(auto* chr : svc->getCharacteristics(true)) {
+            char props[24];
+            snprintf(props, sizeof(props), "%s%s%s%s%s",
+                     chr->canRead() ? "R" : "-",
+                     chr->canWrite() ? "W" : "-",
+                     chr->canWriteNoResponse() ? "w" : "-",
+                     chr->canNotify() ? "N" : "-",
+                     chr->canIndicate() ? "I" : "-");
+            Serial.printf("    %-38s %s", chr->getUUID().toString().c_str(), props);
+            /* The current value of a readable characteristic is free evidence —
+             * a key-state byte would show up right here. */
+            if(chr->canRead()) {
+                NimBLEAttValue v = chr->readValue();
+                Serial.print("  ");
+                for(size_t k = 0; k < v.length() && k < 20; k++) Serial.printf("%02X", v[k]);
+                if(v.length() == 0) Serial.print("(empty)");
+            }
+            Serial.println();
+        }
+    }
+    Serial.println("[BTN] R=read W=write w=write-no-resp N=notify I=indicate");
+    return true;
+}
+
 bool ble_central_secure(uint8_t slot) {
     if(slot >= BLE_CENTRAL_MAX_BUTTONS) return false;
     NimBLEClient* c = g_slot[slot].client;
