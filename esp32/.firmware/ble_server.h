@@ -78,6 +78,23 @@
 #define BLE_CMD_BTN_BIND     0x61u  // arg: index into the last scan's results
 #define BLE_CMD_BTN_FORGET   0x62u  // arg: slot to drop, 0xFF = all
 
+/* Turn ONE row on or off. A row is (logical button, event) — see ble_central.h.
+ *
+ *    arg = (row << 1) | (1 = on, 0 = off)
+ *
+ * There is no separate double-press command: enabling the DOUBLE row IS turning
+ * double-press on. One truth, so the two cannot drift apart.
+ *
+ * 🔴 It is per button because the COST is per button. Watching for a second tap
+ * means the first one cannot be reported until the window closes, so every
+ * single press on that button is delayed by FSD_BTN_DOUBLE_MS. On a control
+ * where the feel matters — stepping the speed profile — that latency is the
+ * control. fsd_button.h refused double-press outright for exactly this reason
+ * before the cost was made opt-in.
+ *
+ * Persisted: it is a mapping decision, not a session one. */
+#define BLE_CMD_BTN_ACTION   0x63u
+
 // ── Camera / autonomy status (read + notify) ─────────────────────────────────
 // A separate characteristic rather than more bytes in State: State is a fixed
 // 20 and full, and widening it would bump the wire version for every client.

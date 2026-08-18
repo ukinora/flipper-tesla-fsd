@@ -131,6 +131,20 @@ bool fsd_j6_is_level(FsdJ6Btn b) {
     return b == FSD_J6_B6;
 }
 
+uint16_t fsd_j6_double_window_ms(FsdJ6Btn b) {
+    switch(b) {
+    /* The four swipes. The remote takes a third of a second to finish one, so
+     * the window has to outlast the gesture itself. */
+    case FSD_J6_B1:
+    case FSD_J6_B2:
+    case FSD_J6_B3:
+    case FSD_J6_B4: return FSD_J6_DOUBLE_SWIPE_MS;
+
+    /* Taps and the consumer codes arrive whole, in about 0.1 s. */
+    default: return FSD_J6_DOUBLE_TAP_MS;
+    }
+}
+
 const char* fsd_j6_name(FsdJ6Btn b) {
     /* ASCII: the serial console is ASCII throughout and this is read when
      * something is already wrong.

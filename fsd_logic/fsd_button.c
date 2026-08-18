@@ -88,8 +88,13 @@ FsdBtnEvent fsd_btn_report(FsdButtons* b, uint8_t idx, bool pressed, uint32_t no
 }
 
 /* The withheld-tap timeout. The only part of tick() an event button has. */
+/* The window this button waits. 0 means "never set" — the default. */
+static uint16_t window_of(const FsdBtnState* s) {
+    return s->double_ms ? s->double_ms : (uint16_t)FSD_BTN_DOUBLE_MS;
+}
+
 static FsdBtnEvent release_pending(FsdBtnState* s, uint32_t now_ms) {
-    if(s->tap_pending && (uint32_t)(now_ms - s->pending_ms) >= FSD_BTN_DOUBLE_MS) {
+    if(s->tap_pending && (uint32_t)(now_ms - s->pending_ms) >= window_of(s)) {
         s->tap_pending = false;
         s->shorts++;
         return FSD_BTN_EV_SHORT;
@@ -163,6 +168,22 @@ void fsd_btn_set_double(FsdButtons* b, uint8_t idx, bool on) {
 
 bool fsd_btn_double_enabled(const FsdButtons* b, uint8_t idx) {
     return (b && idx < FSD_BTN_MAX) ? b->btn[idx].want_double : false;
+}
+
+void fsd_btn_set_double_window(FsdButtons* b, uint8_t idx, uint16_t ms) {
+    if(!b || idx >= FSD_BTN_MAX) return;
+    /* A window at or past the hold threshold eats the hold: the tap would still
+     * be waiting when LONG fires, and LONG drops it — so the button would have
+     * a double-press that can never complete and a long-press that always
+     * wins. Clamp rather than refuse; the caller asked for "as long as
+     * possible" and this is what that is. */
+    if(ms >= (uint16_t)FSD_BTN_LONG_MS) ms = (uint16_t)(FSD_BTN_LONG_MS - 100u);
+    b->btn[idx].double_ms = ms;
+}
+
+uint16_t fsd_btn_double_window(const FsdButtons* b, uint8_t idx) {
+    if(!b || idx >= FSD_BTN_MAX) return 0;
+    return window_of(&b->btn[idx]);
 }
 
 bool fsd_btn_is_stuck(const FsdButtons* b, uint8_t idx) {

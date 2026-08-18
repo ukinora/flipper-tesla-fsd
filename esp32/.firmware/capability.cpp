@@ -9,6 +9,7 @@
 #include "ble_central.h"
 #include "capability.h"
 #include "config.h"
+#include "../../fsd_logic/fsd_btn_j6.h"      // FSD_J6_COUNT — the logical button count
 #include "../../fsd_logic/fsd_capability.h"  // fsd_capability_eval
 
 // Capability-relevant ids, in a fixed slot order. Kept local so the counting
@@ -215,6 +216,30 @@ String capability_status_json() {
     }
     j += "],";
     j += "\"slots\":"; j += (int)BLE_CENTRAL_MAX_BUTTONS; j += ',';
+
+    /* Per LOGICAL button: how many gestures it has produced, and which ones are
+     * watching for doubles. Compact on purpose — the app knows the order from
+     * fsd_btn_j6.h, and spelling nine of anything out as named objects is
+     * exactly what pushed this document past the ATT limit once already.
+     *
+     * The counts are what let a person find which row is the key under their
+     * thumb: press it, watch a number move. Without them the screen can only
+     * say "something arrived", which names nothing. */
+    /* 🔴 HEX STRING, NOT AN ARRAY, and the reason is size. Thirty rows written
+     * as decimal numbers grow with the counts — a document that fits today
+     * stops fitting after a hundred presses, and NimBLE answers an oversized
+     * value by storing NOTHING. Two hex characters per row is 60 bytes no
+     * matter what the counts are, so the document cannot outgrow the ATT limit
+     * by being used. */
+    j += "\"btn\":\"";
+    for (uint8_t r = 0; r < FSD_J6_COUNT * FSD_BTN_EVENTS; r++) {
+        const uint8_t n = ble_central_row_events(r);
+        static const char kHex[] = "0123456789abcdef";
+        j += kHex[(n >> 4) & 0xFu];
+        j += kHex[n & 0xFu];
+    }
+    j += "\",";
+    j += "\"act\":"; j += (unsigned long)ble_central_action_mask(); j += ',';
 
     /* ── the scan list, and the reason it is fitted rather than appended ──────
      *

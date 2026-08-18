@@ -87,6 +87,17 @@
 #define BLE_CENTRAL_MAX_BUTTONS 5
 #endif
 
+/** Events a row can carry: short, double, long.
+ *
+ * 🔴 ABOVE THE #ifdef, like the counts around it. capability.cpp uses this to
+ * size a loop and is compiled for every board, so hiding it behind
+ * BLE_SERVER_ENABLED breaks the seven boards that do not define it — which is
+ * exactly how this file broke eight builds once already. Only lilygo-t2can
+ * defines it, so a local build of our own board proves nothing. */
+#ifndef FSD_BTN_EVENTS
+#define FSD_BTN_EVENTS 3u
+#endif
+
 /* ── The slot count is not free. It is spent out of the radio's link budget ──
  *
  * 🔴 This was a boot loop, not a warning (2026-08-18). Asking NimBLE for more
@@ -179,6 +190,59 @@ bool ble_central_slot_connected(uint8_t slot);
  *  has to say those two differently. */
 uint16_t ble_central_slot_decoded(uint8_t slot);
 
+/* ── per logical button ──────────────────────────────────────────────────────
+ *
+ * These are about BUTTONS, not links. One remote carries nine of them, so a
+ * per-slot answer cannot address them (fsd_btn_j6.h). */
+
+/** How many times THIS ROW has fired. Row encoding as above.
+ *
+ *  🔴 PER ROW, NOT PER BUTTON. It was per button — short, double and long added
+ *  together — and the screen then drew that one number on all three of a
+ *  button's lines, so pressing 6번 once appeared to move its 1회, 2회 AND 길게
+ *  counts at once. The number exists to tell those lines APART; summing them
+ *  destroyed exactly the information it was for.
+ *
+ *  Clamped to 255. This is evidence that a line moved, not a statistic. */
+uint8_t ble_central_row_events(uint8_t row);
+
+/* ── what each input is supposed to DO ───────────────────────────────────────
+ *
+ * A button is not one thing. 6번 alone offers a tap, a double tap and a hold,
+ * and each is a separate place to hang an action. So the unit here is a ROW —
+ * (logical button, event) — not a button.
+ *
+ *    row = button * FSD_BTN_EVENTS + event,  event 0 short / 1 double / 2 long
+ *
+ * Today the only choice is on or off, because no vehicle action has been
+ * captured yet. Stored anyway, and stored HERE rather than in the phone: the
+ * module is what will act, and a mapping the module does not know is a mapping
+ * that stops working the moment the phone is elsewhere. Same reasoning as
+ * autonomy_enabled.
+ *
+ * 🔴 The DOUBLE rows are not just intent. Enabling one turns on the wait for a
+ * second tap, which delays that button's single press — so this mask replaced
+ * the separate double-press mask rather than sitting beside it. Two masks would
+ * be two truths about the same thing, and they would drift. */
+
+/** Turn one row on or off. Persisted. Enabling a DOUBLE row also starts the
+ *  double-press wait on that button; disabling it stops it. */
+void ble_central_set_action(uint8_t row, bool on);
+
+/** Bitmask of enabled rows, bit `row` = that row. */
+uint32_t ble_central_action_mask(void);
+
+/** Watch for double presses on one logical button. Persisted.
+ *
+ *  🔴 THE COST IS ON THAT BUTTON ALONE and it is real: a tap cannot be reported
+ *  until a second one is known not to be coming, so every single press there is
+ *  delayed by FSD_BTN_DOUBLE_MS. Turn it on where a second action is actually
+ *  mapped, never "in case". */
+void ble_central_set_double(uint8_t btn, bool on);
+
+/** Bitmask of buttons with double-press on, bit N = button N. */
+uint16_t ble_central_double_mask(void);
+
 /** True when this firmware carries a decoder that was measured against a real
  *  device, rather than a guess waiting to be confirmed.
  *
@@ -260,6 +324,11 @@ static inline const char* ble_central_slot_addr(uint8_t) { return ""; }
 static inline bool ble_central_slot_connected(uint8_t) { return false; }
 static inline uint16_t ble_central_slot_decoded(uint8_t) { return 0; }
 static inline bool ble_central_decoder_verified(void) { return false; }
+static inline uint8_t ble_central_row_events(uint8_t) { return 0; }
+static inline void ble_central_set_double(uint8_t, bool) {}
+static inline uint16_t ble_central_double_mask(void) { return 0; }
+static inline void ble_central_set_action(uint8_t, bool) {}
+static inline uint32_t ble_central_action_mask(void) { return 0; }
 static inline uint8_t ble_central_bound_count(void) { return 0; }
 static inline bool ble_central_any_connected(void) { return false; }
 static inline void ble_central_set_verbose(bool) {}

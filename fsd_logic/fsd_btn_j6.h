@@ -185,6 +185,10 @@ typedef struct {
  * genuinely wedged button is what fsd_button.h's STUCK is for. */
 #define FSD_J6_GESTURE_MAX_MS 2000u
 
+/* Double-press windows, by gesture. See fsd_j6_double_window_ms(). */
+#define FSD_J6_DOUBLE_SWIPE_MS 500u
+#define FSD_J6_DOUBLE_TAP_MS 300u
+
 /** Clear to "no contact". */
 void fsd_j6_init(FsdJ6* s);
 
@@ -202,6 +206,20 @@ FsdJ6Out fsd_j6_feed(FsdJ6* s, const uint8_t* b, uint8_t len, uint32_t now_ms);
  *  it: LONG at 0.6 s, STUCK at 10 s, and STUCK clears only on a release it can
  *  never send. */
 bool fsd_j6_is_level(FsdJ6Btn b);
+
+/** How long this button should wait for a twin, in ms.
+ *
+ *  🔴 MEASURED, and it is not a preference. A swipe is the remote streaming
+ *  nine reports over 0.2-0.3 s with the verdict on the last one, so two swipes
+ *  cannot land closer than about a third of a second however fast a person
+ *  moves. Six consecutive pairs on 2026-08-19 came in at 0.21 0.22 0.22 0.33
+ *  0.21 0.22 s — at the stock 300 ms window one of the six failed, and a failed
+ *  double is not a miss: both taps surface as SHORT, so the SINGLE action fires
+ *  TWICE.
+ *
+ *  A tap is 0.1 s and needs no such room. Charging every button for the swipes
+ *  would add a fifth of a second to presses that never needed it. */
+uint16_t fsd_j6_double_window_ms(FsdJ6Btn b);
 
 /** ASCII name, for the serial log. Never NULL. */
 const char* fsd_j6_name(FsdJ6Btn b);
