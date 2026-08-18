@@ -40,6 +40,57 @@ void capability_start(uint32_t now_ms);
 void capability_tick(uint32_t now_ms);
 
 // Dashboard payload: {"state":..,"ms_left":..,"hw":..,"buses":[{...}]}.
+/* ── which capability-relevant CAN ids were seen, as bit positions ───────────
+ *
+ * 🔴 APPEND ONLY. android/wire/Capability.kt decodes this back into named
+ * fields in exactly this order; inserting a bit in the middle renames every
+ * flag above it, and nothing would say so — the document still parses and the
+ * app still greys out features, just the wrong ones.
+ *
+ * These were eleven named booleans in the JSON until 2026-08-18. That cost
+ * ~190 bytes per bus and pushed the document past the 512-byte ATT limit,
+ * which NimBLE answers by storing NOTHING. */
+#define CAP_ID_BIT_EPAS         (1u << 0)
+#define CAP_ID_BIT_DAS_HW4      (1u << 1)
+#define CAP_ID_BIT_DAS_HW3      (1u << 2)
+#define CAP_ID_BIT_AP_CTRL      (1u << 3)
+#define CAP_ID_BIT_AP_LEGACY    (1u << 4)
+#define CAP_ID_BIT_STEER        (1u << 5)
+#define CAP_ID_BIT_BODY_UI      (1u << 6)
+#define CAP_ID_BIT_BODY_DOOR    (1u << 7)
+#define CAP_ID_BIT_BODY_WINDOW  (1u << 8)
+#define CAP_ID_BIT_BODY_LIGHTS  (1u << 9)
+#define CAP_ID_BIT_SCROLL       (1u << 10)
+
+/* The largest value a GATT attribute may hold.
+ *
+ * 🔴 SPEC, NOT SETTING. BLE_ATT_ATTR_MAX_LEN is 512 in the Bluetooth core
+ * specification, so raising the MTU does not raise this. NimBLE REJECTS an
+ * oversized setValue() rather than truncating it, leaving the characteristic
+ * empty — which a reader cannot tell apart from "not written yet".
+ *
+ * The Capability document outgrew this on 2026-08-18 (566 bytes) and the phone
+ * read nothing for as long as that build was on the board. */
+#define CAP_ATTR_MAX 512u
+
+/* How often the Capability document is rebuilt.
+ *
+ * 🔴 It was built ONCE, ten seconds after boot, and never again — so anything
+ * that changed later (a remote connecting, presses arriving, a scan finishing)
+ * could not reach the phone at all.
+ *
+ * 500 ms pairs with the app's read cadence: together they put a press on the
+ * screen within a second. The document is ~400 bytes, so rebuilding it twice a
+ * second is a String build and nothing else.
+ *
+ * ⚠️ This is SCREEN latency only. The module classifies a press within about
+ * 100 ms of the report arriving (BLE interval + a 50 ms tick) and acts on it
+ * there; the phone is a spectator. Do not read this number as reaction time. */
+#define CAP_REFRESH_MS 500u
+
+/* Room kept for what is written after the scan list. */
+#define CAP_TAIL_RESERVE 48u
+
 String capability_status_json();
 
 /**

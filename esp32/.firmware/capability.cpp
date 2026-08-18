@@ -120,7 +120,7 @@ String capability_status_json() {
     }
 
     String j;
-    j.reserve(1536); // + buttons
+    j.reserve(CAP_ATTR_MAX + 64);
     j  = "{";
     j += "\"state\":";   j += (int)st;       j += ',';
     j += "\"ms_left\":"; j += ms_left;       j += ',';
@@ -142,18 +142,34 @@ String capability_status_json() {
         first = false;
         j += "{\"bus\":\""; j += can_bus_name((CanBusId)b); j += "\",";
         j += "\"frames\":"; j += total; j += ',';
-        j += "\"ids\":{";
-        j += "\"epas\":";      j += seen.epas       ? "true" : "false"; j += ',';
-        j += "\"das_hw4\":";   j += seen.das_hw4    ? "true" : "false"; j += ',';
-        j += "\"das_hw3\":";   j += seen.das_hw3    ? "true" : "false"; j += ',';
-        j += "\"ap_ctrl\":";   j += seen.ap_control ? "true" : "false"; j += ',';
-        j += "\"ap_legacy\":"; j += seen.ap_legacy  ? "true" : "false"; j += ',';
-        j += "\"steer\":";     j += seen.steer      ? "true" : "false"; j += ',';
-        j += "\"body_ui\":";     j += seen.body_ui     ? "true" : "false"; j += ',';
-        j += "\"body_door\":";   j += seen.body_door   ? "true" : "false"; j += ',';
-        j += "\"body_window\":"; j += seen.body_window ? "true" : "false"; j += ',';
-        j += "\"body_lights\":"; j += seen.body_lights ? "true" : "false"; j += ',';
-        j += "\"scroll\":";      j += seen.scroll      ? "true" : "false"; j += "},";
+        /* ── the seen-id set, as a BITMASK ───────────────────────────────────
+         *
+         * 🔴 THIS USED TO BE ELEVEN NAMED BOOLEANS and that is what broke the
+         * whole document. `{"epas":false,"das_hw4":false,...}` is ~190 bytes
+         * PER BUS, so two buses spent 400 of the 512 an ATT attribute may hold
+         * (2026-08-18). NimBLE rejected the oversized value outright and the
+         * phone read an empty document — for every screen, not just this one.
+         *
+         * A set of booleans is a bitmask; writing it as prose was the mistake.
+         * 190 bytes becomes about 6.
+         *
+         * ⚠️ THE BIT ORDER IS A CONTRACT. wire/Capability.kt decodes it back
+         * into the same named fields, so inserting a bit in the middle silently
+         * renames every flag above it. Append only, and the app's CapIdsTest
+         * pins this exact mapping. */
+        uint32_t ids = 0;
+        if (seen.epas)        ids |= CAP_ID_BIT_EPAS;
+        if (seen.das_hw4)     ids |= CAP_ID_BIT_DAS_HW4;
+        if (seen.das_hw3)     ids |= CAP_ID_BIT_DAS_HW3;
+        if (seen.ap_control)  ids |= CAP_ID_BIT_AP_CTRL;
+        if (seen.ap_legacy)   ids |= CAP_ID_BIT_AP_LEGACY;
+        if (seen.steer)       ids |= CAP_ID_BIT_STEER;
+        if (seen.body_ui)     ids |= CAP_ID_BIT_BODY_UI;
+        if (seen.body_door)   ids |= CAP_ID_BIT_BODY_DOOR;
+        if (seen.body_window) ids |= CAP_ID_BIT_BODY_WINDOW;
+        if (seen.body_lights) ids |= CAP_ID_BIT_BODY_LIGHTS;
+        if (seen.scroll)      ids |= CAP_ID_BIT_SCROLL;
+        j += "\"ids\":"; j += (unsigned long)ids; j += ',';
         j += "\"nag_killer\":";     j += (int)r.nag_killer;     j += ',';
         j += "\"ap_first\":";       j += (int)r.ap_first;       j += ',';
         j += "\"fsd_activation\":"; j += (int)r.fsd_activation; j += ',';
@@ -173,13 +189,19 @@ String capability_status_json() {
      * and the alternative was the app having no way at all, which is what it
      * had. The scan itself is a command (BLE_CMD_BTN_SCAN); this is the answer.
      *
-     * `verified` is the same gate ble_central.cpp applies to reports: false
-     * means a press is a log line and nothing more. The app must not present a
-     * bound button as working while it is false. */
+     * 🔴 `verified` WAS HARDCODED false here, from the months before a button
+     * had been bought — and it stayed false after the J6 decoder was measured
+     * and shipped, so the app told the owner a working remote did not work.
+     * It comes from the firmware now, and cannot freeze again.
+     *
+     * `verified` answers "does this build have a real decoder"; it says nothing
+     * about the device in a given slot. `decoded` does that — presses from THAT
+     * remote that we could name. The app needs both: without the count, a
+     * remote we do not understand connects and looks fine. */
     j += "\"buttons\":{";
     j += "\"scanning\":"; j += ble_central_scanning() ? "true" : "false"; j += ',';
     j += "\"connected\":"; j += ble_central_any_connected() ? "true" : "false"; j += ',';
-    j += "\"verified\":false,";
+    j += "\"verified\":"; j += ble_central_decoder_verified() ? "true" : "false"; j += ',';
     j += "\"bound\":[";
     for (uint8_t i = 0; i < BLE_CENTRAL_MAX_BUTTONS; i++) {
         const char* a = ble_central_slot_addr(i);
@@ -187,22 +209,68 @@ String capability_status_json() {
         if (j[j.length() - 1] != '[') j += ',';
         j += "{\"slot\":";      j += (int)i; j += ',';
         j += "\"addr\":\"";    j += a;      j += "\",";
-        j += "\"connected\":";  j += ble_central_slot_connected(i) ? "true" : "false";
+        j += "\"connected\":";  j += ble_central_slot_connected(i) ? "true" : "false"; j += ',';
+        j += "\"decoded\":";    j += (int)ble_central_slot_decoded(i);
         j += '}';
     }
     j += "],";
-    j += "\"slots\":"; j += (int)BLE_CENTRAL_MAX_BUTTONS; j += ','; 
-    j += "\"found\":[";
-    for (uint8_t i = 0; i < ble_central_found_count(); i++) {
+    j += "\"slots\":"; j += (int)BLE_CENTRAL_MAX_BUTTONS; j += ',';
+
+    /* ── the scan list, and the reason it is fitted rather than appended ──────
+     *
+     * 🔴 512 BYTES IS A SPEC LIMIT, NOT A SETTING. BLE_ATT_ATTR_MAX_LEN is the
+     * largest value an ATT attribute may hold, so no amount of MTU raises it.
+     * NimBLE does not truncate an oversized setValue() — it REJECTS it, and the
+     * characteristic is left holding ZERO BYTES.
+     *
+     * That happened (2026-08-18). The document grew past 512 the moment the
+     * listen window closed and the bus counts filled in; the phone then read an
+     * empty document forever, `parseCapability()` returned null, and every
+     * screen drew "아직 확인되지 않았습니다" — the same thing it draws before the
+     * first read. Nobody saw a failure because nobody looked: the firmware did
+     * not check that setValue() took, and the app swallowed the parse in three
+     * nested runCatching{}.getOrNull().
+     *
+     * The scan list is what makes the size unbounded — eight named devices are
+     * about half a kilobyte on their own — so entries go in only while they
+     * fit, and how many were left out is REPORTED. A silent cap would read as
+     * "these are all the devices there are", which is worse than showing fewer.
+     */
+    String found;
+    uint8_t dropped = 0;
+    const uint8_t found_n = ble_central_found_count();
+    for (uint8_t i = 0; i < found_n; i++) {
         const char* addr = "";
         const char* name = "";
         int8_t rssi = 0;
         if (!ble_central_found(i, &addr, &name, &rssi)) break;
-        if (i) j += ',';
-        j += "{\"addr\":\""; j += addr;  j += "\",";
-        j += "\"name\":\"";  j += name;  j += "\",";
-        j += "\"rssi\":";     j += (int)rssi; j += '}';
+
+        String e;
+        if (found.length()) e += ',';
+        e += "{\"addr\":\""; e += addr;  e += "\",";
+        e += "\"name\":\"";  e += name;  e += "\",";
+        e += "\"rssi\":";     e += (int)rssi; e += '}';
+
+        /* CAP_TAIL_RESERVE covers what still has to be written after the list:
+         * `,"found_dropped":NNN,"found":[` plus `]}}`. Kept generous — running
+         * out here is the failure this whole block exists to prevent. */
+        if (j.length() + found.length() + e.length() + CAP_TAIL_RESERVE > CAP_ATTR_MAX) {
+            dropped = (uint8_t)(found_n - i);
+            break;
+        }
+        found += e;
     }
-    j += "]}}";
+    j += "\"found_dropped\":"; j += (int)dropped; j += ',';
+    j += "\"found\":["; j += found; j += "]}}";
+
+    /* Last line of defence. If some future field pushes the fixed part over the
+     * limit, an empty characteristic is the worst possible answer — it is
+     * indistinguishable from "not read yet". Give up the scan list first, and
+     * say so out loud. */
+    if (j.length() > CAP_ATTR_MAX) {
+        Serial.printf("[CAP] 🔴 %u bytes exceeds the %u-byte ATT limit even without "
+                      "the scan list - the fixed part has to shrink\n",
+                      (unsigned)j.length(), (unsigned)CAP_ATTR_MAX);
+    }
     return j;
 }

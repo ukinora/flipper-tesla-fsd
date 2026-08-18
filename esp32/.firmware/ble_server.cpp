@@ -517,14 +517,53 @@ static void ble_apply_blackbox_request(void) {
 // ble_server_init(), before any frame had arrived -- so the probe's answer to
 // "which bus is which" never reached anybody, and CAP_RECHECK re-ran a probe
 // whose result went nowhere.
-static void ble_refresh_capability(void) {
-    static bool s_was_running = true;   // force one refresh after boot
-    bool running = capability_running();
-    if (running || !s_was_running) { s_was_running = running; return; }
-    s_was_running = running;
+static void ble_refresh_capability(uint32_t now_ms) {
+    /* 🔴 THIS USED TO RUN EXACTLY ONCE, at the edge where the listen window
+     * closed, and then return forever (2026-08-19).
+     *
+     * The comment above records fixing the ORIGINAL bug — written once in
+     * ble_server_init(), before any frame had arrived. The fix made it twice.
+     * Everything that changes AFTER those ten seconds was frozen out of the
+     * document: whether a remote is connected, how many presses it has
+     * produced, what a scan found. The phone read the same 402 bytes 169 times
+     * in a row and drew a screen that could never change.
+     *
+     * That is why the button screen sat dead while the module was decoding
+     * presses perfectly well — the two were looking at different facts.
+     *
+     * It is a ~400-byte String once a second. The document is meant to answer
+     * "what does the module see right now", so it has to be built now. */
+    static uint32_t s_last_ms = 0;
+    if (s_last_ms != 0 && (uint32_t)(now_ms - s_last_ms) < CAP_REFRESH_MS) return;
+    s_last_ms = now_ms;
+
     if (g_ch_cap) {
-        g_ch_cap->setValue(capability_status_json().c_str());
-        Serial.println("[CAP] listen window closed — Capability updated");
+        /* 🔴 Hold the String in a NAMED variable. `f().c_str()` hands NimBLE a
+         * pointer into a temporary that dies at the semicolon, and this project
+         * has already been bitten by setValue() not copying. */
+        const String doc = capability_status_json();
+        g_ch_cap->setValue((const uint8_t*)doc.c_str(), doc.length());
+
+        /* 🔴 VERIFY IT TOOK, every time. NimBLE does not truncate a value over
+         * the ATT limit — it REJECTS it, and leaves the characteristic holding
+         * ZERO BYTES. The phone cannot tell that apart from "not written yet",
+         * so the failure is invisible on both sides at once. It shipped that
+         * way for a whole build (2026-08-18): 566 bytes offered, 0 stored, and
+         * every screen quietly said "아직 확인되지 않았습니다". */
+        const size_t stored = g_ch_cap->getValue().size();
+        if (stored != doc.length()) {
+            Serial.printf("[CAP] setValue REFUSED: %u offered, %u stored (ATT limit %u)\n",
+                          (unsigned)doc.length(), (unsigned)stored, (unsigned)CAP_ATTR_MAX);
+        } else {
+            /* Only when the size moves. This runs once a second now, and an
+             * unconditional line would bury every other message on the console
+             * — which is the one place the board explains itself. */
+            static size_t s_said = 0;
+            if (doc.length() != s_said) {
+                s_said = doc.length();
+                Serial.printf("[CAP] Capability now %u bytes\n", (unsigned)doc.length());
+            }
+        }
     }
 }
 
@@ -974,7 +1013,13 @@ void ble_server_init(FSDState *state, portMUX_TYPE *state_mux) {
     // Capability verdicts: read once on connect so the app can grey out features
     // this tap cannot do (e.g. no 0x3C2 -> no scroll-based profile control).
     g_ch_cap = svc->createCharacteristic(BLE_UUID_CAPAB, NIMBLE_PROPERTY::READ);
-    g_ch_cap->setValue(capability_status_json().c_str());
+    {
+        const String doc = capability_status_json();
+        g_ch_cap->setValue((const uint8_t*)doc.c_str(), doc.length());
+        const size_t stored = g_ch_cap->getValue().size();
+        Serial.printf("[CAP] initial Capability %u bytes%s\n", (unsigned)doc.length(),
+                      (stored == doc.length()) ? "" : " - REFUSED, characteristic is EMPTY");
+    }
 
     // Bulk: notify-only. Unencrypted like the rest — a capture is diagnostic
     // data, and the pairing requirement already gates the link.
@@ -1051,7 +1096,7 @@ void ble_server_tick(uint32_t now_ms) {
     ble_apply_mode_request();      // answers only after the driver moved
     ble_apply_btn_request();       // NVS write belongs on this task, not the BLE one
     ble_apply_blackbox_request();
-    ble_refresh_capability();
+    ble_refresh_capability(now_ms);
     ble_revoke_active_if_stale(now_ms);
 
     if (g_prefs_dirty) {

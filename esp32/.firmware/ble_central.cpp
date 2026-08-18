@@ -46,6 +46,14 @@
 #define BLE_CENTRAL_RETRY_MS 5000u
 #define BLE_CENTRAL_MAX_RETRIES 5u
 
+/* After the fast tries, keep looking — just rarely. NEVER give up: a remote
+ * that is switched off or asleep is the ordinary case, not a fault. */
+#define BLE_CENTRAL_SLOW_RETRY_MS 30000u
+
+/* How long one connect attempt may block loop(). The phone's reads fail for
+ * exactly this long, so it is a latency budget, not just a timeout. */
+#define BLE_CENTRAL_CONNECT_MS 3000u
+
 static Preferences g_prefs;
 static bool g_verbose = true;
 static uint32_t g_last_tick_ms = 0;
@@ -71,6 +79,21 @@ typedef struct {
     char addr[20];             // "" = free slot
     NimBLEClient* client;
     volatile bool connected;
+    /* Which address form actually worked last time: 0 unknown, 1 public,
+     * 2 random.
+     *
+     * 🔴 A failed attempt costs the CONNECT TIMEOUT TWICE, because both forms
+     * are tried. Ten seconds of blocked loop() is ten seconds the phone's GATT
+     * reads fail and its link drops — the module going looking for a remote
+     * knocks the app off. Remembering which form answered halves that, and
+     * most cheap remotes are random, so the public attempt was pure waste. */
+    uint8_t addr_kind;
+
+    /* Presses from THIS remote that the decoder could name. Kept per slot
+     * rather than as one total: the question the app asks is about one
+     * remote ("did the thing I just bound work?"), and a total answers it
+     * wrongly the moment a second remote exists. */
+    uint16_t decoded;
     uint8_t retries;
     uint32_t last_try_ms;
 } CentralSlot;
@@ -224,13 +247,26 @@ static bool try_connect(uint8_t i) {
         sl->client->setClientCallbacks(&g_cb, false);
         /* Give up rather than hold the radio: the phone shares it, and a button
          * that is not in the car must not cost the app its link. */
-        sl->client->setConnectTimeout(5 * 1000);
+        /* Give up rather than hold the radio: the phone shares it, and a button
+         * that is not in the car must not cost the app its link. Three seconds
+         * is enough for a remote that IS advertising — the measured connects
+         * were well under a second — and every second past that is a second of
+         * the phone's link being dead. */
+        sl->client->setConnectTimeout(BLE_CENTRAL_CONNECT_MS);
     }
 
-    NimBLEAddress addr(sl->addr, BLE_ADDR_PUBLIC);
-    if(!sl->client->connect(addr)) {
-        NimBLEAddress rnd(sl->addr, BLE_ADDR_RANDOM);
-        if(!sl->client->connect(rnd)) return false; // most cheap buttons are random
+    /* Try the form that worked last time first. On a remote that is asleep this
+     * is the whole difference between one timeout and two. */
+    const bool random_first = (sl->addr_kind == 2u);
+    const uint8_t first = random_first ? BLE_ADDR_RANDOM : BLE_ADDR_PUBLIC;
+    const uint8_t second = random_first ? BLE_ADDR_PUBLIC : BLE_ADDR_RANDOM;
+
+    if(sl->client->connect(NimBLEAddress(sl->addr, first))) {
+        sl->addr_kind = random_first ? 2u : 1u;
+    } else if(sl->client->connect(NimBLEAddress(sl->addr, second))) {
+        sl->addr_kind = random_first ? 1u : 2u;
+    } else {
+        return false;
     }
 
     const int n = subscribe_all(sl->client);
@@ -516,14 +552,35 @@ static void slot_drop(uint8_t i) {
      * mid-press and the module reports STUCK ten seconds later on a device that
      * is no longer there. */
     fsd_j6_init(&g_j6[i]);
+    /* 🔴 이 자리에서 지우지 않으면 다음에 묶는 기기가 **남의 증거**로
+     * 동작 중처럼 보인다. 슬롯은 재사용된다. */
+    g_slot[i].decoded = 0;
     fsd_btn_report(&g_btns, FSD_J6_B6, false, millis());
 }
 
 int ble_central_add(const char* addr_str) {
     if(!addr_str || !addr_str[0]) return -1;
-    // Already bound? Say which slot rather than taking a second one.
-    for(uint8_t i = 0; i < BLE_CENTRAL_MAX_BUTTONS; i++)
-        if(strcmp(g_slot[i].addr, addr_str) == 0) return (int)i;
+
+    /* Already bound? Do not take a second slot — but DO start trying again.
+     *
+     * 🔴 THIS USED TO RETURN AND NOTHING ELSE, which made the giving-up message
+     * a lie. After BLE_CENTRAL_MAX_RETRIES the client stops for good and prints
+     * "rebind to retry"; rebinding then hit this line, returned the slot number,
+     * and changed nothing. The remote stayed dead until someone thought to
+     * forget it first — and the app has no way to show that state at all, so
+     * from the phone it looks like a remote that simply never connects.
+     *
+     * A remote is normally out of retries because it was switched off, which is
+     * the ordinary way to use it. Asking to bind it again is exactly the moment
+     * to try once more. */
+    for(uint8_t i = 0; i < BLE_CENTRAL_MAX_BUTTONS; i++) {
+        if(strcmp(g_slot[i].addr, addr_str) != 0) continue;
+        if(g_slot[i].retries >= BLE_CENTRAL_MAX_RETRIES)
+            Serial.printf("[BTN] %u retrying %s\n", (unsigned)i, addr_str);
+        g_slot[i].retries = 0;
+        g_slot[i].last_try_ms = 0; // next tick, not five seconds from now
+        return (int)i;
+    }
 
     for(uint8_t i = 0; i < BLE_CENTRAL_MAX_BUTTONS; i++) {
         if(g_slot[i].addr[0]) continue;
@@ -600,6 +657,15 @@ bool ble_central_scanning(void) { return g_scanning; }
 void ble_central_set_verbose(bool on) { g_verbose = on; }
 uint16_t ble_central_notify_count(void) { return g_notify_count; }
 
+uint16_t ble_central_slot_decoded(uint8_t slot) {
+    return (slot < BLE_CENTRAL_MAX_BUTTONS) ? g_slot[slot].decoded : 0;
+}
+
+/* True: fsd_btn_j6.c is measured against a real remote (블루투스-버튼-조사.md),
+ * not a placeholder. It says nothing about whether the BOUND device is one this
+ * decoder understands — that is what the per-slot count above answers. */
+bool ble_central_decoder_verified(void) { return true; }
+
 /* Over every logical button. It used to be over slots, back when those were the
  * same thing; with the J6 that would count one button in nine. */
 static uint16_t sum_over_buttons(uint16_t (*f)(const FsdButtons*, uint8_t)) {
@@ -667,6 +733,11 @@ void ble_central_tick(uint32_t now_ms) {
         const FsdJ6Out g = fsd_j6_feed(&g_j6[i], rep.b, len, now_ms);
         if(g.edge != FSD_J6_EDGE_NONE) {
             const uint8_t b = (uint8_t)g.btn;
+            /* Counted at DECODE, not at event. A level button's press and
+             * release are two decodes and one event, and a withheld tap is a
+             * decode with no event at all — but both mean "this remote is
+             * talking to us", which is what the app is asking. */
+            if(g_slot[i].decoded < 0xFFFFu) g_slot[i].decoded++;
 
             /* Which entry point depends on what the gesture said, and the two
              * are not interchangeable: fsd_button.h refuses a level fed to an
@@ -715,14 +786,32 @@ void ble_central_tick(uint32_t now_ms) {
     for(uint8_t k = 0; k < BLE_CENTRAL_MAX_BUTTONS; k++) {
         CentralSlot* sl = &g_slot[k];
         if(!sl->addr[0] || sl->connected) continue;
-        if(sl->retries >= BLE_CENTRAL_MAX_RETRIES) continue; // stop; radio is shared
-        if((uint32_t)(now_ms - sl->last_try_ms) < BLE_CENTRAL_RETRY_MS) continue;
+
+        /* 🔴 THIS USED TO GIVE UP FOREVER after five tries, and that made the
+         * whole feature unusable (2026-08-19).
+         *
+         * A remote SLEEPS. That is not a fault, it is how the thing works — it
+         * stops advertising, and five attempts over twenty-five seconds is the
+         * entire window in which it can be caught. Miss it (the module rebooted
+         * while the remote was in a pocket, say) and the button is dead until
+         * someone thinks to forget and re-add it. From the phone that looks
+         * like a remote that simply never connects, with nothing to click.
+         *
+         * So the fast lane still backs off — five quick tries then stop
+         * hammering — but after that it keeps looking, rarely. One connect
+         * attempt a minute is nothing next to a button that never works. */
+        const uint32_t wait = (sl->retries >= BLE_CENTRAL_MAX_RETRIES)
+                                  ? BLE_CENTRAL_SLOW_RETRY_MS
+                                  : BLE_CENTRAL_RETRY_MS;
+        if((uint32_t)(now_ms - sl->last_try_ms) < wait) continue;
 
         sl->last_try_ms = now_ms;
         if(!try_connect(k)) {
             sl->retries++;
-            if(sl->retries >= BLE_CENTRAL_MAX_RETRIES)
-                Serial.printf("[BTN] %u giving up on %s - rebind to retry\n",
+            /* Once, at the transition. `>=` here would print every slow retry,
+             * forever — a line a minute for a remote sitting in a drawer. */
+            if(sl->retries == BLE_CENTRAL_MAX_RETRIES)
+                Serial.printf("[BTN] %u %s not answering - slowing to one try a minute\n",
                               (unsigned)k, sl->addr);
         } else {
             sl->retries = 0;
