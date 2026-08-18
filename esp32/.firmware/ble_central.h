@@ -169,6 +169,24 @@ const char* ble_central_slot_addr(uint8_t slot);
 /** Whether that slot's remote is connected right now. */
 bool ble_central_slot_connected(uint8_t slot);
 
+/** How many presses this slot's remote has produced that we could actually
+ *  DECODE into a button.
+ *
+ *  🔴 Not the same as connected, and the difference is the whole point. A
+ *  remote we do not understand connects perfectly and sits at zero forever;
+ *  without this the app draws it as working. Zero is also the normal state
+ *  right after binding — "not pressed yet" rather than "broken" — so the app
+ *  has to say those two differently. */
+uint16_t ble_central_slot_decoded(uint8_t slot);
+
+/** True when this firmware carries a decoder that was measured against a real
+ *  device, rather than a guess waiting to be confirmed.
+ *
+ *  This used to be hardcoded `false` in the capability document because no
+ *  button had been bought. It is a function now so that the answer cannot
+ *  freeze again while the code around it changes. */
+bool ble_central_decoder_verified(void);
+
 /** How many slots hold an address. */
 uint8_t ble_central_bound_count(void);
 
@@ -240,6 +258,8 @@ static inline bool ble_central_forget(uint8_t) { return false; }
 static inline void ble_central_forget_all(void) {}
 static inline const char* ble_central_slot_addr(uint8_t) { return ""; }
 static inline bool ble_central_slot_connected(uint8_t) { return false; }
+static inline uint16_t ble_central_slot_decoded(uint8_t) { return 0; }
+static inline bool ble_central_decoder_verified(void) { return false; }
 static inline uint8_t ble_central_bound_count(void) { return 0; }
 static inline bool ble_central_any_connected(void) { return false; }
 static inline void ble_central_set_verbose(bool) {}

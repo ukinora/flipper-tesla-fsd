@@ -373,6 +373,15 @@ static void serial_command_tick() {
                 ble_owner_forget();
             } else if (serial_cmd_equals(buf, "ownerpair")) {
                 ble_owner_open_window(millis());
+            } else if (serial_cmd_equals(buf, "capjson")) {
+                /* The document the phone reads. It had no viewer at all, which
+                 * is how a 566-byte document sat REJECTED by the ATT layer --
+                 * empty on the wire -- while both sides showed "not read yet".
+                 * An hour went into guessing what a print would have said. */
+                const String doc = capability_status_json();
+                Serial.printf("[CAP] %u bytes (ATT limit %u)\n",
+                              (unsigned)doc.length(), (unsigned)CAP_ATTR_MAX);
+                Serial.println(doc);
             } else if (serial_cmd_equals(buf, "btnscan")) {
                 // Bring-up: look before writing a parser for a device nobody has.
                 if (!ble_central_scan(5)) Serial.println("[SER] scan already running");

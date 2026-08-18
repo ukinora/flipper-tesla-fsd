@@ -523,8 +523,25 @@ static void ble_refresh_capability(void) {
     if (running || !s_was_running) { s_was_running = running; return; }
     s_was_running = running;
     if (g_ch_cap) {
-        g_ch_cap->setValue(capability_status_json().c_str());
-        Serial.println("[CAP] listen window closed — Capability updated");
+        /* 🔴 Hold the String in a NAMED variable. `f().c_str()` hands NimBLE a
+         * pointer into a temporary that dies at the semicolon, and this project
+         * has already been bitten by setValue() not copying. */
+        const String doc = capability_status_json();
+        g_ch_cap->setValue((const uint8_t*)doc.c_str(), doc.length());
+
+        /* 🔴 VERIFY IT TOOK, every time. NimBLE does not truncate a value over
+         * the ATT limit — it REJECTS it, and leaves the characteristic holding
+         * ZERO BYTES. The phone cannot tell that apart from "not written yet",
+         * so the failure is invisible on both sides at once. It shipped that
+         * way for a whole build (2026-08-18): 566 bytes offered, 0 stored, and
+         * every screen quietly said "아직 확인되지 않았습니다". */
+        const size_t stored = g_ch_cap->getValue().size();
+        if (stored != doc.length())
+            Serial.printf("[CAP] setValue REFUSED: %u offered, %u stored (ATT limit %u)\n",
+                          (unsigned)doc.length(), (unsigned)stored, (unsigned)CAP_ATTR_MAX);
+        else
+            Serial.printf("[CAP] listen window closed - Capability updated (%u bytes)\n",
+                          (unsigned)doc.length());
     }
 }
 
@@ -974,7 +991,13 @@ void ble_server_init(FSDState *state, portMUX_TYPE *state_mux) {
     // Capability verdicts: read once on connect so the app can grey out features
     // this tap cannot do (e.g. no 0x3C2 -> no scroll-based profile control).
     g_ch_cap = svc->createCharacteristic(BLE_UUID_CAPAB, NIMBLE_PROPERTY::READ);
-    g_ch_cap->setValue(capability_status_json().c_str());
+    {
+        const String doc = capability_status_json();
+        g_ch_cap->setValue((const uint8_t*)doc.c_str(), doc.length());
+        const size_t stored = g_ch_cap->getValue().size();
+        Serial.printf("[CAP] initial Capability %u bytes%s\n", (unsigned)doc.length(),
+                      (stored == doc.length()) ? "" : " - REFUSED, characteristic is EMPTY");
+    }
 
     // Bulk: notify-only. Unencrypted like the rest — a capture is diagnostic
     // data, and the pairing requirement already gates the link.

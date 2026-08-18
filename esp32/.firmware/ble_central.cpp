@@ -71,6 +71,11 @@ typedef struct {
     char addr[20];             // "" = free slot
     NimBLEClient* client;
     volatile bool connected;
+    /* Presses from THIS remote that the decoder could name. Kept per slot
+     * rather than as one total: the question the app asks is about one
+     * remote ("did the thing I just bound work?"), and a total answers it
+     * wrongly the moment a second remote exists. */
+    uint16_t decoded;
     uint8_t retries;
     uint32_t last_try_ms;
 } CentralSlot;
@@ -516,6 +521,9 @@ static void slot_drop(uint8_t i) {
      * mid-press and the module reports STUCK ten seconds later on a device that
      * is no longer there. */
     fsd_j6_init(&g_j6[i]);
+    /* 🔴 이 자리에서 지우지 않으면 다음에 묶는 기기가 **남의 증거**로
+     * 동작 중처럼 보인다. 슬롯은 재사용된다. */
+    g_slot[i].decoded = 0;
     fsd_btn_report(&g_btns, FSD_J6_B6, false, millis());
 }
 
@@ -600,6 +608,15 @@ bool ble_central_scanning(void) { return g_scanning; }
 void ble_central_set_verbose(bool on) { g_verbose = on; }
 uint16_t ble_central_notify_count(void) { return g_notify_count; }
 
+uint16_t ble_central_slot_decoded(uint8_t slot) {
+    return (slot < BLE_CENTRAL_MAX_BUTTONS) ? g_slot[slot].decoded : 0;
+}
+
+/* True: fsd_btn_j6.c is measured against a real remote (블루투스-버튼-조사.md),
+ * not a placeholder. It says nothing about whether the BOUND device is one this
+ * decoder understands — that is what the per-slot count above answers. */
+bool ble_central_decoder_verified(void) { return true; }
+
 /* Over every logical button. It used to be over slots, back when those were the
  * same thing; with the J6 that would count one button in nine. */
 static uint16_t sum_over_buttons(uint16_t (*f)(const FsdButtons*, uint8_t)) {
@@ -667,6 +684,11 @@ void ble_central_tick(uint32_t now_ms) {
         const FsdJ6Out g = fsd_j6_feed(&g_j6[i], rep.b, len, now_ms);
         if(g.edge != FSD_J6_EDGE_NONE) {
             const uint8_t b = (uint8_t)g.btn;
+            /* Counted at DECODE, not at event. A level button's press and
+             * release are two decodes and one event, and a withheld tap is a
+             * decode with no event at all — but both mean "this remote is
+             * talking to us", which is what the app is asking. */
+            if(g_slot[i].decoded < 0xFFFFu) g_slot[i].decoded++;
 
             /* Which entry point depends on what the gesture said, and the two
              * are not interchangeable: fsd_button.h refuses a level fed to an
