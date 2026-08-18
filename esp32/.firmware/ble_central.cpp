@@ -101,6 +101,14 @@ static CentralSlot g_slot[BLE_CENTRAL_MAX_BUTTONS];
 
 static FsdButtons g_btns;
 
+/* The double-press choice lives in NVS, not in the session.
+ *
+ * It is part of what a button MEANS — the same class of decision as which
+ * remote is bound — and a mapping that evaporates on every reboot is a mapping
+ * nobody can rely on. Stored as one mask so adding a button costs no new key. */
+static uint16_t g_double_mask = 0;
+
+
 /* Gesture state is PER REMOTE, not per button: a contact belongs to the device
  * it came from. Sharing one would let two remotes interleave halves of a swipe
  * into a direction neither person made. */
@@ -304,8 +312,25 @@ void ble_central_init(void) {
      * STUCK at 10 s, and STUCK clears only on a release. Asking the table which
      * ones are level — rather than listing them here — keeps that decision next
      * to the measurement that justifies it. */
-    for(uint8_t b = 0; b < FSD_J6_COUNT; b++)
+    for(uint8_t b = 0; b < FSD_J6_COUNT; b++) {
         if(fsd_j6_is_level((FsdJ6Btn)b)) fsd_btn_set_kind(&g_btns, b, FSD_BTN_KIND_LEVEL);
+        /* The window comes from the GESTURE, not from a setting. A swipe takes
+         * a third of a second to finish, so a flat window makes its double
+         * press fail one time in six — and a failed double fires the SINGLE
+         * action twice. Costs nothing while double-press is off. */
+        fsd_btn_set_double_window(&g_btns, b, fsd_j6_double_window_ms((FsdJ6Btn)b));
+    }
+
+    /* Restore the double-press choices. 🔴 AFTER the kinds are set, not before:
+     * fsd_btn_set_kind() clears a button's in-progress state, and doing it the
+     * other way round would be one more place where the order is load-bearing
+     * and nothing says so. (It happens not to clear want_double — that is a
+     * setting, not state — but relying on that is how the next edit breaks it.) */
+    g_prefs.begin("btn", true);
+    g_double_mask = g_prefs.getUShort("dbl", 0);
+    g_prefs.end();
+    for(uint8_t b = 0; b < FSD_BTN_MAX && b < 16u; b++)
+        fsd_btn_set_double(&g_btns, b, (g_double_mask >> b) & 1u);
 
     g_prefs.begin("btn", false);
     char key[8];
@@ -665,6 +690,35 @@ uint16_t ble_central_slot_decoded(uint8_t slot) {
  * not a placeholder. It says nothing about whether the BOUND device is one this
  * decoder understands — that is what the per-slot count above answers. */
 bool ble_central_decoder_verified(void) { return true; }
+
+uint16_t ble_central_button_events(uint8_t btn) {
+    if(btn >= FSD_BTN_MAX) return 0;
+    const uint32_t n = (uint32_t)fsd_btn_shorts(&g_btns, btn)
+                     + fsd_btn_longs(&g_btns, btn)
+                     + fsd_btn_doubles(&g_btns, btn);
+    return (n > 0xFFFFu) ? 0xFFFFu : (uint16_t)n;
+}
+
+static void double_save(void) {
+    g_prefs.begin("btn", false);
+    g_prefs.putUShort("dbl", g_double_mask);
+    g_prefs.end();
+}
+
+void ble_central_set_double(uint8_t btn, bool on) {
+    if(btn >= FSD_BTN_MAX || btn >= 16u) return;
+    const uint16_t bit = (uint16_t)(1u << btn);
+    const uint16_t want = on ? (uint16_t)(g_double_mask | bit)
+                             : (uint16_t)(g_double_mask & (uint16_t)~bit);
+    fsd_btn_set_double(&g_btns, btn, on);
+    if(want == g_double_mask) return; // nothing to persist
+    g_double_mask = want;
+    double_save();
+    Serial.printf("[BTN] %s double-press %s\n", fsd_j6_name((FsdJ6Btn)btn),
+                  on ? "on" : "off");
+}
+
+uint16_t ble_central_double_mask(void) { return g_double_mask; }
 
 /* Over every logical button. It used to be over slots, back when those were the
  * same thing; with the J6 that would count one button in nine. */

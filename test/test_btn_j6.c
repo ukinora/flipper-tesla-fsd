@@ -409,6 +409,30 @@ static void test_names_are_distinct(void) {
                   "%d 와 %d 의 이름이 같다: '%s'", a, b, fsd_j6_name((FsdJ6Btn)a));
 }
 
+
+/* 🔴 창이 하나면 쓸기 버튼의 2회는 여섯 번에 한 번 실패하고, 실패는 1회 동작이
+ * 두 번 실행되는 것으로 나타난다. 실측 간격 0.21~0.33초. */
+static void test_swipes_get_a_wider_double_window(void) {
+    printf("쓸기는 창이 더 넓다\n");
+    const FsdJ6Btn swipes[] = {FSD_J6_B1, FSD_J6_B2, FSD_J6_B3, FSD_J6_B4};
+    for (size_t i = 0; i < sizeof(swipes) / sizeof(swipes[0]); i++) {
+        const uint16_t w = fsd_j6_double_window_ms(swipes[i]);
+        CHECK(w >= 400, "%s 의 창이 %u — 실측 0.33초를 못 덮는다",
+              fsd_j6_name(swipes[i]), (unsigned)w);
+    }
+    /* 탭은 넓힐 이유가 없다 — 넓히면 지연만 는다. */
+    CHECK(fsd_j6_double_window_ms(FSD_J6_B6) < fsd_j6_double_window_ms(FSD_J6_B1),
+          "탭이 쓸기만큼 기다린다");
+    CHECK(fsd_j6_double_window_ms(FSD_J6_B7) < fsd_j6_double_window_ms(FSD_J6_B3),
+          "탭이 쓸기만큼 기다린다");
+
+    /* 어떤 버튼도 길게 임계값을 잡아먹으면 안 된다 — 그러면 그 버튼의 길게
+     * 누르기가 영영 안 나온다. */
+    for (int b = 0; b < FSD_J6_COUNT; b++)
+        CHECK(fsd_j6_double_window_ms((FsdJ6Btn)b) < FSD_BTN_LONG_MS,
+              "%s 의 창이 길게를 삼킨다", fsd_j6_name((FsdJ6Btn)b));
+}
+
 int main(void) {
     printf("=== J6 리모컨 디코더 ===\n\n");
     test_swipes();
@@ -430,6 +454,7 @@ int main(void) {
     test_fits_the_button_table();
     test_every_button_has_a_one_word_name();
     test_names_are_distinct();
+    test_swipes_get_a_wider_double_window();
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }

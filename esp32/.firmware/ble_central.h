@@ -179,6 +179,30 @@ bool ble_central_slot_connected(uint8_t slot);
  *  has to say those two differently. */
 uint16_t ble_central_slot_decoded(uint8_t slot);
 
+/* ── per logical button ──────────────────────────────────────────────────────
+ *
+ * These are about BUTTONS, not links. One remote carries nine of them, so a
+ * per-slot answer cannot address them (fsd_btn_j6.h). */
+
+/** How many gestures this logical button has produced — short, long and double
+ *  added together.
+ *
+ *  This is what lets a person see WHICH row on the screen is the key under
+ *  their thumb: press it, watch a number move. Without it the app can only say
+ *  "something arrived", which names nothing. */
+uint16_t ble_central_button_events(uint8_t btn);
+
+/** Watch for double presses on one logical button. Persisted.
+ *
+ *  🔴 THE COST IS ON THAT BUTTON ALONE and it is real: a tap cannot be reported
+ *  until a second one is known not to be coming, so every single press there is
+ *  delayed by FSD_BTN_DOUBLE_MS. Turn it on where a second action is actually
+ *  mapped, never "in case". */
+void ble_central_set_double(uint8_t btn, bool on);
+
+/** Bitmask of buttons with double-press on, bit N = button N. */
+uint16_t ble_central_double_mask(void);
+
 /** True when this firmware carries a decoder that was measured against a real
  *  device, rather than a guess waiting to be confirmed.
  *
@@ -260,6 +284,9 @@ static inline const char* ble_central_slot_addr(uint8_t) { return ""; }
 static inline bool ble_central_slot_connected(uint8_t) { return false; }
 static inline uint16_t ble_central_slot_decoded(uint8_t) { return 0; }
 static inline bool ble_central_decoder_verified(void) { return false; }
+static inline uint16_t ble_central_button_events(uint8_t) { return 0; }
+static inline void ble_central_set_double(uint8_t, bool) {}
+static inline uint16_t ble_central_double_mask(void) { return 0; }
 static inline uint8_t ble_central_bound_count(void) { return 0; }
 static inline bool ble_central_any_connected(void) { return false; }
 static inline void ble_central_set_verbose(bool) {}

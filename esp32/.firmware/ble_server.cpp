@@ -18,6 +18,7 @@
 #ifdef BLE_SERVER_ENABLED
 
 #include "../../fsd_logic/fsd_autonomy.h"
+#include "../../fsd_logic/fsd_button.h" // FSD_BTN_MAX — the logical button range
 #include "../../fsd_logic/fsd_wire.h"
 #include "blackbox.h"
 #include "ble_central.h"
@@ -136,6 +137,9 @@ static volatile bool     g_bb_req_pending   = false;
  *   -2 - N  forget slot N  */
 static volatile int16_t  g_btn_req          = 0;
 static volatile bool     g_btn_req_pending  = false;
+/* Double-press toggle, parked for loop(): arg = (button << 1) | on. */
+static volatile uint8_t  g_dbl_req          = 0;
+static volatile bool     g_dbl_req_pending  = false;
 static volatile uint8_t  g_bb_req           = 0;
 static volatile bool     g_bb_mark_pending  = false;
 // Declared size of the camera.bin currently being uploaded (0 = none).
@@ -407,6 +411,18 @@ static void ble_bulk_pump(uint32_t now_ms) {
  *
  * Runs from loop(), which is where NVS writes belong. The answer carries the
  * index so a late reply cannot be mistaken for a different request. */
+static void ble_apply_double_request(void) {
+    if (!g_dbl_req_pending) return;
+    const uint8_t arg = g_dbl_req;
+    g_dbl_req_pending = false;
+
+    const uint8_t btn = (uint8_t)(arg >> 1);
+    const bool on = (arg & 1u) != 0u;
+    const bool ok = btn < FSD_BTN_MAX;
+    if (ok) ble_central_set_double(btn, on);
+    ble_send_result(BLE_CMD_BTN_DOUBLE, ok ? BLE_RES_OK : BLE_RES_REJECTED, arg);
+}
+
 static void ble_apply_btn_request(void) {
     if (!g_btn_req_pending) return;
     const int16_t idx = g_btn_req;
@@ -754,6 +770,17 @@ class CommandCB : public NimBLECharacteristicCallbacks {
             g_btn_req_pending = true;
             break;
 
+        case BLE_CMD_BTN_DOUBLE: {
+            /* Writes NVS, so it belongs on loop() like the bind does. Encoded
+             * into the same parked slot: negative values are already spoken for
+             * by forget, so this uses a separate flag rather than squeezing a
+             * third meaning into one int16. */
+            if (g_dbl_req_pending) { ble_send_result(cmd, BLE_RES_BUSY, 0); break; }
+            g_dbl_req         = arg;
+            g_dbl_req_pending = true;
+            break;
+        }
+
         case BLE_CMD_BTN_FORGET:
             // arg = slot to drop; 0xFF drops every slot.
             if (g_btn_req_pending) { ble_send_result(cmd, BLE_RES_BUSY, 0); break; }
@@ -1095,6 +1122,7 @@ void ble_server_tick(uint32_t now_ms) {
     ble_bulk_pump(now_ms);
     ble_apply_mode_request();      // answers only after the driver moved
     ble_apply_btn_request();       // NVS write belongs on this task, not the BLE one
+    ble_apply_double_request();    // 〃
     ble_apply_blackbox_request();
     ble_refresh_capability(now_ms);
     ble_revoke_active_if_stale(now_ms);

@@ -468,6 +468,57 @@ static void test_kind_bounds(void) {
     CHECK(fsd_btn_kind(NULL, 0) == FSD_BTN_KIND_EVENT, "NULL reads EVENT");
 }
 
+
+/* ── 버튼마다 다른 2회 창 ──────────────────────────────────────────────────
+ *
+ * 🔴 창이 하나면 어떤 버튼은 반드시 놓친다. J6 의 쓸기 버튼은 리모컨이 리포트
+ * 아홉 개를 0.2~0.3초에 걸쳐 흘려보내고 판정이 마지막에서 나므로, 사람이 아무리
+ * 빨리 눌러도 두 번째 완료가 0.33초까지 걸린다(실측). 300 ms 창에서는 여섯 중
+ * 하나가 실패했다.
+ *
+ * 그리고 실패는 조용하지 않다 — 두 번이 각각 SHORT 로 잡혀 **1회 동작이 두 번
+ * 실행된다.** 놓치는 것보다 나쁘다. */
+
+static void test_double_window_is_per_button(void) {
+    printf("2회 창이 버튼마다 다르다\n");
+    FsdButtons b;
+    fsd_btn_init(&b);
+
+    /* 0번은 넓은 창(500), 1번은 기본(300). 둘 다 사건형으로 둔다. */
+    fsd_btn_set_double(&b, 0, true);
+    fsd_btn_set_double_window(&b, 0, 500);
+    fsd_btn_set_double(&b, 1, true);
+
+    /* 0.4초 간격 — 넓은 창에서는 DOUBLE, 기본 창에서는 아니다. */
+    CHECK(fsd_btn_pulse(&b, 0, 1000) == FSD_BTN_EV_NONE, "첫 탭은 보류돼야 한다");
+    CHECK(fsd_btn_tick(&b, 0, 1350) == FSD_BTN_EV_NONE, "0.35초에는 아직 기다린다");
+    CHECK(fsd_btn_pulse(&b, 0, 1400) == FSD_BTN_EV_DOUBLE, "0.4초 간격이 DOUBLE 이어야");
+
+    CHECK(fsd_btn_pulse(&b, 1, 1000) == FSD_BTN_EV_NONE, "첫 탭 보류");
+    CHECK(fsd_btn_tick(&b, 1, 1350) == FSD_BTN_EV_SHORT, "기본 창은 0.3초에 놓아 준다");
+    CHECK(fsd_btn_pulse(&b, 1, 1400) == FSD_BTN_EV_NONE, "그 뒤 탭은 새 대기다");
+}
+
+static void test_double_window_defaults_and_bounds(void) {
+    printf("창의 기본값과 범위\n");
+    FsdButtons b;
+    fsd_btn_init(&b);
+    CHECK(fsd_btn_double_window(&b, 0) == FSD_BTN_DOUBLE_MS, "기본은 상수와 같아야 한다");
+
+    /* 길게(600 ms)를 넘는 창은 홀드를 잡아먹는다 — 그러면 길게 누르기가 영영
+     * 안 나온다. 넘겨 잡으면 클램프한다. */
+    fsd_btn_set_double_window(&b, 0, 5000);
+    CHECK(fsd_btn_double_window(&b, 0) < FSD_BTN_LONG_MS,
+          "창이 길게 임계값을 넘었다: %u", (unsigned)fsd_btn_double_window(&b, 0));
+
+    /* 0 은 "기본" 이라는 뜻으로 받는다 — 부르는 쪽이 모르면 바꾸지 않는다. */
+    fsd_btn_set_double_window(&b, 0, 0);
+    CHECK(fsd_btn_double_window(&b, 0) == FSD_BTN_DOUBLE_MS, "0 은 기본으로 되돌린다");
+
+    fsd_btn_set_double_window(&b, FSD_BTN_MAX, 400); // 범위 밖 — 죽지 않아야
+    CHECK(fsd_btn_double_window(&b, FSD_BTN_MAX) == 0, "범위 밖은 0");
+}
+
 int main(void) {
     printf("test_button\n");
     test_short_and_long();
@@ -492,6 +543,8 @@ int main(void) {
     test_kind_change_clears_state();
     test_kind_is_per_button();
     test_kind_bounds();
+    test_double_window_is_per_button();
+    test_double_window_defaults_and_bounds();
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }

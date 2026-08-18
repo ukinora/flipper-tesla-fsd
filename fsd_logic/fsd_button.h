@@ -132,6 +132,17 @@ typedef struct {
     bool long_fired;
     bool stuck;
     bool want_double;    // opt-in; false means the old, undelayed path
+    /* How long THIS button waits for a twin. 0 = FSD_BTN_DOUBLE_MS.
+     *
+     * 🔴 Per button because the GESTURE decides it, not taste. A J6 swipe is
+     * the remote streaming nine reports over 0.2-0.3 s and the verdict lands on
+     * the last one, so two swipes cannot complete closer than about 0.33 s
+     * however fast a person moves (measured 2026-08-19: 0.21 0.22 0.22 0.33
+     * 0.21 0.22). At a flat 300 ms one in six failed — and a failed double is
+     * not a miss, it is the SINGLE action firing TWICE. A tap is 0.1 s and
+     * needs no such room, so making every button pay for the swipes would add
+     * latency where none is warranted. */
+    uint16_t double_ms;
     bool tap_pending;    // a SHORT is being withheld while its twin might arrive
     uint32_t pending_ms; // when that tap was released
     uint16_t shorts;
@@ -194,6 +205,16 @@ void fsd_btn_set_double(FsdButtons* b, uint8_t idx, bool on);
 
 /** Whether this button is watching for double presses. */
 bool fsd_btn_double_enabled(const FsdButtons* b, uint8_t idx);
+
+/** How long this button waits for a twin. Pass 0 to mean "the default".
+ *
+ *  Clamped below FSD_BTN_LONG_MS: a window that outlasts the hold threshold
+ *  would swallow the hold, and then long-press on that button could never
+ *  happen — a setting that silently removes a feature. */
+void fsd_btn_set_double_window(FsdButtons* b, uint8_t idx, uint16_t ms);
+
+/** The window in effect for this button. 0 when the index is out of range. */
+uint16_t fsd_btn_double_window(const FsdButtons* b, uint8_t idx);
 
 /** Counters, for the serial line and a future BLE surface. */
 uint16_t fsd_btn_shorts(const FsdButtons* b, uint8_t idx);
