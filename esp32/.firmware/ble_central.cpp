@@ -281,6 +281,67 @@ bool ble_central_scan(uint8_t secs) {
     return true;
 }
 
+/* ── two bring-up instruments ────────────────────────────────────────────────
+ *
+ * A TSL remote connected on 2026-08-18 and then said nothing through five
+ * presses. Three explanations survive and they need different fixes, so the
+ * cheapest thing is to measure rather than pick:
+ *
+ *   1. it wants an encrypted link before it will notify   -> ble_central_secure()
+ *   2. its own protocol needs a write first                -> not covered here
+ *   3. the ADVERTISEMENT is the event, not a notification  -> ble_central_raw()
+ *
+ * Both are diagnostics: nothing calls them on its own and neither changes how
+ * a bound button behaves. */
+
+bool ble_central_raw(const char* addr_str, uint8_t secs) {
+    if(!addr_str || !addr_str[0]) return false;
+    if(g_scanning) return false;
+    if(secs == 0) secs = BLE_CENTRAL_SCAN_SECS;
+
+    NimBLEScan* scan = NimBLEDevice::getScan();
+    if(!scan) return false;
+
+    Serial.printf("[BTN] raw %s for %us — press the button\n", addr_str, (unsigned)secs);
+    scan->setActiveScan(true); // scan response too: the name often lives there
+    NimBLEScanResults r = scan->getResults(secs * 1000, false);
+
+    int hits = 0;
+    for(int i = 0; i < r.getCount(); i++) {
+        const NimBLEAdvertisedDevice* d = r.getDevice(i);
+        if(strcasecmp(d->getAddress().toString().c_str(), addr_str) != 0) continue;
+        hits++;
+        const std::vector<uint8_t>& p = d->getPayload();
+        Serial.printf("[BTN] raw rssi:%d len:%u  ", d->getRSSI(), (unsigned)p.size());
+        for(size_t k = 0; k < p.size(); k++) Serial.printf("%02X", p[k]);
+        Serial.println();
+    }
+    /* Silence is a result too — this button only advertises while it is being
+     * pressed, so "0 seen" means the press did not reach us at all. */
+    if(hits == 0) Serial.println("[BTN] raw: not seen (it may only advertise while pressed)");
+
+    scan->clearResults();
+    return true;
+}
+
+bool ble_central_secure(uint8_t slot) {
+    if(slot >= BLE_CENTRAL_MAX_BUTTONS) return false;
+    NimBLEClient* c = g_slot[slot].client;
+    if(!c || !c->isConnected()) {
+        Serial.printf("[BTN] %u: not connected\n", (unsigned)slot);
+        return false;
+    }
+    /* Uses whatever NimBLEDevice::setSecurityAuth() the server role already
+     * set — this only starts pairing, it does not change the parameters, so
+     * the phone's link is untouched. It does spend one of MAX_BONDS. */
+    Serial.printf("[BTN] %u: pairing...\n", (unsigned)slot);
+    const bool ok = c->secureConnection();
+    Serial.printf("[BTN] %u: %s\n", (unsigned)slot,
+                  ok ? "encrypted — press it now and watch for reports"
+                     : "pairing refused (so encryption is not what it was waiting for)");
+    return ok;
+}
+
 /* Disconnect and free the radio slot a remote was holding. */
 static void slot_drop(uint8_t i) {
     CentralSlot* sl = &g_slot[i];

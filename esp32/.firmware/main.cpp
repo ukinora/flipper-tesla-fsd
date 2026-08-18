@@ -376,6 +376,19 @@ static void serial_command_tick() {
             } else if (serial_cmd_equals(buf, "btnscan")) {
                 // Bring-up: look before writing a parser for a device nobody has.
                 if (!ble_central_scan(5)) Serial.println("[SER] scan already running");
+            } else if (strncmp(buf, "btnraw", 6) == 0) {
+                // Bring-up: is the press in the ADVERTISEMENT rather than a
+                // notification? Only the full payload can say.
+                const char *arg = buf + 6;
+                while (*arg == ' ') arg++;
+                if (arg[0]) ble_central_raw(arg, 8);
+                else Serial.println("[SER] btnraw <addr>");
+            } else if (strncmp(buf, "btnsec", 6) == 0) {
+                // Bring-up: is it withholding notifications until the link is
+                // encrypted? We never pair otherwise, so this rules it out.
+                const char *arg = buf + 6;
+                while (*arg == ' ') arg++;
+                ble_central_secure(arg[0] ? (uint8_t)atoi(arg) : 0);
             } else if (strncmp(buf, "btnbind", 7) == 0) {
                 const char *arg = buf + 7;
                 while (*arg == ' ') arg++;
