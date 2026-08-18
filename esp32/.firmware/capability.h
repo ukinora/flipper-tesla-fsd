@@ -77,8 +77,16 @@ void capability_tick(uint32_t now_ms);
  *
  * 🔴 It was built ONCE, ten seconds after boot, and never again — so anything
  * that changed later (a remote connecting, presses arriving, a scan finishing)
- * could not reach the phone at all. */
-#define CAP_REFRESH_MS 1000u
+ * could not reach the phone at all.
+ *
+ * 500 ms pairs with the app's read cadence: together they put a press on the
+ * screen within a second. The document is ~400 bytes, so rebuilding it twice a
+ * second is a String build and nothing else.
+ *
+ * ⚠️ This is SCREEN latency only. The module classifies a press within about
+ * 100 ms of the report arriving (BLE interval + a 50 ms tick) and acts on it
+ * there; the phone is a spectator. Do not read this number as reaction time. */
+#define CAP_REFRESH_MS 500u
 
 /* Room kept for what is written after the scan list. */
 #define CAP_TAIL_RESERVE 48u

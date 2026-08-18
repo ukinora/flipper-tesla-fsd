@@ -48,7 +48,11 @@
 
 /* After the fast tries, keep looking — just rarely. NEVER give up: a remote
  * that is switched off or asleep is the ordinary case, not a fault. */
-#define BLE_CENTRAL_SLOW_RETRY_MS 60000u
+#define BLE_CENTRAL_SLOW_RETRY_MS 30000u
+
+/* How long one connect attempt may block loop(). The phone's reads fail for
+ * exactly this long, so it is a latency budget, not just a timeout. */
+#define BLE_CENTRAL_CONNECT_MS 3000u
 
 static Preferences g_prefs;
 static bool g_verbose = true;
@@ -75,6 +79,16 @@ typedef struct {
     char addr[20];             // "" = free slot
     NimBLEClient* client;
     volatile bool connected;
+    /* Which address form actually worked last time: 0 unknown, 1 public,
+     * 2 random.
+     *
+     * 🔴 A failed attempt costs the CONNECT TIMEOUT TWICE, because both forms
+     * are tried. Ten seconds of blocked loop() is ten seconds the phone's GATT
+     * reads fail and its link drops — the module going looking for a remote
+     * knocks the app off. Remembering which form answered halves that, and
+     * most cheap remotes are random, so the public attempt was pure waste. */
+    uint8_t addr_kind;
+
     /* Presses from THIS remote that the decoder could name. Kept per slot
      * rather than as one total: the question the app asks is about one
      * remote ("did the thing I just bound work?"), and a total answers it
@@ -233,13 +247,26 @@ static bool try_connect(uint8_t i) {
         sl->client->setClientCallbacks(&g_cb, false);
         /* Give up rather than hold the radio: the phone shares it, and a button
          * that is not in the car must not cost the app its link. */
-        sl->client->setConnectTimeout(5 * 1000);
+        /* Give up rather than hold the radio: the phone shares it, and a button
+         * that is not in the car must not cost the app its link. Three seconds
+         * is enough for a remote that IS advertising — the measured connects
+         * were well under a second — and every second past that is a second of
+         * the phone's link being dead. */
+        sl->client->setConnectTimeout(BLE_CENTRAL_CONNECT_MS);
     }
 
-    NimBLEAddress addr(sl->addr, BLE_ADDR_PUBLIC);
-    if(!sl->client->connect(addr)) {
-        NimBLEAddress rnd(sl->addr, BLE_ADDR_RANDOM);
-        if(!sl->client->connect(rnd)) return false; // most cheap buttons are random
+    /* Try the form that worked last time first. On a remote that is asleep this
+     * is the whole difference between one timeout and two. */
+    const bool random_first = (sl->addr_kind == 2u);
+    const uint8_t first = random_first ? BLE_ADDR_RANDOM : BLE_ADDR_PUBLIC;
+    const uint8_t second = random_first ? BLE_ADDR_PUBLIC : BLE_ADDR_RANDOM;
+
+    if(sl->client->connect(NimBLEAddress(sl->addr, first))) {
+        sl->addr_kind = random_first ? 2u : 1u;
+    } else if(sl->client->connect(NimBLEAddress(sl->addr, second))) {
+        sl->addr_kind = random_first ? 1u : 2u;
+    } else {
+        return false;
     }
 
     const int n = subscribe_all(sl->client);
