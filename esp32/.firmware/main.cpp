@@ -383,6 +383,11 @@ static void serial_command_tick() {
                 while (*arg == ' ') arg++;
                 if (arg[0]) ble_central_raw(arg, 8);
                 else Serial.println("[SER] btnraw <addr>");
+            } else if (strncmp(buf, "btnpoke", 7) == 0) {
+                // Bring-up: a bounded knock, not a search. See ble_central.h.
+                const char *arg = buf + 7;
+                while (*arg == ' ') arg++;
+                ble_central_poke(arg[0] ? (uint8_t)atoi(arg) : 0);
             } else if (strncmp(buf, "btnchr", 6) == 0) {
                 // Bring-up: what can this thing do? subscribe_all() only ever
                 // looked at notifies, so a write target was invisible.

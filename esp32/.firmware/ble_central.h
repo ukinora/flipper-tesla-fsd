@@ -206,6 +206,13 @@ bool ble_central_secure(uint8_t slot);
  *  to be written to, and a write target is invisible from a notify-only view. */
 bool ble_central_chars(uint8_t slot);
 
+/** Try a short list of conventional wake values against every write target.
+ *
+ *  🔴 Not a search — that space is 2^n. A bounded knock: if none of these
+ *  starts it talking, the answer has to come from watching the real app, and
+ *  knowing that quickly is the whole value. */
+bool ble_central_poke(uint8_t slot);
+
 /** Counters for the serial line and a future BLE surface. */
 uint16_t ble_central_notify_count(void);
 uint16_t ble_central_short_presses(void);
@@ -234,6 +241,7 @@ static inline void ble_central_set_verbose(bool) {}
 static inline bool ble_central_raw(const char*, uint8_t) { return false; }
 static inline bool ble_central_secure(uint8_t) { return false; }
 static inline bool ble_central_chars(uint8_t) { return false; }
+static inline bool ble_central_poke(uint8_t) { return false; }
 static inline uint16_t ble_central_notify_count(void) { return 0; }
 static inline uint16_t ble_central_short_presses(void) { return 0; }
 static inline uint16_t ble_central_long_presses(void) { return 0; }

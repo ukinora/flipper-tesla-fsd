@@ -324,6 +324,75 @@ bool ble_central_raw(const char* addr_str, uint8_t secs) {
     return true;
 }
 
+/* A bounded knock on the door.
+ *
+ * The remote is a transparent-serial bridge (HopeRF HPRDW01): it has write
+ * targets and notify sources and no button semantics of its own. Something has
+ * to start the conversation, and the vendor handshake is not published.
+ *
+ * 🔴 This is NOT a search of the space — that space is 2^n and guessing into it
+ * is how afternoons disappear. It is a short list of the values these modules
+ * conventionally answer to, tried once each. Twenty writes, one verdict:
+ * either a notification appears or this approach is done and the answer has to
+ * come from watching what TSL actually sends. */
+bool ble_central_poke(uint8_t slot) {
+    if(slot >= BLE_CENTRAL_MAX_BUTTONS) return false;
+    NimBLEClient* c = g_slot[slot].client;
+    if(!c || !c->isConnected()) {
+        Serial.printf("[BTN] %u: not connected\n", (unsigned)slot);
+        return false;
+    }
+
+    static const struct { const char* name; uint8_t b[4]; uint8_t len; } TRY[] = {
+        {"01",        {0x01},                   1},
+        {"FF",        {0xFF},                   1},
+        {"00",        {0x00},                   1},
+        {"02",        {0x02},                   1},
+        {"0100",      {0x01, 0x00},             2},
+        {"AA55",      {0xAA, 0x55},             2},
+        {"55AA",      {0x55, 0xAA},             2},
+        {"A55A",      {0xA5, 0x5A},             2},
+        {"FFFF",      {0xFF, 0xFF},             2},
+        {"AT",        {0x41, 0x54},             2},
+        {"AT\\r\\n",  {0x41, 0x54, 0x0D, 0x0A}, 4},
+    };
+
+    /* Collect the write targets once. The table is small; the point is to try
+     * every candidate against every door rather than assume which door. */
+    NimBLERemoteCharacteristic* w[8];
+    int nw = 0;
+    for(auto* svc : c->getServices(true)) {
+        for(auto* chr : svc->getCharacteristics(true)) {
+            if(nw >= (int)(sizeof(w) / sizeof(w[0]))) break;
+            if(chr->canWrite() || chr->canWriteNoResponse()) w[nw++] = chr;
+        }
+    }
+    Serial.printf("[BTN] %u: poking %d write target(s) with %d values\n",
+                  (unsigned)slot, nw, (int)(sizeof(TRY) / sizeof(TRY[0])));
+
+    for(int t = 0; t < (int)(sizeof(TRY) / sizeof(TRY[0])); t++) {
+        for(int k = 0; k < nw; k++) {
+            const uint16_t before = ble_central_notify_count();
+            const bool sent = w[k]->writeValue(TRY[t].b, TRY[t].len,
+                                               w[k]->canWrite());
+            delay(500); // give it time to answer
+            const uint16_t after = ble_central_notify_count();
+            if(after != before) {
+                Serial.printf("[BTN] 🔴 HIT: %s -> %s produced %u notification(s)\n",
+                              TRY[t].name, w[k]->getUUID().toString().c_str(),
+                              (unsigned)(uint16_t)(after - before));
+                return true;
+            }
+            if(!sent)
+                Serial.printf("[BTN]   %-8s -> %s  write refused\n", TRY[t].name,
+                              w[k]->getUUID().toString().c_str());
+        }
+    }
+    Serial.println("[BTN] no value in the list started it talking");
+    Serial.println("[BTN] next step is watching what the real app sends, not more guesses");
+    return true;
+}
+
 bool ble_central_chars(uint8_t slot) {
     if(slot >= BLE_CENTRAL_MAX_BUTTONS) return false;
     NimBLEClient* c = g_slot[slot].client;
