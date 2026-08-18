@@ -137,7 +137,7 @@ static volatile bool     g_bb_req_pending   = false;
  *   -2 - N  forget slot N  */
 static volatile int16_t  g_btn_req          = 0;
 static volatile bool     g_btn_req_pending  = false;
-/* Double-press toggle, parked for loop(): arg = (button << 1) | on. */
+/* Row on/off, parked for loop(): arg = (row << 1) | on. See ble_central.h. */
 static volatile uint8_t  g_dbl_req          = 0;
 static volatile bool     g_dbl_req_pending  = false;
 static volatile uint8_t  g_bb_req           = 0;
@@ -411,16 +411,16 @@ static void ble_bulk_pump(uint32_t now_ms) {
  *
  * Runs from loop(), which is where NVS writes belong. The answer carries the
  * index so a late reply cannot be mistaken for a different request. */
-static void ble_apply_double_request(void) {
+static void ble_apply_action_request(void) {
     if (!g_dbl_req_pending) return;
     const uint8_t arg = g_dbl_req;
     g_dbl_req_pending = false;
 
-    const uint8_t btn = (uint8_t)(arg >> 1);
+    const uint8_t row = (uint8_t)(arg >> 1);
     const bool on = (arg & 1u) != 0u;
-    const bool ok = btn < FSD_BTN_MAX;
-    if (ok) ble_central_set_double(btn, on);
-    ble_send_result(BLE_CMD_BTN_DOUBLE, ok ? BLE_RES_OK : BLE_RES_REJECTED, arg);
+    const bool ok = row < FSD_BTN_MAX * FSD_BTN_EVENTS && row < 32u;
+    if (ok) ble_central_set_action(row, on);
+    ble_send_result(BLE_CMD_BTN_ACTION, ok ? BLE_RES_OK : BLE_RES_REJECTED, arg);
 }
 
 static void ble_apply_btn_request(void) {
@@ -770,7 +770,7 @@ class CommandCB : public NimBLECharacteristicCallbacks {
             g_btn_req_pending = true;
             break;
 
-        case BLE_CMD_BTN_DOUBLE: {
+        case BLE_CMD_BTN_ACTION: {
             /* Writes NVS, so it belongs on loop() like the bind does. Encoded
              * into the same parked slot: negative values are already spoken for
              * by forget, so this uses a separate flag rather than squeezing a
@@ -1122,7 +1122,7 @@ void ble_server_tick(uint32_t now_ms) {
     ble_bulk_pump(now_ms);
     ble_apply_mode_request();      // answers only after the driver moved
     ble_apply_btn_request();       // NVS write belongs on this task, not the BLE one
-    ble_apply_double_request();    // 〃
+    ble_apply_action_request();    // 〃
     ble_apply_blackbox_request();
     ble_refresh_capability(now_ms);
     ble_revoke_active_if_stale(now_ms);

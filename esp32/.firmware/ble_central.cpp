@@ -108,6 +108,10 @@ static FsdButtons g_btns;
  * nobody can rely on. Stored as one mask so adding a button costs no new key. */
 static uint16_t g_double_mask = 0;
 
+/* Which rows are switched on. See ble_central.h for the row encoding. */
+static uint32_t g_action_mask = 0;
+
+
 
 /* Gesture state is PER REMOTE, not per button: a contact belongs to the device
  * it came from. Sharing one would let two remotes interleave halves of a swipe
@@ -327,10 +331,16 @@ void ble_central_init(void) {
      * and nothing says so. (It happens not to clear want_double — that is a
      * setting, not state — but relying on that is how the next edit breaks it.) */
     g_prefs.begin("btn", true);
-    g_double_mask = g_prefs.getUShort("dbl", 0);
+    g_action_mask = g_prefs.getUInt("act", 0);
     g_prefs.end();
-    for(uint8_t b = 0; b < FSD_BTN_MAX && b < 16u; b++)
-        fsd_btn_set_double(&g_btns, b, (g_double_mask >> b) & 1u);
+    /* Rebuild the double-press state from the rows. The mask is the truth;
+     * the timing is derived from it, never stored twice. */
+    for(uint8_t b = 0; b < FSD_BTN_MAX; b++) {
+        const uint8_t row = (uint8_t)(b * FSD_BTN_EVENTS + 1u);
+        const bool on = row < 32u && ((g_action_mask >> row) & 1uL);
+        fsd_btn_set_double(&g_btns, b, on);
+        if(on) g_double_mask = (uint16_t)(g_double_mask | (1u << b));
+    }
 
     g_prefs.begin("btn", false);
     char key[8];
@@ -719,6 +729,35 @@ void ble_central_set_double(uint8_t btn, bool on) {
 }
 
 uint16_t ble_central_double_mask(void) { return g_double_mask; }
+
+static void action_save(void) {
+    g_prefs.begin("btn", false);
+    g_prefs.putUInt("act", g_action_mask);
+    g_prefs.end();
+}
+
+void ble_central_set_action(uint8_t row, bool on) {
+    if(row >= FSD_BTN_MAX * FSD_BTN_EVENTS || row >= 32u) return;
+    const uint32_t bit = 1uL << row;
+    const uint32_t want = on ? (g_action_mask | bit) : (g_action_mask & ~bit);
+    if(want == g_action_mask) return;
+    g_action_mask = want;
+    action_save();
+
+    /* 🔴 A DOUBLE row is not only a note about intent — switching it on makes
+     * the button wait for a twin, and every single press there gets slower.
+     * Applying it here is what keeps the mask the ONE truth: a caller cannot
+     * set the row and forget the timing, because there is nothing else to set. */
+    const uint8_t btn = (uint8_t)(row / FSD_BTN_EVENTS);
+    if((row % FSD_BTN_EVENTS) == 1u) fsd_btn_set_double(&g_btns, btn, on);
+
+    Serial.printf("[BTN] %s %s %s\n", fsd_j6_name((FsdJ6Btn)btn),
+                  (row % FSD_BTN_EVENTS) == 0u ? "short"
+                      : ((row % FSD_BTN_EVENTS) == 1u ? "double" : "long"),
+                  on ? "enabled" : "disabled");
+}
+
+uint32_t ble_central_action_mask(void) { return g_action_mask; }
 
 /* Over every logical button. It used to be over slots, back when those were the
  * same thing; with the J6 that would count one button in nine. */

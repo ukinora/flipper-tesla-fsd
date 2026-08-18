@@ -231,7 +231,7 @@ String capability_status_json() {
         j += (int)ble_central_button_events(b);
     }
     j += "],";
-    j += "\"dbl\":"; j += (int)ble_central_double_mask(); j += ',';
+    j += "\"act\":"; j += (unsigned long)ble_central_action_mask(); j += ',';
 
     /* ── the scan list, and the reason it is fitted rather than appended ──────
      *

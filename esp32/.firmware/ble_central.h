@@ -192,6 +192,35 @@ uint16_t ble_central_slot_decoded(uint8_t slot);
  *  "something arrived", which names nothing. */
 uint16_t ble_central_button_events(uint8_t btn);
 
+/* ── what each input is supposed to DO ───────────────────────────────────────
+ *
+ * A button is not one thing. 6번 alone offers a tap, a double tap and a hold,
+ * and each is a separate place to hang an action. So the unit here is a ROW —
+ * (logical button, event) — not a button.
+ *
+ *    row = button * FSD_BTN_EVENTS + event,  event 0 short / 1 double / 2 long
+ *
+ * Today the only choice is on or off, because no vehicle action has been
+ * captured yet. Stored anyway, and stored HERE rather than in the phone: the
+ * module is what will act, and a mapping the module does not know is a mapping
+ * that stops working the moment the phone is elsewhere. Same reasoning as
+ * autonomy_enabled.
+ *
+ * 🔴 The DOUBLE rows are not just intent. Enabling one turns on the wait for a
+ * second tap, which delays that button's single press — so this mask replaced
+ * the separate double-press mask rather than sitting beside it. Two masks would
+ * be two truths about the same thing, and they would drift. */
+
+/** Events a row can carry. Short, double, long. */
+#define FSD_BTN_EVENTS 3u
+
+/** Turn one row on or off. Persisted. Enabling a DOUBLE row also starts the
+ *  double-press wait on that button; disabling it stops it. */
+void ble_central_set_action(uint8_t row, bool on);
+
+/** Bitmask of enabled rows, bit `row` = that row. */
+uint32_t ble_central_action_mask(void);
+
 /** Watch for double presses on one logical button. Persisted.
  *
  *  🔴 THE COST IS ON THAT BUTTON ALONE and it is real: a tap cannot be reported
@@ -287,6 +316,8 @@ static inline bool ble_central_decoder_verified(void) { return false; }
 static inline uint16_t ble_central_button_events(uint8_t) { return 0; }
 static inline void ble_central_set_double(uint8_t, bool) {}
 static inline uint16_t ble_central_double_mask(void) { return 0; }
+static inline void ble_central_set_action(uint8_t, bool) {}
+static inline uint32_t ble_central_action_mask(void) { return 0; }
 static inline uint8_t ble_central_bound_count(void) { return 0; }
 static inline bool ble_central_any_connected(void) { return false; }
 static inline void ble_central_set_verbose(bool) {}
