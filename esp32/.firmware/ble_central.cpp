@@ -426,9 +426,22 @@ void ble_central_tick(uint32_t now_ms) {
         if(FSD_BTN_MAP.verified &&
            (FSD_BTN_MAP.report_len == 0 || len == FSD_BTN_MAP.report_len) &&
            FSD_BTN_MAP.code_offset < len) {
-            const bool down =
-                (rep[FSD_BTN_MAP.code_offset] & FSD_BTN_MAP.press_mask) != 0u;
-            const FsdBtnEvent e = fsd_btn_report(&g_btns, i, down, now_ms);
+            /* Which entry point depends on what this button can say (see
+             * fsd_button.h). Feeding a level to an event button, or a pulse to
+             * a level one, is refused there rather than guessed — so the branch
+             * has to live here, at the only place that knows the kind.
+             *
+             * EVENT is the default, which is what the TSL remote measured on
+             * 2026-08-18 appears to be: it says a press happened and never that
+             * it ended. A notification IS the whole gesture. */
+            FsdBtnEvent e;
+            if(fsd_btn_kind(&g_btns, i) == FSD_BTN_KIND_LEVEL) {
+                const bool down =
+                    (rep[FSD_BTN_MAP.code_offset] & FSD_BTN_MAP.press_mask) != 0u;
+                e = fsd_btn_report(&g_btns, i, down, now_ms);
+            } else {
+                e = fsd_btn_pulse(&g_btns, i, now_ms);
+            }
             if(e != FSD_BTN_EV_NONE)
                 Serial.printf("[BTN] %u %s (%ums)\n", (unsigned)i,
                               fsd_btn_event_str(e),
