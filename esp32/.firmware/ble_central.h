@@ -87,6 +87,17 @@
 #define BLE_CENTRAL_MAX_BUTTONS 5
 #endif
 
+/** Events a row can carry: short, double, long.
+ *
+ * 🔴 ABOVE THE #ifdef, like the counts around it. capability.cpp uses this to
+ * size a loop and is compiled for every board, so hiding it behind
+ * BLE_SERVER_ENABLED breaks the seven boards that do not define it — which is
+ * exactly how this file broke eight builds once already. Only lilygo-t2can
+ * defines it, so a local build of our own board proves nothing. */
+#ifndef FSD_BTN_EVENTS
+#define FSD_BTN_EVENTS 3u
+#endif
+
 /* ── The slot count is not free. It is spent out of the radio's link budget ──
  *
  * 🔴 This was a boot loop, not a warning (2026-08-18). Asking NimBLE for more
@@ -184,13 +195,16 @@ uint16_t ble_central_slot_decoded(uint8_t slot);
  * These are about BUTTONS, not links. One remote carries nine of them, so a
  * per-slot answer cannot address them (fsd_btn_j6.h). */
 
-/** How many gestures this logical button has produced — short, long and double
- *  added together.
+/** How many times THIS ROW has fired. Row encoding as above.
  *
- *  This is what lets a person see WHICH row on the screen is the key under
- *  their thumb: press it, watch a number move. Without it the app can only say
- *  "something arrived", which names nothing. */
-uint16_t ble_central_button_events(uint8_t btn);
+ *  🔴 PER ROW, NOT PER BUTTON. It was per button — short, double and long added
+ *  together — and the screen then drew that one number on all three of a
+ *  button's lines, so pressing 6번 once appeared to move its 1회, 2회 AND 길게
+ *  counts at once. The number exists to tell those lines APART; summing them
+ *  destroyed exactly the information it was for.
+ *
+ *  Clamped to 255. This is evidence that a line moved, not a statistic. */
+uint8_t ble_central_row_events(uint8_t row);
 
 /* ── what each input is supposed to DO ───────────────────────────────────────
  *
@@ -210,9 +224,6 @@ uint16_t ble_central_button_events(uint8_t btn);
  * second tap, which delays that button's single press — so this mask replaced
  * the separate double-press mask rather than sitting beside it. Two masks would
  * be two truths about the same thing, and they would drift. */
-
-/** Events a row can carry. Short, double, long. */
-#define FSD_BTN_EVENTS 3u
 
 /** Turn one row on or off. Persisted. Enabling a DOUBLE row also starts the
  *  double-press wait on that button; disabling it stops it. */
@@ -313,7 +324,7 @@ static inline const char* ble_central_slot_addr(uint8_t) { return ""; }
 static inline bool ble_central_slot_connected(uint8_t) { return false; }
 static inline uint16_t ble_central_slot_decoded(uint8_t) { return 0; }
 static inline bool ble_central_decoder_verified(void) { return false; }
-static inline uint16_t ble_central_button_events(uint8_t) { return 0; }
+static inline uint8_t ble_central_row_events(uint8_t) { return 0; }
 static inline void ble_central_set_double(uint8_t, bool) {}
 static inline uint16_t ble_central_double_mask(void) { return 0; }
 static inline void ble_central_set_action(uint8_t, bool) {}

@@ -701,12 +701,16 @@ uint16_t ble_central_slot_decoded(uint8_t slot) {
  * decoder understands — that is what the per-slot count above answers. */
 bool ble_central_decoder_verified(void) { return true; }
 
-uint16_t ble_central_button_events(uint8_t btn) {
+uint8_t ble_central_row_events(uint8_t row) {
+    const uint8_t btn = (uint8_t)(row / FSD_BTN_EVENTS);
     if(btn >= FSD_BTN_MAX) return 0;
-    const uint32_t n = (uint32_t)fsd_btn_shorts(&g_btns, btn)
-                     + fsd_btn_longs(&g_btns, btn)
-                     + fsd_btn_doubles(&g_btns, btn);
-    return (n > 0xFFFFu) ? 0xFFFFu : (uint16_t)n;
+    uint16_t n;
+    switch(row % FSD_BTN_EVENTS) {
+    case 0: n = fsd_btn_shorts(&g_btns, btn); break;
+    case 1: n = fsd_btn_doubles(&g_btns, btn); break;
+    default: n = fsd_btn_longs(&g_btns, btn); break;
+    }
+    return (n > 0xFFu) ? 0xFFu : (uint8_t)n;
 }
 
 static void double_save(void) {

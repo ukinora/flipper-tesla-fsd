@@ -225,12 +225,20 @@ String capability_status_json() {
      * The counts are what let a person find which row is the key under their
      * thumb: press it, watch a number move. Without them the screen can only
      * say "something arrived", which names nothing. */
-    j += "\"btn\":[";
-    for (uint8_t b = 0; b < FSD_J6_COUNT; b++) {
-        if (b) j += ',';
-        j += (int)ble_central_button_events(b);
+    /* 🔴 HEX STRING, NOT AN ARRAY, and the reason is size. Thirty rows written
+     * as decimal numbers grow with the counts — a document that fits today
+     * stops fitting after a hundred presses, and NimBLE answers an oversized
+     * value by storing NOTHING. Two hex characters per row is 60 bytes no
+     * matter what the counts are, so the document cannot outgrow the ATT limit
+     * by being used. */
+    j += "\"btn\":\"";
+    for (uint8_t r = 0; r < FSD_J6_COUNT * FSD_BTN_EVENTS; r++) {
+        const uint8_t n = ble_central_row_events(r);
+        static const char kHex[] = "0123456789abcdef";
+        j += kHex[(n >> 4) & 0xFu];
+        j += kHex[n & 0xFu];
     }
-    j += "],";
+    j += "\",";
     j += "\"act\":"; j += (unsigned long)ble_central_action_mask(); j += ',';
 
     /* ── the scan list, and the reason it is fitted rather than appended ──────
