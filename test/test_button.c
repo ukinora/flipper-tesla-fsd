@@ -45,13 +45,25 @@ static void press(FsdButtons* b, uint32_t at, uint32_t hold_ms, FsdBtnEvent* on_
     if (on_release) *on_release = r;
 }
 
+/* The level machine's tests say so out loud.
+ *
+ * The default kind is EVENT (see fsd_button.h), so a test that feeds down/up
+ * has to declare that its button is a level button. Before 2026-08-18 there was
+ * no kind and this was implicit; making it explicit is the point, not overhead.
+ */
+static void init_level(FsdButtons* b) {
+    fsd_btn_init(b);
+    for (uint8_t i = 0; i < FSD_BTN_MAX; i++)
+        fsd_btn_set_kind(b, i, FSD_BTN_KIND_LEVEL);
+}
+
 static void test_short_and_long(void) {
     printf("\n-- a tap, and a hold --\n");
 
     FsdButtons b;
     FsdBtnEvent held = FSD_BTN_EV_NONE, rel = FSD_BTN_EV_NONE;
 
-    fsd_btn_init(&b);
+    init_level(&b);
     press(&b, 1000, 100, &held, &rel);
     CHECK(held == FSD_BTN_EV_NONE, "a tap produces nothing while held");
     CHECK(rel == FSD_BTN_EV_SHORT, "and SHORT on release");
@@ -61,7 +73,7 @@ static void test_short_and_long(void) {
 
     // A hold fires WHILE held. Reporting it only on release would feel like lag
     // and the user would have no way to know it registered.
-    fsd_btn_init(&b);
+    init_level(&b);
     press(&b, 1000, FSD_BTN_LONG_MS + 200u, &held, &rel);
     CHECK(held == FSD_BTN_EV_LONG, "LONG arrives while the button is still down");
     CHECK(rel == FSD_BTN_EV_NONE, "and the release adds nothing");
@@ -69,12 +81,12 @@ static void test_short_and_long(void) {
           "counted as a long, not also a short");
 
     // Exactly at the threshold is a long.
-    fsd_btn_init(&b);
+    init_level(&b);
     press(&b, 1000, FSD_BTN_LONG_MS, &held, &rel);
     CHECK(held == FSD_BTN_EV_LONG, "the threshold itself is a LONG");
 
     // Only once, no matter how long.
-    fsd_btn_init(&b);
+    init_level(&b);
     fsd_btn_report(&b, 0, true, 1000);
     int longs = 0;
     for (uint32_t e = 0; e < 3000; e += 20)
@@ -87,7 +99,7 @@ static void test_bounce(void) {
 
     FsdButtons b;
     FsdBtnEvent rel = FSD_BTN_EV_NONE;
-    fsd_btn_init(&b);
+    init_level(&b);
 
     press(&b, 1000, FSD_BTN_DEBOUNCE_MS - 1u, NULL, &rel);
     CHECK(rel == FSD_BTN_EV_NONE, "too brief to be a press");
@@ -105,7 +117,7 @@ static void test_stuck(void) {
     printf("\n-- a button under a seat cushion --\n");
 
     FsdButtons b;
-    fsd_btn_init(&b);
+    init_level(&b);
     fsd_btn_report(&b, 0, true, 1000);
 
     FsdBtnEvent stuck = FSD_BTN_EV_NONE;
@@ -138,7 +150,7 @@ static void test_levels_not_edges(void) {
     // A peripheral that notifies its state at a fixed rate sends "down, down,
     // down..." — that must be one press, not one per report.
     FsdButtons b;
-    fsd_btn_init(&b);
+    init_level(&b);
     for (uint32_t e = 0; e < 200; e += 20)
         CHECK(fsd_btn_report(&b, 0, true, 1000 + e) == FSD_BTN_EV_NONE,
               "a repeated down is not a new press");
@@ -165,7 +177,7 @@ static void test_double_off_by_default(void) {
 
     FsdButtons b;
     FsdBtnEvent rel = FSD_BTN_EV_NONE;
-    fsd_btn_init(&b);
+    init_level(&b);
 
     CHECK(!fsd_btn_double_enabled(&b, 0), "off after init");
 
@@ -180,7 +192,7 @@ static void test_double_delays_the_short(void) {
 
     FsdButtons b;
     FsdBtnEvent rel = FSD_BTN_EV_NONE;
-    fsd_btn_init(&b);
+    init_level(&b);
     fsd_btn_set_double(&b, 0, true);
     CHECK(fsd_btn_double_enabled(&b, 0), "on");
 
@@ -205,7 +217,7 @@ static void test_double_fires(void) {
 
     FsdButtons b;
     FsdBtnEvent rel = FSD_BTN_EV_NONE;
-    fsd_btn_init(&b);
+    init_level(&b);
     fsd_btn_set_double(&b, 0, true);
 
     press(&b, 1000, 60, NULL, &rel);                 // released at 1060
@@ -229,7 +241,7 @@ static void test_double_window_expires(void) {
 
     FsdButtons b;
     FsdBtnEvent rel = FSD_BTN_EV_NONE;
-    fsd_btn_init(&b);
+    init_level(&b);
     fsd_btn_set_double(&b, 0, true);
 
     press(&b, 1000, 60, NULL, &rel);
@@ -251,7 +263,7 @@ static void test_double_then_hold(void) {
     // losing the tap: the action would fire twice.
     FsdButtons b;
     FsdBtnEvent held = FSD_BTN_EV_NONE, rel = FSD_BTN_EV_NONE;
-    fsd_btn_init(&b);
+    init_level(&b);
     fsd_btn_set_double(&b, 0, true);
 
     press(&b, 1000, 60, NULL, &rel);
@@ -271,7 +283,7 @@ static void test_double_bounce_keeps_waiting(void) {
 
     FsdButtons b;
     FsdBtnEvent rel = FSD_BTN_EV_NONE;
-    fsd_btn_init(&b);
+    init_level(&b);
     fsd_btn_set_double(&b, 0, true);
 
     press(&b, 1000, 60, NULL, &rel);
@@ -288,7 +300,7 @@ static void test_independent_and_bounds(void) {
     printf("\n-- buttons do not interfere; indices are checked --\n");
 
     FsdButtons b;
-    fsd_btn_init(&b);
+    init_level(&b);
     fsd_btn_report(&b, 0, true, 1000);
     fsd_btn_report(&b, 1, true, 1000);
     fsd_btn_report(&b, 0, false, 1100);
@@ -309,6 +321,153 @@ static void test_independent_and_bounds(void) {
     }
 }
 
+
+/* -- kind: EVENT vs LEVEL ---------------------------------------------------
+ *
+ * Some buttons report a level (down, then up); some report only that a press
+ * happened and never say it ended. The TSL remote measured on 2026-08-18 is the
+ * second kind, and that is very likely why that product has no long-press.
+ *
+ * GETTING THIS WRONG IS NOT SYMMETRIC. Treating a level button as an event
+ * button costs long-press. Treating an EVENT button as a LEVEL one fires a
+ * phantom LONG at 600 ms and then STUCK at 10 s, and STUCK clears only on a
+ * release that is never coming -- the button is dead until reboot. So the
+ * default is EVENT, and LEVEL is turned on only after a release is seen.
+ */
+
+static void test_kind_defaults_to_event(void) {
+    printf("kind: default is EVENT (the safe one)\n");
+    FsdButtons b;
+    fsd_btn_init(&b);
+    for (uint8_t i = 0; i < FSD_BTN_MAX; i++)
+        CHECK(fsd_btn_kind(&b, i) == FSD_BTN_KIND_EVENT, "button %u starts EVENT", i);
+}
+
+static void test_event_pulse_is_a_short(void) {
+    printf("kind: one pulse is one SHORT\n");
+    FsdButtons b;
+    fsd_btn_init(&b);
+    CHECK(fsd_btn_pulse(&b, 0, 1000) == FSD_BTN_EV_SHORT, "pulse -> SHORT");
+    CHECK(fsd_btn_shorts(&b, 0) == 1, "counted");
+    CHECK(fsd_btn_last_hold_ms(&b, 0) == 0, "no hold time exists for an event");
+}
+
+/* The whole point. An event button must never lock itself out. */
+static void test_event_never_longs_or_sticks(void) {
+    printf("kind: EVENT never produces LONG or STUCK\n");
+    FsdButtons b;
+    fsd_btn_init(&b);
+    fsd_btn_pulse(&b, 0, 1000);
+    /* One CHECK, not one per tick: 600 identical assertions inflate the count
+     * without adding a case. The loop is the test; the verdict is the CHECK. */
+    uint32_t bad_at = 0;
+    for (uint32_t t = 1000; t <= 1000 + 60000; t += 100) {
+        const FsdBtnEvent e = fsd_btn_tick(&b, 0, t);
+        if ((e == FSD_BTN_EV_LONG || e == FSD_BTN_EV_STUCK) && !bad_at) bad_at = t;
+    }
+    CHECK(bad_at == 0, "60 s of ticks produced LONG/STUCK at %u", bad_at);
+    CHECK(!fsd_btn_is_stuck(&b, 0), "never stuck");
+    CHECK(fsd_btn_longs(&b, 0) == 0, "no longs");
+}
+
+/* A level report on an EVENT button is what opens the trap. Ignore it. */
+static void test_event_ignores_level_reports(void) {
+    printf("kind: EVENT ignores down/up reports\n");
+    FsdButtons b;
+    fsd_btn_init(&b);
+    CHECK(fsd_btn_report(&b, 0, true, 1000) == FSD_BTN_EV_NONE, "down ignored");
+    uint32_t spoke_at = 0;
+    for (uint32_t t = 1000; t <= 1000 + 20000; t += 100)
+        if (fsd_btn_tick(&b, 0, t) != FSD_BTN_EV_NONE && !spoke_at) spoke_at = t;
+    CHECK(spoke_at == 0, "20 s of ticks stayed silent (spoke at %u)", spoke_at);
+    CHECK(!fsd_btn_is_stuck(&b, 0), "a stray down cannot wedge an event button");
+}
+
+static void test_event_double(void) {
+    printf("kind: EVENT supports double press\n");
+    FsdButtons b;
+    fsd_btn_init(&b);
+    fsd_btn_set_double(&b, 0, true);
+    CHECK(fsd_btn_pulse(&b, 0, 1000) == FSD_BTN_EV_NONE, "first tap waits for its twin");
+    CHECK(fsd_btn_pulse(&b, 0, 1000 + 150) == FSD_BTN_EV_DOUBLE, "twin arrived");
+    CHECK(fsd_btn_doubles(&b, 0) == 1, "counted once");
+    CHECK(fsd_btn_shorts(&b, 0) == 0, "not also two shorts");
+}
+
+static void test_event_double_window_expires(void) {
+    printf("kind: EVENT lone tap falls out as SHORT\n");
+    FsdButtons b;
+    fsd_btn_init(&b);
+    fsd_btn_set_double(&b, 0, true);
+    CHECK(fsd_btn_pulse(&b, 0, 1000) == FSD_BTN_EV_NONE, "withheld");
+    CHECK(fsd_btn_tick(&b, 0, 1000 + FSD_BTN_DOUBLE_MS - 1) == FSD_BTN_EV_NONE, "still waiting");
+    CHECK(fsd_btn_tick(&b, 0, 1000 + FSD_BTN_DOUBLE_MS + 1) == FSD_BTN_EV_SHORT, "released late");
+}
+
+static void test_level_kind_works_as_before(void) {
+    printf("kind: LEVEL restores the down/up machine\n");
+    FsdButtons b;
+    fsd_btn_init(&b);
+    fsd_btn_set_kind(&b, 0, FSD_BTN_KIND_LEVEL);
+    CHECK(fsd_btn_report(&b, 0, true, 1000) == FSD_BTN_EV_NONE, "down");
+    CHECK(fsd_btn_report(&b, 0, false, 1000 + 100) == FSD_BTN_EV_SHORT, "up -> SHORT");
+    CHECK(fsd_btn_report(&b, 0, true, 2000) == FSD_BTN_EV_NONE, "down again");
+    CHECK(fsd_btn_tick(&b, 0, 2000 + FSD_BTN_LONG_MS) == FSD_BTN_EV_LONG, "LONG still works");
+}
+
+/* A pulse on a LEVEL button is a caller mistake, not an event. */
+static void test_level_ignores_pulse(void) {
+    printf("kind: LEVEL ignores pulses\n");
+    FsdButtons b;
+    fsd_btn_init(&b);
+    fsd_btn_set_kind(&b, 0, FSD_BTN_KIND_LEVEL);
+    CHECK(fsd_btn_pulse(&b, 0, 1000) == FSD_BTN_EV_NONE, "ignored");
+    CHECK(fsd_btn_shorts(&b, 0) == 0, "nothing counted");
+}
+
+/* Switching kind while a button is held must not leave a ghost down. The
+ * registration probe we plan will flip this at runtime, so a stale down would
+ * wedge a button at the very moment it is promoted. */
+static void test_kind_change_clears_state(void) {
+    printf("kind: changing kind resets the button\n");
+    FsdButtons b;
+    fsd_btn_init(&b);
+    fsd_btn_set_kind(&b, 0, FSD_BTN_KIND_LEVEL);
+    fsd_btn_report(&b, 0, true, 1000);          /* held down */
+    fsd_btn_set_kind(&b, 0, FSD_BTN_KIND_EVENT);
+    uint32_t ghost_at = 0;
+    for (uint32_t t = 1000; t <= 1000 + 20000; t += 100)
+        if (fsd_btn_tick(&b, 0, t) != FSD_BTN_EV_NONE && !ghost_at) ghost_at = t;
+    CHECK(ghost_at == 0, "the held-down state did not survive the switch (ghost at %u)", ghost_at);
+
+    fsd_btn_set_kind(&b, 0, FSD_BTN_KIND_LEVEL);
+    CHECK(fsd_btn_report(&b, 0, false, 30000) == FSD_BTN_EV_NONE,
+          "a release with no press is not a click");
+}
+
+static void test_kind_is_per_button(void) {
+    printf("kind: per button, not global\n");
+    FsdButtons b;
+    fsd_btn_init(&b);
+    fsd_btn_set_kind(&b, 1, FSD_BTN_KIND_LEVEL);
+    CHECK(fsd_btn_kind(&b, 0) == FSD_BTN_KIND_EVENT, "0 untouched");
+    CHECK(fsd_btn_kind(&b, 1) == FSD_BTN_KIND_LEVEL, "1 changed");
+    CHECK(fsd_btn_pulse(&b, 0, 1000) == FSD_BTN_EV_SHORT, "0 still takes pulses");
+    CHECK(fsd_btn_report(&b, 1, true, 1000) == FSD_BTN_EV_NONE, "1 takes levels");
+    CHECK(fsd_btn_report(&b, 1, false, 1100) == FSD_BTN_EV_SHORT, "1 clicks");
+}
+
+static void test_kind_bounds(void) {
+    printf("kind: out of range is refused\n");
+    FsdButtons b;
+    fsd_btn_init(&b);
+    fsd_btn_set_kind(&b, FSD_BTN_MAX, FSD_BTN_KIND_LEVEL);   /* must not corrupt */
+    CHECK(fsd_btn_kind(&b, FSD_BTN_MAX) == FSD_BTN_KIND_EVENT, "reads back safe");
+    CHECK(fsd_btn_pulse(&b, FSD_BTN_MAX, 1000) == FSD_BTN_EV_NONE, "no pulse");
+    CHECK(fsd_btn_pulse(NULL, 0, 1000) == FSD_BTN_EV_NONE, "NULL refused");
+    CHECK(fsd_btn_kind(NULL, 0) == FSD_BTN_KIND_EVENT, "NULL reads EVENT");
+}
+
 int main(void) {
     printf("test_button\n");
     test_short_and_long();
@@ -322,6 +481,17 @@ int main(void) {
     test_stuck();
     test_levels_not_edges();
     test_independent_and_bounds();
+    test_kind_defaults_to_event();
+    test_event_pulse_is_a_short();
+    test_event_never_longs_or_sticks();
+    test_event_ignores_level_reports();
+    test_event_double();
+    test_event_double_window_expires();
+    test_level_kind_works_as_before();
+    test_level_ignores_pulse();
+    test_kind_change_clears_state();
+    test_kind_is_per_button();
+    test_kind_bounds();
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }

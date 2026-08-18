@@ -93,7 +93,30 @@ typedef enum {
     FSD_BTN_EV_DOUBLE,
 } FsdBtnEvent;
 
+/* What a button is physically able to tell us.
+ *
+ * MEASURED, NOT CHOSEN. A TSL remote was put on the bench on 2026-08-18 and it
+ * reports only that a press happened — never that it ended. That is almost
+ * certainly why that product offers 1-click and 2-click but no long press: you
+ * cannot time a hold you are never told the end of.
+ *
+ * 🔴 THE DEFAULT IS EVENT BECAUSE THE MISTAKES ARE NOT SYMMETRIC.
+ *
+ * | 실제 | 우리가 EVENT 로 봄 | 우리가 LEVEL 로 봄 |
+ * |---|---|---|
+ * | LEVEL | 길게만 못 쓴다 | 정상 |
+ * | EVENT | 정상 | 🔴 0.6 s 에 유령 LONG, 10 s 에 STUCK — **그 버튼이 잠긴다** |
+ *
+ * STUCK is cleared only by a release, and an event button has none to give, so
+ * the bottom-right cell is permanent until reboot. Start EVENT; promote to
+ * LEVEL only after an actual release has been seen. */
+typedef enum {
+    FSD_BTN_KIND_EVENT = 0, // "눌렸다" 만 온다. 1회·2회만 가능
+    FSD_BTN_KIND_LEVEL,     // 눌림과 뗌이 온다. 길게도 가능
+} FsdBtnKind;
+
 typedef struct {
+    FsdBtnKind kind;     // 0 = EVENT, so a zeroed struct is the safe one
     bool down;
     uint32_t down_ms;
     bool long_fired;
@@ -115,7 +138,27 @@ typedef struct {
 /** Clear every button to released. */
 void fsd_btn_init(FsdButtons* b);
 
-/** Feed a level. Call whenever the peripheral reports, at whatever rate it
+/** What this button is able to report. EVENT until told otherwise.
+ *
+ *  Changing it **resets that button** — down, hold, stuck and any withheld tap
+ *  are cleared. The registration probe flips this at runtime, and a stale
+ *  `down` left behind by the old mode would wedge the button the instant it is
+ *  promoted. Counters and the double-press setting survive. */
+void fsd_btn_set_kind(FsdButtons* b, uint8_t idx, FsdBtnKind kind);
+FsdBtnKind fsd_btn_kind(const FsdButtons* b, uint8_t idx);
+
+/** Feed one press from an EVENT button — the whole gesture, arriving at once.
+ *
+ *  There is no hold to measure, so this can return SHORT or DOUBLE and never
+ *  LONG or STUCK. On a LEVEL button it does nothing: mixing the two entry
+ *  points is a caller mistake, and guessing which one was meant is how a
+ *  gesture ends up counted twice. */
+FsdBtnEvent fsd_btn_pulse(FsdButtons* b, uint8_t idx, uint32_t now_ms);
+
+/** Feed a level. **LEVEL buttons only** — ignored on an EVENT button, which is
+ *  what stops a stray "down" from starting a hold that never ends.
+ *
+ *  Call whenever the peripheral reports, at whatever rate it
  *  reports — this takes edges from the level itself, so a repeated "still
  *  down" costs nothing.
  *
