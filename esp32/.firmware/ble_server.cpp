@@ -42,6 +42,10 @@
 #define BLE_UUID_BULK    "6b1a0006-4b53-4d4f-4432-43414e000001"
 #define BLE_UUID_UPLOAD  "6b1a0007-4b53-4d4f-4432-43414e000001"
 #define BLE_UUID_CAMSTAT "6b1a0008-4b53-4d4f-4432-43414e000001"
+/* Scan results. Their own characteristic because they are a different KIND of
+ * thing from the capability document — transient, and as large as the room the
+ * scan was taken in. Eight named devices are half a kilobyte on their own. */
+#define BLE_UUID_SCAN    "6b1a0009-4b53-4d4f-4432-43414e000001"
 
 #define BLE_STATE_LEN  20u
 #define BLE_RESULT_LEN 4u
@@ -67,6 +71,7 @@ static NimBLECharacteristic *g_ch_cap    = nullptr;
 static NimBLECharacteristic *g_ch_bulk   = nullptr;
 static NimBLECharacteristic *g_ch_upload = nullptr;
 static NimBLECharacteristic *g_ch_camstat = nullptr;
+static NimBLECharacteristic *g_ch_scan    = nullptr;
 
 // Whether the radio is advertising, as reported by startAdvertising() -- both
 // at init and on every re-advertise after a disconnect. Read by the OTA
@@ -552,6 +557,18 @@ static void ble_refresh_capability(uint32_t now_ms) {
     static uint32_t s_last_ms = 0;
     if (s_last_ms != 0 && (uint32_t)(now_ms - s_last_ms) < CAP_REFRESH_MS) return;
     s_last_ms = now_ms;
+
+    /* The scan list rides along on the same beat. It has to be republished
+     * rather than written once when a scan ends: the phone may connect after
+     * the scan, and a characteristic that was filled before it arrived is
+     * indistinguishable from one that was never filled. */
+    if (g_ch_scan) {
+        const String doc = capability_scan_json();
+        g_ch_scan->setValue((const uint8_t*)doc.c_str(), doc.length());
+        if (g_ch_scan->getValue().size() != doc.length())
+            Serial.printf("[CAP] scan list REFUSED: %u bytes (ATT limit %u)\n",
+                          (unsigned)doc.length(), (unsigned)CAP_ATTR_MAX);
+    }
 
     if (g_ch_cap) {
         /* 🔴 Hold the String in a NAMED variable. `f().c_str()` hands NimBLE a
@@ -1040,6 +1057,7 @@ void ble_server_init(FSDState *state, portMUX_TYPE *state_mux) {
     // Capability verdicts: read once on connect so the app can grey out features
     // this tap cannot do (e.g. no 0x3C2 -> no scroll-based profile control).
     g_ch_cap = svc->createCharacteristic(BLE_UUID_CAPAB, NIMBLE_PROPERTY::READ);
+    g_ch_scan = svc->createCharacteristic(BLE_UUID_SCAN, NIMBLE_PROPERTY::READ);
     {
         const String doc = capability_status_json();
         g_ch_cap->setValue((const uint8_t*)doc.c_str(), doc.length());

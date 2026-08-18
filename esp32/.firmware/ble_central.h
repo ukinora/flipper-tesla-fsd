@@ -141,12 +141,22 @@ void ble_central_init(void);
 /** Pump from loop(): drives reconnects and the button tick. Cheap when idle. */
 void ble_central_tick(uint32_t now_ms);
 
-/** Scan for `secs` and print what is found. On demand only — scanning costs
- *  radio time the server shares. Returns false if a scan is already running.
+/** Start a scan. **Returns immediately** — results arrive on the host task and
+ *  ble_central_scanning() goes false when it finishes.
  *
- *  🔴 BLOCKS for `secs`. Never call this from a BLE callback — use
- *  ble_central_request_scan() there. */
+ *  🔴 It used to block for the whole scan, and that made the phone's "find
+ *  buttons" unusable: five seconds without answering GATT reads drops the
+ *  link, so the result had nowhere to arrive. Do not put a blocking call back
+ *  here — a scan that works but disconnects the app is not a working scan.
+ *
+ *  Returns false when one is already running. */
 bool ble_central_scan(uint8_t secs);
+
+/** How many devices the last scan SAW, before keeping only the first
+ *  BLE_CENTRAL_MAX_FOUND. Reporting only what we kept reads as "this is all
+ *  there is", and someone whose remote is missing then looks in the wrong
+ *  place. */
+uint16_t ble_central_found_total(void);
 
 /** Park a scan for loop() to run. Safe from a BLE characteristic callback. */
 void ble_central_request_scan(uint8_t secs);
@@ -314,6 +324,7 @@ static inline bool ble_central_scan(uint8_t) { return false; }
 static inline void ble_central_request_scan(uint8_t) {}
 static inline bool ble_central_scanning(void) { return false; }
 static inline uint8_t ble_central_found_count(void) { return 0; }
+static inline uint16_t ble_central_found_total(void) { return 0; }
 static inline bool ble_central_found(uint8_t, const char**, const char**, int8_t*) { return false; }
 static inline uint16_t ble_central_double_presses(void) { return 0; }
 static inline int ble_central_add(const char*) { return -1; }
