@@ -174,6 +174,45 @@ bool ble_central_any_connected(void);
  *  report layout is confirmed, because that log IS the measurement. */
 void ble_central_set_verbose(bool on);
 
+/* ── bring-up instruments ────────────────────────────────────────────────────
+ *
+ * A remote that connects and then says nothing has three possible reasons and
+ * they need different fixes. These two measure rather than guess. Neither is
+ * called on its own and neither changes how a bound button behaves.
+ *
+ * 🔴 BLOCKS for `secs`, like ble_central_scan(). Serial console only. */
+
+/** Print one address's FULL advertisement, every time it is seen.
+ *
+ *  The scan list only shows name and RSSI. If the press is carried in the
+ *  advertisement — manufacturer data, a counter, a rolling code — this is the
+ *  only place it becomes visible. Seeing nothing is a result: some buttons
+ *  advertise only while held. */
+bool ble_central_raw(const char* addr_str, uint8_t secs);
+
+/** Ask a connected remote to encrypt the link.
+ *
+ *  Many peripherals withhold notifications until the link is paired. We never
+ *  initiate pairing otherwise, so this is the one way to rule that out. Uses
+ *  the security parameters the server role already set — the phone's link is
+ *  untouched — but it does spend one bond slot. */
+bool ble_central_secure(uint8_t slot);
+
+/** Print the connected remote's whole GATT table with properties, and the
+ *  current value of anything readable.
+ *
+ *  subscribe_all() only ever asked "what notifies". That is the right first
+ *  question and the wrong second one: a remote that stays silent may be waiting
+ *  to be written to, and a write target is invisible from a notify-only view. */
+bool ble_central_chars(uint8_t slot);
+
+/** Try a short list of conventional wake values against every write target.
+ *
+ *  🔴 Not a search — that space is 2^n. A bounded knock: if none of these
+ *  starts it talking, the answer has to come from watching the real app, and
+ *  knowing that quickly is the whole value. */
+bool ble_central_poke(uint8_t slot);
+
 /** Counters for the serial line and a future BLE surface. */
 uint16_t ble_central_notify_count(void);
 uint16_t ble_central_short_presses(void);
@@ -199,6 +238,10 @@ static inline bool ble_central_slot_connected(uint8_t) { return false; }
 static inline uint8_t ble_central_bound_count(void) { return 0; }
 static inline bool ble_central_any_connected(void) { return false; }
 static inline void ble_central_set_verbose(bool) {}
+static inline bool ble_central_raw(const char*, uint8_t) { return false; }
+static inline bool ble_central_secure(uint8_t) { return false; }
+static inline bool ble_central_chars(uint8_t) { return false; }
+static inline bool ble_central_poke(uint8_t) { return false; }
 static inline uint16_t ble_central_notify_count(void) { return 0; }
 static inline uint16_t ble_central_short_presses(void) { return 0; }
 static inline uint16_t ble_central_long_presses(void) { return 0; }

@@ -103,10 +103,34 @@ static volatile bool g_scanning = false;
  * the identity of the sender IS the signal — a shared buffer would make every
  * remote press the same logical button.
  */
+/* Reports go through a RING, not one box per slot.
+ *
+ * 🔴 It was one box per slot, and that quietly lost reports. A real HID remote
+ * (YISHE J6, measured 2026-08-18) sends SIX notifications inside ~300 ms, from
+ * different characteristics; the loop drains every 50 ms, so five of the six
+ * were overwritten before anyone looked. The log showed a plausible-looking
+ * stream and it was a sample, not the traffic.
+ *
+ * That is fatal for the job this file exists to do — "which characteristic
+ * talks when I press which key" cannot be answered from a lossy sample.
+ *
+ * 🔴 The characteristic handle rides along for the same reason. This device has
+ * SEVEN report characteristics (keyboard, consumer, digitizer...) and printing
+ * only the bytes makes them indistinguishable. */
+typedef struct {
+    uint8_t slot;
+    uint16_t handle;
+    uint8_t len;
+    uint8_t b[20];
+} CentralRep;
+
 static portMUX_TYPE g_rep_mux = portMUX_INITIALIZER_UNLOCKED;
-static uint8_t g_rep[BLE_CENTRAL_MAX_BUTTONS][20];
-static uint8_t g_rep_len[BLE_CENTRAL_MAX_BUTTONS];
-static volatile bool g_rep_pending[BLE_CENTRAL_MAX_BUTTONS];
+#define CENTRAL_RING 24
+static CentralRep g_ring[CENTRAL_RING];
+static volatile uint8_t g_ring_head = 0; // written by the BLE task
+static volatile uint8_t g_ring_tail = 0; // read by loop()
+/* Silence about loss is what made the old bug invisible. Count it and say it. */
+static volatile uint16_t g_ring_dropped = 0;
 static volatile uint16_t g_notify_count = 0;
 
 /** Which slot owns this client. -1 when it is not ours. */
@@ -141,9 +165,17 @@ static void on_notify(NimBLERemoteCharacteristic* chr, uint8_t* data, size_t len
     if(i < 0) return; // not one of ours
 
     portENTER_CRITICAL(&g_rep_mux);
-    g_rep_len[i] = (len > sizeof(g_rep[i])) ? (uint8_t)sizeof(g_rep[i]) : (uint8_t)len;
-    memcpy(g_rep[i], data, g_rep_len[i]);
-    g_rep_pending[i] = true;
+    const uint8_t next = (uint8_t)((g_ring_head + 1) % CENTRAL_RING);
+    if(next == g_ring_tail) {
+        g_ring_dropped++; // full: the loop is behind. Say so rather than silently lose it.
+    } else {
+        CentralRep* r = &g_ring[g_ring_head];
+        r->slot = (uint8_t)i;
+        r->handle = chr->getHandle();
+        r->len = (len > sizeof(r->b)) ? (uint8_t)sizeof(r->b) : (uint8_t)len;
+        memcpy(r->b, data, r->len);
+        g_ring_head = next;
+    }
     portEXIT_CRITICAL(&g_rep_mux);
     g_notify_count++;
 }
@@ -281,6 +313,174 @@ bool ble_central_scan(uint8_t secs) {
     return true;
 }
 
+/* ── two bring-up instruments ────────────────────────────────────────────────
+ *
+ * A TSL remote connected on 2026-08-18 and then said nothing through five
+ * presses. Three explanations survive and they need different fixes, so the
+ * cheapest thing is to measure rather than pick:
+ *
+ *   1. it wants an encrypted link before it will notify   -> ble_central_secure()
+ *   2. its own protocol needs a write first                -> not covered here
+ *   3. the ADVERTISEMENT is the event, not a notification  -> ble_central_raw()
+ *
+ * Both are diagnostics: nothing calls them on its own and neither changes how
+ * a bound button behaves. */
+
+bool ble_central_raw(const char* addr_str, uint8_t secs) {
+    if(!addr_str || !addr_str[0]) return false;
+    if(g_scanning) return false;
+    if(secs == 0) secs = BLE_CENTRAL_SCAN_SECS;
+
+    NimBLEScan* scan = NimBLEDevice::getScan();
+    if(!scan) return false;
+
+    Serial.printf("[BTN] raw %s for %us — press the button\n", addr_str, (unsigned)secs);
+    scan->setActiveScan(true); // scan response too: the name often lives there
+    NimBLEScanResults r = scan->getResults(secs * 1000, false);
+
+    int hits = 0;
+    for(int i = 0; i < r.getCount(); i++) {
+        const NimBLEAdvertisedDevice* d = r.getDevice(i);
+        if(strcasecmp(d->getAddress().toString().c_str(), addr_str) != 0) continue;
+        hits++;
+        const std::vector<uint8_t>& p = d->getPayload();
+        Serial.printf("[BTN] raw rssi:%d len:%u  ", d->getRSSI(), (unsigned)p.size());
+        for(size_t k = 0; k < p.size(); k++) Serial.printf("%02X", p[k]);
+        Serial.println();
+    }
+    /* Silence is a result too — this button only advertises while it is being
+     * pressed, so "0 seen" means the press did not reach us at all. */
+    if(hits == 0) Serial.println("[BTN] raw: not seen (it may only advertise while pressed)");
+
+    scan->clearResults();
+    return true;
+}
+
+/* A bounded knock on the door.
+ *
+ * The remote is a transparent-serial bridge (HopeRF HPRDW01): it has write
+ * targets and notify sources and no button semantics of its own. Something has
+ * to start the conversation, and the vendor handshake is not published.
+ *
+ * 🔴 This is NOT a search of the space — that space is 2^n and guessing into it
+ * is how afternoons disappear. It is a short list of the values these modules
+ * conventionally answer to, tried once each. Twenty writes, one verdict:
+ * either a notification appears or this approach is done and the answer has to
+ * come from watching what TSL actually sends. */
+bool ble_central_poke(uint8_t slot) {
+    if(slot >= BLE_CENTRAL_MAX_BUTTONS) return false;
+    NimBLEClient* c = g_slot[slot].client;
+    if(!c || !c->isConnected()) {
+        Serial.printf("[BTN] %u: not connected\n", (unsigned)slot);
+        return false;
+    }
+
+    static const struct { const char* name; uint8_t b[4]; uint8_t len; } TRY[] = {
+        {"01",        {0x01},                   1},
+        {"FF",        {0xFF},                   1},
+        {"00",        {0x00},                   1},
+        {"02",        {0x02},                   1},
+        {"0100",      {0x01, 0x00},             2},
+        {"AA55",      {0xAA, 0x55},             2},
+        {"55AA",      {0x55, 0xAA},             2},
+        {"A55A",      {0xA5, 0x5A},             2},
+        {"FFFF",      {0xFF, 0xFF},             2},
+        {"AT",        {0x41, 0x54},             2},
+        {"AT\\r\\n",  {0x41, 0x54, 0x0D, 0x0A}, 4},
+    };
+
+    /* Collect the write targets once. The table is small; the point is to try
+     * every candidate against every door rather than assume which door. */
+    NimBLERemoteCharacteristic* w[8];
+    int nw = 0;
+    for(auto* svc : c->getServices(true)) {
+        for(auto* chr : svc->getCharacteristics(true)) {
+            if(nw >= (int)(sizeof(w) / sizeof(w[0]))) break;
+            if(chr->canWrite() || chr->canWriteNoResponse()) w[nw++] = chr;
+        }
+    }
+    Serial.printf("[BTN] %u: poking %d write target(s) with %d values\n",
+                  (unsigned)slot, nw, (int)(sizeof(TRY) / sizeof(TRY[0])));
+
+    for(int t = 0; t < (int)(sizeof(TRY) / sizeof(TRY[0])); t++) {
+        for(int k = 0; k < nw; k++) {
+            const uint16_t before = ble_central_notify_count();
+            const bool sent = w[k]->writeValue(TRY[t].b, TRY[t].len,
+                                               w[k]->canWrite());
+            delay(500); // give it time to answer
+            const uint16_t after = ble_central_notify_count();
+            if(after != before) {
+                Serial.printf("[BTN] 🔴 HIT: %s -> %s produced %u notification(s)\n",
+                              TRY[t].name, w[k]->getUUID().toString().c_str(),
+                              (unsigned)(uint16_t)(after - before));
+                return true;
+            }
+            if(!sent)
+                Serial.printf("[BTN]   %-8s -> %s  write refused\n", TRY[t].name,
+                              w[k]->getUUID().toString().c_str());
+        }
+    }
+    Serial.println("[BTN] no value in the list started it talking");
+    Serial.println("[BTN] next step is watching what the real app sends, not more guesses");
+    return true;
+}
+
+bool ble_central_chars(uint8_t slot) {
+    if(slot >= BLE_CENTRAL_MAX_BUTTONS) return false;
+    NimBLEClient* c = g_slot[slot].client;
+    if(!c || !c->isConnected()) {
+        Serial.printf("[BTN] %u: not connected\n", (unsigned)slot);
+        return false;
+    }
+    /* subscribe_all() only ever looked at what NOTIFIES. That was the right
+     * first question and it is the wrong second one: a remote that stays silent
+     * may be waiting to be written to, and a write target is invisible from
+     * here. So print the whole table, properties and all. */
+    Serial.printf("[BTN] %u: characteristics\n", (unsigned)slot);
+    for(auto* svc : c->getServices(true)) {
+        Serial.printf("  service %s\n", svc->getUUID().toString().c_str());
+        for(auto* chr : svc->getCharacteristics(true)) {
+            char props[24];
+            snprintf(props, sizeof(props), "%s%s%s%s%s",
+                     chr->canRead() ? "R" : "-",
+                     chr->canWrite() ? "W" : "-",
+                     chr->canWriteNoResponse() ? "w" : "-",
+                     chr->canNotify() ? "N" : "-",
+                     chr->canIndicate() ? "I" : "-");
+            Serial.printf("    %-38s %s", chr->getUUID().toString().c_str(), props);
+            /* The current value of a readable characteristic is free evidence —
+             * a key-state byte would show up right here. */
+            if(chr->canRead()) {
+                NimBLEAttValue v = chr->readValue();
+                Serial.print("  ");
+                for(size_t k = 0; k < v.length() && k < 20; k++) Serial.printf("%02X", v[k]);
+                if(v.length() == 0) Serial.print("(empty)");
+            }
+            Serial.println();
+        }
+    }
+    Serial.println("[BTN] R=read W=write w=write-no-resp N=notify I=indicate");
+    return true;
+}
+
+bool ble_central_secure(uint8_t slot) {
+    if(slot >= BLE_CENTRAL_MAX_BUTTONS) return false;
+    NimBLEClient* c = g_slot[slot].client;
+    if(!c || !c->isConnected()) {
+        Serial.printf("[BTN] %u: not connected\n", (unsigned)slot);
+        return false;
+    }
+    /* Uses whatever NimBLEDevice::setSecurityAuth() the server role already
+     * set — this only starts pairing, it does not change the parameters, so
+     * the phone's link is untouched. It does spend one of MAX_BONDS. */
+    Serial.printf("[BTN] %u: pairing...\n", (unsigned)slot);
+    const bool ok = c->secureConnection();
+    Serial.printf("[BTN] %u: %s\n", (unsigned)slot,
+                  ok ? "encrypted — press it now and watch for reports"
+                     : "pairing refused (so encryption is not what it was waiting for)");
+    return ok;
+}
+
 /* Disconnect and free the radio slot a remote was holding. */
 static void slot_drop(uint8_t i) {
     CentralSlot* sl = &g_slot[i];
@@ -403,21 +603,36 @@ void ble_central_tick(uint32_t now_ms) {
     }
 
     // ── reports that arrived ─────────────────────────────────────────────────
-    for(uint8_t i = 0; i < BLE_CENTRAL_MAX_BUTTONS; i++) {
-        uint8_t rep[sizeof(g_rep[0])];
-        uint8_t len = 0;
+    //
+    // Drain the WHOLE ring each tick. Taking one and leaving the rest would put
+    // the loss back, just slower.
+    for(;;) {
+        CentralRep rep;
+        bool have = false;
+        uint16_t dropped = 0;
         portENTER_CRITICAL(&g_rep_mux);
-        if(g_rep_pending[i]) {
-            len = g_rep_len[i];
-            memcpy(rep, g_rep[i], len);
-            g_rep_pending[i] = false;
+        if(g_ring_tail != g_ring_head) {
+            rep = g_ring[g_ring_tail];
+            g_ring_tail = (uint8_t)((g_ring_tail + 1) % CENTRAL_RING);
+            have = true;
         }
+        dropped = g_ring_dropped;
+        g_ring_dropped = 0;
         portEXIT_CRITICAL(&g_rep_mux);
-        if(len == 0) continue;
+
+        if(dropped)
+            Serial.printf("[BTN] 🔴 %u report(s) dropped — the ring filled\n",
+                          (unsigned)dropped);
+        if(!have) break;
+
+        const uint8_t i = rep.slot;
+        const uint8_t len = rep.len;
 
         if(g_verbose) {
-            Serial.printf("[BTN] %u report", (unsigned)i);
-            for(uint8_t k = 0; k < len; k++) Serial.printf(" %02X", rep[k]);
+            /* The handle is what makes seven report characteristics tellable
+             * apart. Without it every key on this remote looks the same. */
+            Serial.printf("[BTN] %u h=0x%04X report", (unsigned)i, (unsigned)rep.handle);
+            for(uint8_t k = 0; k < len; k++) Serial.printf(" %02X", rep.b[k]);
             Serial.println();
         }
         /* THE GATE. Until the layout is confirmed against a real button, a
@@ -437,7 +652,7 @@ void ble_central_tick(uint32_t now_ms) {
             FsdBtnEvent e;
             if(fsd_btn_kind(&g_btns, i) == FSD_BTN_KIND_LEVEL) {
                 const bool down =
-                    (rep[FSD_BTN_MAP.code_offset] & FSD_BTN_MAP.press_mask) != 0u;
+                    (rep.b[FSD_BTN_MAP.code_offset] & FSD_BTN_MAP.press_mask) != 0u;
                 e = fsd_btn_report(&g_btns, i, down, now_ms);
             } else {
                 e = fsd_btn_pulse(&g_btns, i, now_ms);
