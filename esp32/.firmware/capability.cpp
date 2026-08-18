@@ -200,7 +200,6 @@ String capability_status_json() {
      * remote that we could name. The app needs both: without the count, a
      * remote we do not understand connects and looks fine. */
     j += "\"buttons\":{";
-    j += "\"scanning\":"; j += ble_central_scanning() ? "true" : "false"; j += ',';
     j += "\"connected\":"; j += ble_central_any_connected() ? "true" : "false"; j += ',';
     j += "\"verified\":"; j += ble_central_decoder_verified() ? "true" : "false"; j += ',';
     j += "\"bound\":[";
@@ -239,63 +238,63 @@ String capability_status_json() {
         j += kHex[n & 0xFu];
     }
     j += "\",";
-    j += "\"act\":"; j += (unsigned long)ble_central_action_mask(); j += ',';
+    /* 🔴 LAST FIELD, so no trailing comma. The scan list used to follow it, and
+     * removing that left `"act":N,}}` — not JSON at all. The phone read 455
+     * perfectly good bytes and threw them away, which without the parse log
+     * would have looked exactly like the module answering nothing. */
+    j += "\"act\":"; j += (unsigned long)ble_central_action_mask();
 
-    /* ── the scan list, and the reason it is fitted rather than appended ──────
-     *
-     * 🔴 512 BYTES IS A SPEC LIMIT, NOT A SETTING. BLE_ATT_ATTR_MAX_LEN is the
-     * largest value an ATT attribute may hold, so no amount of MTU raises it.
-     * NimBLE does not truncate an oversized setValue() — it REJECTS it, and the
-     * characteristic is left holding ZERO BYTES.
-     *
-     * That happened (2026-08-18). The document grew past 512 the moment the
-     * listen window closed and the bus counts filled in; the phone then read an
-     * empty document forever, `parseCapability()` returned null, and every
-     * screen drew "아직 확인되지 않았습니다" — the same thing it draws before the
-     * first read. Nobody saw a failure because nobody looked: the firmware did
-     * not check that setValue() took, and the app swallowed the parse in three
-     * nested runCatching{}.getOrNull().
-     *
-     * The scan list is what makes the size unbounded — eight named devices are
-     * about half a kilobyte on their own — so entries go in only while they
-     * fit, and how many were left out is REPORTED. A silent cap would read as
-     * "these are all the devices there are", which is worse than showing fewer.
-     */
-    String found;
-    uint8_t dropped = 0;
-    const uint8_t found_n = ble_central_found_count();
-    for (uint8_t i = 0; i < found_n; i++) {
+    j += "}}";
+
+    /* Last line of defence. An empty characteristic is the worst possible
+     * answer — indistinguishable from "not read yet" — so say it out loud
+     * rather than letting NimBLE refuse the value in silence. */
+    if (j.length() > CAP_ATTR_MAX) {
+        Serial.printf("[CAP] %u bytes exceeds the %u-byte ATT limit\n",
+                      (unsigned)j.length(), (unsigned)CAP_ATTR_MAX);
+    }
+    return j;
+}
+
+/* ── the scan list, in its own document ──────────────────────────────────────
+ *
+ * Its own characteristic because it is a different KIND of thing: transient,
+ * and as large as the room it was taken in. Eight named devices are about half
+ * a kilobyte, which is the whole ATT budget on its own — sharing a document
+ * with the module's own facts meant one of them had to lose, and for a while
+ * the scan list lost completely (it got zero bytes).
+ *
+ * Still fitted rather than appended: `kept` says how many are here and `seen`
+ * how many the radio actually found. A silent cap reads as "this is all there
+ * is", and someone whose remote is missing then looks in the wrong place.
+ */
+String capability_scan_json() {
+    String j;
+    j.reserve(CAP_ATTR_MAX + 64);
+    j = "{\"scanning\":";
+    j += ble_central_scanning() ? "true" : "false";
+    j += ",\"seen\":";
+    j += (int)ble_central_found_total();
+    j += ",\"found\":[";
+
+    uint8_t kept = 0;
+    for (uint8_t i = 0; i < ble_central_found_count(); i++) {
         const char* addr = "";
         const char* name = "";
         int8_t rssi = 0;
         if (!ble_central_found(i, &addr, &name, &rssi)) break;
 
         String e;
-        if (found.length()) e += ',';
+        if (kept) e += ',';
         e += "{\"addr\":\""; e += addr;  e += "\",";
         e += "\"name\":\"";  e += name;  e += "\",";
         e += "\"rssi\":";     e += (int)rssi; e += '}';
 
-        /* CAP_TAIL_RESERVE covers what still has to be written after the list:
-         * `,"found_dropped":NNN,"found":[` plus `]}}`. Kept generous — running
-         * out here is the failure this whole block exists to prevent. */
-        if (j.length() + found.length() + e.length() + CAP_TAIL_RESERVE > CAP_ATTR_MAX) {
-            dropped = (uint8_t)(found_n - i);
-            break;
-        }
-        found += e;
+        // Room for `],"kept":NN}` after the list.
+        if (j.length() + e.length() + 20u > CAP_ATTR_MAX) break;
+        j += e;
+        kept++;
     }
-    j += "\"found_dropped\":"; j += (int)dropped; j += ',';
-    j += "\"found\":["; j += found; j += "]}}";
-
-    /* Last line of defence. If some future field pushes the fixed part over the
-     * limit, an empty characteristic is the worst possible answer — it is
-     * indistinguishable from "not read yet". Give up the scan list first, and
-     * say so out loud. */
-    if (j.length() > CAP_ATTR_MAX) {
-        Serial.printf("[CAP] 🔴 %u bytes exceeds the %u-byte ATT limit even without "
-                      "the scan list - the fixed part has to shrink\n",
-                      (unsigned)j.length(), (unsigned)CAP_ATTR_MAX);
-    }
+    j += "],\"kept\":"; j += (int)kept; j += '}';
     return j;
 }

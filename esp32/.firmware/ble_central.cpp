@@ -130,6 +130,15 @@ typedef struct {
 } CentralFound;
 static CentralFound g_found[BLE_CENTRAL_MAX_FOUND];
 static uint8_t g_found_n = 0;
+/* How many the radio actually saw. `g_found_n` is what we kept — the app must
+ * be able to say "8 of 44" rather than pretend eight is all there was. */
+static uint16_t g_found_total = 0;
+
+/* Filled by the scan callback on the BLE host task; copied into g_found only
+ * when the scan ends. A list being written while it is read is worse than a
+ * stale one — devices would appear and vanish under the reader. */
+static CentralFound g_stage[BLE_CENTRAL_MAX_FOUND];
+static volatile uint8_t g_stage_n = 0;
 
 /* A scan BLOCKS for whole seconds. It must never run on the BLE host task, so
  * a command parks the request here and loop() performs it — the same rule the
@@ -366,35 +375,60 @@ void ble_central_init(void) {
     else  Serial.println("[BTN] none bound - 'btnscan' to look, 'btnbind <addr>' to pair");
 }
 
+/* ── the scan, and why it does not block ──────────────────────────────────────
+ *
+ * 🔴 THIS USED TO CALL getResults(), WHICH BLOCKS FOR THE WHOLE SCAN, and that
+ * is what made the app's "버튼 찾기" unusable (2026-08-19). Five seconds inside
+ * loop() is five seconds the module answers no GATT reads, so the phone's link
+ * dropped every time — the scan ran, the module found the remote, and the
+ * result could never reach the screen because the screen was no longer there.
+ *
+ * NimBLE's start() is asynchronous: results arrive on the host task and
+ * onScanEnd() fires at the finish. loop() keeps running throughout.
+ *
+ * Results land in a staging buffer and are published only at the end. Halfway
+ * through a scan the list is neither the old answer nor the new one, and a
+ * phone reading it then would see devices appear and vanish. */
+
+class CentralScanCB : public NimBLEScanCallbacks {
+    void onResult(const NimBLEAdvertisedDevice* d) override {
+        if(!d || g_stage_n >= BLE_CENTRAL_MAX_FOUND) return;
+        CentralFound* f = &g_stage[g_stage_n++];
+        snprintf(f->addr, sizeof(f->addr), "%s", d->getAddress().toString().c_str());
+        snprintf(f->name, sizeof(f->name), "%s", d->haveName() ? d->getName().c_str() : "");
+        f->rssi = (int8_t)d->getRSSI();
+    }
+    void onScanEnd(const NimBLEScanResults& r, int reason) override {
+        (void)reason;
+        const int n = r.getCount();
+        /* Publish in one go. Copying under a critical section rather than
+         * writing g_found as results arrive: loop() reads this to build the
+         * document, and a half-written list is worse than a stale one. */
+        portENTER_CRITICAL(&g_rep_mux);
+        memcpy(g_found, g_stage, sizeof(g_found));
+        g_found_n = g_stage_n;
+        g_found_total = (n < 0) ? 0 : (uint16_t)n;
+        portEXIT_CRITICAL(&g_rep_mux);
+        g_scanning = false;
+        NimBLEDevice::getScan()->clearResults();
+    }
+};
+static CentralScanCB g_scan_cb;
+
 bool ble_central_scan(uint8_t secs) {
     NimBLEScan* scan = NimBLEDevice::getScan();
-    if(!scan || scan->isScanning()) return false;
+    if(!scan || scan->isScanning() || g_scanning) return false;
 
-    Serial.printf("[BTN] scanning %us...\n", (unsigned)secs);
+    g_stage_n = 0;
+    g_scanning = true;
+    scan->setScanCallbacks(&g_scan_cb, false);
     scan->setActiveScan(true); // ask for names: an address alone identifies nothing
-    NimBLEScanResults r = scan->getResults(secs * 1000, false);
-    const int n = r.getCount();
-    Serial.printf("[BTN] %d device(s)\n", n);
-
-    g_found_n = 0;
-    for(int i = 0; i < n; i++) {
-        const NimBLEAdvertisedDevice* d = r.getDevice(i);
-        Serial.printf("  %-18s rssi:%-5d %s%s\n", d->getAddress().toString().c_str(),
-                      d->getRSSI(), d->haveName() ? d->getName().c_str() : "(no name)",
-                      d->haveServiceUUID() ? "  [has services]" : "");
-        if(g_found_n < BLE_CENTRAL_MAX_FOUND) {
-            CentralFound* f = &g_found[g_found_n++];
-            snprintf(f->addr, sizeof(f->addr), "%s", d->getAddress().toString().c_str());
-            snprintf(f->name, sizeof(f->name), "%s",
-                     d->haveName() ? d->getName().c_str() : "");
-            f->rssi = (int8_t)d->getRSSI();
-        }
+    if(!scan->start(secs * 1000u, false)) {
+        g_scanning = false;
+        Serial.println("[BTN] scan refused to start");
+        return false;
     }
-    if(n > BLE_CENTRAL_MAX_FOUND)
-        Serial.printf("[BTN] keeping the first %d for the app\n", BLE_CENTRAL_MAX_FOUND);
-
-    scan->clearResults();
-    Serial.println("[BTN] 'btnbind <addr>' to use one");
+    Serial.printf("[BTN] scanning %us (loop keeps running)\n", (unsigned)secs);
     return true;
 }
 
@@ -689,6 +723,8 @@ void ble_central_request_scan(uint8_t secs) {
 
 bool ble_central_scanning(void) { return g_scanning; }
 
+uint16_t ble_central_found_total(void) { return g_found_total; }
+
 void ble_central_set_verbose(bool on) { g_verbose = on; }
 uint16_t ble_central_notify_count(void) { return g_notify_count; }
 
@@ -784,11 +820,19 @@ void ble_central_tick(uint32_t now_ms) {
     if(g_scan_req) {
         const uint8_t secs = g_scan_req;
         g_scan_req = 0;
-        g_scanning = true;
+        /* 🔴 The flag is owned by ble_central_scan() and cleared by onScanEnd()
+         * now. Setting it here and clearing it after the call was correct while
+         * the call blocked; with an asynchronous scan it would clear the flag
+         * the instant the scan STARTED, and everything downstream would think
+         * the scan was already over. */
         ble_central_scan(secs);
-        g_scanning = false;
-        return; // that took seconds; pick the rest up next tick
+        return; // let the scan get on with it
     }
+
+    /* Nothing else runs while the radio is scanning. Reconnect attempts in
+     * particular: they block for the connect timeout, and doing that mid-scan
+     * costs the scan the very seconds it was given. */
+    if(g_scanning) return;
 
     // ── reports that arrived ─────────────────────────────────────────────────
     //

@@ -91,6 +91,18 @@ void capability_tick(uint32_t now_ms);
 /* Room kept for what is written after the scan list. */
 #define CAP_TAIL_RESERVE 48u
 
+/** The last scan's results, as their own document.
+ *
+ * 🔴 THEY USED TO RIDE IN THE CAPABILITY DOCUMENT and there is no longer room —
+ * that document reached 483 of the 512 bytes an ATT attribute may hold, so the
+ * scan list got nothing and the app's "find buttons" could not have shown a
+ * result even once the scan itself was fixed.
+ *
+ * They never belonged there anyway: everything else in that document is a fact
+ * about the module, bounded and slow-changing. A scan list is transient and its
+ * size depends on what happens to be in the room. */
+String capability_scan_json();
+
 String capability_status_json();
 
 /**
