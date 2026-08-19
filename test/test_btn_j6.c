@@ -637,6 +637,70 @@ static void test_a_lone_late_release_is_stale(void) {
           "1분 묵은 시작점으로 잰 쓸기가 발화했다: btn=%d edge=%d", (int)o.btn, (int)o.edge);
 }
 
+
+/* ── 모양 관문 둘을 양쪽에서 조인다 ──────────────────────────────────────────
+ *
+ * 이 디코더가 남의 리포트를 막는 방법은 딱 둘이다: **길이**와 **좌표 범위**.
+ * 그런데 둘 다 한쪽만 재고 있었다.
+ *
+ * 🔴 무엇이 들어오는지가 중요하다. `subscribe_all()` 은 알림 가능한
+ * characteristic 을 **전부** 구독하고(어느 것이 눌림을 알릴지 모르니까),
+ * `on_notify` 는 **최대 20바이트**를 링에 넣는다. 표준 HID 키보드 리포트가
+ * 8바이트다 — 그것이 5바이트 디지타이저로 해석되면 **키보드 한 번 누름이
+ * 버튼 누름이 된다.**
+ */
+
+/* 길이: 3과 5만 뜻이 있다. 그 아래만 시험하고 있어서, `==` 를 `>=` 로 바꾸면
+ * 8바이트 키보드 리포트가 그대로 통과했다. */
+static void test_lengths_above_five_are_ignored_too(void) {
+    printf("길이 — 5보다 큰 것도 무시한다\n");
+
+    const uint8_t eight_down[8] = {0x03, 0x2C, 0x01, 0xF4, 0x01, 0x00, 0x00, 0x00};
+    const uint8_t eight_up[8]   = {0x00, 0x2C, 0x01, 0xF4, 0x01, 0x00, 0x00, 0x00};
+
+    for (uint8_t len = 6; len <= 8; len++) {
+        FsdJ6 s;
+        fsd_j6_init(&s);
+        const FsdJ6Out p = fsd_j6_feed(&s, eight_down, len, 1000);
+        const FsdJ6Out r = fsd_j6_feed(&s, eight_up, len, 1100);
+        CHECK(p.edge == FSD_J6_EDGE_NONE && r.edge == FSD_J6_EDGE_NONE,
+              "%u바이트 리포트가 버튼이 됐다: btn=%d edge=%d",
+              (unsigned)len, (int)r.btn, (int)r.edge);
+    }
+
+    /* 4바이트 컨슈머도 마찬가지 — 아래쪽만 막혀 있으면 위쪽이 샌다. */
+    const uint8_t four[4] = {0x00, 0x08, 0x00, 0x00};
+    FsdJ6 c;
+    fsd_j6_init(&c);
+    CHECK(fsd_j6_feed(&c, four, 4u, 1000).edge == FSD_J6_EDGE_NONE,
+          "4바이트가 컨슈머 코드로 읽혔다");
+}
+
+/* 좌표 범위: 두 축이 **동시에** 벗어난 벡터 하나로만 시험하고 있어서, 어느 한
+ * 축의 검사를 지워도 남은 쪽이 그 벡터를 걸러 냈다. 한 축씩 넘겨 본다. */
+static void test_each_axis_is_range_checked(void) {
+    printf("좌표 범위 — 한 축만 벗어나도 거른다\n");
+
+    /* x 만 범위 밖 (0x7FFF), y 는 정상 */
+    const uint8_t x_bad[ROW] = {0x03, 0xFF, 0x7F, 0xF4, 0x01};
+    /* y 만 범위 밖, x 는 정상 */
+    const uint8_t y_bad[ROW] = {0x03, 0x2C, 0x01, 0xFF, 0x7F};
+    /* 정상 뗌 — 눌림이 걸러졌다면 이것도 아무 일 없어야 한다 */
+    const uint8_t ok_up[ROW] = {0x00, 0x2C, 0x01, 0x2C, 0x01};
+
+    FsdJ6 a;
+    fsd_j6_init(&a);
+    CHECK(fsd_j6_feed(&a, x_bad, ROW, 1000).edge == FSD_J6_EDGE_NONE, "x 범위 초과가 통과했다");
+    CHECK(fsd_j6_feed(&a, ok_up, ROW, 1100).edge == FSD_J6_EDGE_NONE,
+          "x 범위 초과로 시작한 접촉이 뗌에서 발화했다");
+
+    FsdJ6 b;
+    fsd_j6_init(&b);
+    CHECK(fsd_j6_feed(&b, y_bad, ROW, 1000).edge == FSD_J6_EDGE_NONE, "y 범위 초과가 통과했다");
+    CHECK(fsd_j6_feed(&b, ok_up, ROW, 1100).edge == FSD_J6_EDGE_NONE,
+          "y 범위 초과로 시작한 접촉이 뗌에서 발화했다");
+}
+
 int main(void) {
     printf("=== J6 리모컨 디코더 ===\n\n");
     test_swipes();
@@ -661,6 +725,8 @@ int main(void) {
     test_one_matching_axis_is_not_enough();
     test_swipe_minimum_bites_from_both_sides();
     test_a_lone_late_release_is_stale();
+    test_lengths_above_five_are_ignored_too();
+    test_each_axis_is_range_checked();
     test_fits_the_button_table();
     test_every_button_has_a_one_word_name();
     test_names_are_distinct();

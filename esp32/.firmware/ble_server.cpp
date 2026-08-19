@@ -88,6 +88,22 @@ static NimBLECharacteristic *g_ch_buttons = nullptr;
 static bool g_adv_ok = false;
 
 static volatile bool g_connected = false;
+
+/* WHICH link the state below belongs to.
+ *
+ * 🔴 onDisconnect() USED TO IGNORE THE HANDLE, so any peer's disconnect tore
+ * down the phone's session: subscriptions cleared, an in-flight camera.bin
+ * upload aborted, MTU reset to 23 — while the phone was still connected and
+ * still sending. onMTUChange had the same hole, and a second peer's MTU would
+ * resize the bulk chunks under a running download (red team, 2026-08-19).
+ *
+ * NimBLE stops advertising once connected and we only re-advertise on
+ * disconnect, so a second link needs a direct connect to a cached address —
+ * uncommon, not impossible, and the failure is silent on both sides.
+ *
+ * 0xFFFF is BLE_HS_CONN_HANDLE_NONE: nobody. */
+#define BLE_CONN_NONE 0xFFFFu
+static volatile uint16_t g_conn_handle = BLE_CONN_NONE;
 static volatile bool g_state_subscribed = false;  // client enabled State notifications
 static volatile bool g_bulk_subscribed  = false;
 static volatile uint16_t g_mtu = 23;              // until the peer negotiates up
@@ -948,7 +964,16 @@ class BulkCB : public NimBLECharacteristicCallbacks {
 };
 
 class ServerCB : public NimBLEServerCallbacks {
-    void onConnect(NimBLEServer *, NimBLEConnInfo &) override {
+    void onConnect(NimBLEServer *, NimBLEConnInfo &info) override {
+        if (g_conn_handle == BLE_CONN_NONE) {
+            g_conn_handle = info.getConnHandle();
+        } else {
+            /* Somebody else is already being served. Say so — the app's symptom
+             * for this is "the module stopped answering", which names nothing. */
+            Serial.printf("[BLE] a second client connected (handle %u); "
+                          "still serving %u\n",
+                          (unsigned)info.getConnHandle(), (unsigned)g_conn_handle);
+        }
         g_connected = true;
         // 🔴 The pending revoke is NOT cancelled here. At this point we know a
         // radio connected and nothing else — not who, not whether it can pair.
@@ -974,7 +999,25 @@ class ServerCB : public NimBLEServerCallbacks {
             g_link_down_ms  = 0;   // owner is back in time — cancel the revoke
         }
     }
-    void onDisconnect(NimBLEServer *, NimBLEConnInfo &, int) override {
+    void onDisconnect(NimBLEServer *srv, NimBLEConnInfo &info, int) override {
+        /* Whose link went away?
+         *
+         * 🔴 The count is the safety net, not decoration. Trusting the handle
+         * alone would wedge the module for good if one ever went stale: the real
+         * client's disconnect would be ignored, g_connected would stay true, and
+         * Active would never be handed back. So: tear down when it is OUR link,
+         * or when nobody is left at all. */
+        const uint16_t who = info.getConnHandle();
+        const size_t remaining = srv ? srv->getConnectedCount() : 0u;
+        if (who != g_conn_handle && remaining > 0u) {
+            Serial.printf("[BLE] another client disconnected (handle %u); "
+                          "session %u is untouched\n",
+                          (unsigned)who, (unsigned)g_conn_handle);
+            /* Advertise again anyway — the slot it freed should be usable. */
+            g_adv_ok = NimBLEDevice::startAdvertising();
+            return;
+        }
+        g_conn_handle = BLE_CONN_NONE;
         g_connected = false;
         g_owner_present = false;  // re-established only by a resolved owner bond
         // A mode change asked for by a phone that is now gone must not be
@@ -1003,7 +1046,14 @@ class ServerCB : public NimBLEServerCallbacks {
                       g_adv_ok ? "advertising again"
                                : "ADVERTISING FAILED, the module is not visible");
     }
-    void onMTUChange(uint16_t mtu, NimBLEConnInfo &) override {
+    void onMTUChange(uint16_t mtu, NimBLEConnInfo &info) override {
+        /* Only the link we are serving. A second peer negotiating its own MTU
+         * used to resize the bulk chunks under a running download. */
+        if (g_conn_handle != BLE_CONN_NONE && info.getConnHandle() != g_conn_handle) {
+            Serial.printf("[BLE] MTU %u on handle %u - not the served link, ignored\n",
+                          mtu, (unsigned)info.getConnHandle());
+            return;
+        }
         g_mtu = mtu;  // bulk chunk size follows this
         Serial.printf("[BLE] MTU %u\n", mtu);
     }

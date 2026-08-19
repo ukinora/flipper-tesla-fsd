@@ -544,6 +544,45 @@ static void test_double_window_defaults_and_bounds(void) {
     CHECK(fsd_btn_double_window(&b, FSD_BTN_MAX) == 0, "범위 밖은 0");
 }
 
+
+/* STUCK 가지가 기다리던 탭을 버리는지.
+ *
+ * 🔴 이 줄을 지워도 126건이 전부 통과했다. 닿으려면 **틱이 성기어야** 한다 —
+ * STUCK 이 LONG 보다 먼저 검사되므로, 촘촘한 틱에서는 LONG 이 먼저 나서
+ * 자기 가지에서 탭을 버린다. 그래서 기존 테스트로는 이 줄을 지날 수 없었다.
+ *
+ * 이 프로젝트에는 그 성긴 틱이 실제로 있다: 캡처 저장이 15초 창을 한 번에
+ * 쓴다(그래서 루프 WDT 를 자가진단 중에만 켠다). 그동안 버려졌어야 할 탭이
+ * 살아 있으면, **89초 전에 놓은 손가락이 지금 동작을 일으킨다.** */
+static void test_stuck_drops_a_waiting_tap(void) {
+    printf("kind: LEVEL STUCK 는 기다리던 탭을 버린다\n");
+    FsdButtons b;
+    fsd_btn_init(&b);
+    fsd_btn_set_kind(&b, 0, FSD_BTN_KIND_LEVEL);
+    fsd_btn_set_double(&b, 0, true);
+
+    /* 첫 탭 — 짝을 기다리며 보류된다. */
+    fsd_btn_report(&b, 0, true, 1000);
+    CHECK(fsd_btn_report(&b, 0, false, 1100) == FSD_BTN_EV_NONE, "첫 탭은 짝을 기다린다");
+
+    /* 두 번째 누름은 놓이지 않는다 — 버튼이 끼었다. */
+    fsd_btn_report(&b, 0, true, 1150);
+
+    /* 그리고 루프가 멎는다. 다시 돌 때는 이미 STUCK 시한을 한참 넘겼다. */
+    CHECK(fsd_btn_tick(&b, 0, 1150 + FSD_BTN_STUCK_MS + 2000) == FSD_BTN_EV_STUCK,
+          "성긴 틱에서 STUCK 이 안 났다");
+
+    /* 한참 뒤에 손을 뗀다. 보류된 탭이 아직 살아 있으면 여기서 되살아난다. */
+    fsd_btn_report(&b, 0, false, 90000);
+    uint32_t late = 0;
+    for (uint32_t t = 90000; t <= 92000; t += 50)
+        if (fsd_btn_tick(&b, 0, t) != FSD_BTN_EV_NONE && !late) late = t;
+
+    CHECK(late == 0, "89초 전 탭이 지금 발화했다 (t=%u)", late);
+    CHECK(fsd_btn_shorts(&b, 0) == 0,
+          "끼인 버튼이 짧게 누름을 하나 만들었다 (shorts=%u)", fsd_btn_shorts(&b, 0));
+}
+
 int main(void) {
     printf("test_button\n");
     test_short_and_long();
@@ -570,6 +609,7 @@ int main(void) {
     test_kind_bounds();
     test_double_window_is_per_button();
     test_double_window_defaults_and_bounds();
+    test_stuck_drops_a_waiting_tap();
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }
