@@ -370,7 +370,22 @@ static void test_event_never_longs_or_sticks(void) {
     CHECK(fsd_btn_longs(&b, 0) == 0, "no longs");
 }
 
-/* A level report on an EVENT button is what opens the trap. Ignore it. */
+/* A level report on an EVENT button is what opens the trap. Ignore it.
+ *
+ * 🔴 THIS TEST DID NOT TEST WHAT IT IS NAMED FOR. Deleting the guard at
+ * fsd_button.c — the line the header calls "THE TRAP" — left all 126 tests
+ * green, because the assertions below only checked the SYMPTOM (no LONG, no
+ * STUCK) and a second, unrelated line prevents that symptom on its own:
+ * fsd_btn_tick() returns early for EVENT buttons before any timer runs. Either
+ * mechanism alone kept the test passing, so the one it names was unmeasured.
+ *
+ * The guard's real job is to stop the report pair from becoming a PRESS. So the
+ * assertion that bites is the count: a stray down/up must not add a short.
+ * Without the guard the release comes out as SHORT and shorts goes to 1.
+ *
+ * It is not theoretical. If anyone ever gives EVENT buttons a timer in tick() —
+ * removing that early return — the permanent-wedge failure the header describes
+ * comes back with nothing red to stop it. */
 static void test_event_ignores_level_reports(void) {
     printf("kind: EVENT ignores down/up reports\n");
     FsdButtons b;
@@ -381,6 +396,16 @@ static void test_event_ignores_level_reports(void) {
         if (fsd_btn_tick(&b, 0, t) != FSD_BTN_EV_NONE && !spoke_at) spoke_at = t;
     CHECK(spoke_at == 0, "20 s of ticks stayed silent (spoke at %u)", spoke_at);
     CHECK(!fsd_btn_is_stuck(&b, 0), "a stray down cannot wedge an event button");
+
+    /* The pair, and the count. This is the assertion the guard owns. */
+    FsdButtons c;
+    fsd_btn_init(&c);
+    CHECK(fsd_btn_report(&c, 0, true, 1000) == FSD_BTN_EV_NONE, "down ignored");
+    CHECK(fsd_btn_report(&c, 0, false, 1100) == FSD_BTN_EV_NONE,
+          "an EVENT button answered a release report");
+    CHECK(fsd_btn_shorts(&c, 0) == 0,
+          "a stray down/up pair counted as a press on an EVENT button (shorts=%u)",
+          fsd_btn_shorts(&c, 0));
 }
 
 static void test_event_double(void) {
