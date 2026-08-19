@@ -90,8 +90,21 @@ void prefs_load(FSDState *state) {
     state->cfg_steer_hi      = g_prefs.getUChar("cshi",   1);
     state->cfg_steer_lo      = g_prefs.getUChar("cslo",   0);
 
-    Serial.printf("[NVS] Loaded: FSDUnlock=%d NAG=%d ContinuousAP=%d IgnoreOTA=%d China=%d Chime=%d Summon=%d COG=%d RHD=%d TelOff=%d APMv3=%d Sleep=%u AP=\"%s\" STA=\"%s\" HIDDEN=%d\n",
-                  state->fsd_unlock, state->nag_killer, state->continuous_ap, state->ignore_ota,
+    /* 🔴 THIS LINE IS THE ONLY WAY TO SEE WHAT A BOARD IS CARRYING.
+     *
+     * Every flag below can be RESTORED from NVS but not SET: the only code that
+     * ever wrote them true lived in web_dashboard.cpp, which this build does not
+     * compile (PR #28). So a board flashed from a WiFi-era build can boot with
+     * one of them on and there is no longer any way to turn it off — a red-team
+     * finding on 2026-08-19, and the reason this line gets read before a car
+     * visit.
+     *
+     * Precond and TLSSC were MISSING here, so two of the six could not be seen
+     * at all. A diagnostic that answers two thirds of its own question sends
+     * people to a multimeter for the rest. */
+    Serial.printf("[NVS] Loaded: FSDUnlock=%d NAG=%d ContinuousAP=%d Precond=%d TLSSC=%d IgnoreOTA=%d China=%d Chime=%d Summon=%d COG=%d RHD=%d TelOff=%d APMv3=%d Sleep=%u AP=\"%s\" STA=\"%s\" HIDDEN=%d\n",
+                  state->fsd_unlock, state->nag_killer, state->continuous_ap,
+                  state->precondition, state->tlssc_restore, state->ignore_ota,
                   state->china_mode, state->suppress_speed_chime, state->summon_unlock,
                   state->continue_on_green, state->assist_rhd_override, state->assist_telemetry_off,
                   state->apmv3_branch, state->sleep_idle_ms, state->wifi_ssid, state->wifi_sta_ssid,
@@ -177,8 +190,11 @@ void prefs_save(const FSDState *state) {
     g_prefs.putUChar("cshi",  state->cfg_steer_hi);
     g_prefs.putUChar("cslo",  state->cfg_steer_lo);
 
-    Serial.printf("[NVS] Saved: FSDUnlock=%d NAG=%d ContinuousAP=%d IgnoreOTA=%d China=%d Chime=%d Summon=%d COG=%d RHD=%d TelOff=%d APMv3=%d Sleep=%u AP=\"%s\" STA=\"%s\" HIDDEN=%d\n",
-                  state->fsd_unlock, state->nag_killer, state->continuous_ap, state->ignore_ota,
+    // Same fields as the Loaded line above, and for the same reason — the two
+    // are read side by side when something looks wrong.
+    Serial.printf("[NVS] Saved: FSDUnlock=%d NAG=%d ContinuousAP=%d Precond=%d TLSSC=%d IgnoreOTA=%d China=%d Chime=%d Summon=%d COG=%d RHD=%d TelOff=%d APMv3=%d Sleep=%u AP=\"%s\" STA=\"%s\" HIDDEN=%d\n",
+                  state->fsd_unlock, state->nag_killer, state->continuous_ap,
+                  state->precondition, state->tlssc_restore, state->ignore_ota,
                   state->china_mode, state->suppress_speed_chime, state->summon_unlock,
                   state->continue_on_green, state->assist_rhd_override, state->assist_telemetry_off,
                   state->apmv3_branch, state->sleep_idle_ms, state->wifi_ssid, state->wifi_sta_ssid,

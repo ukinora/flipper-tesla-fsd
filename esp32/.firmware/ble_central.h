@@ -73,8 +73,14 @@
 #define BLE_CENTRAL_SCAN_SECS 5
 #endif
 
-/** How many remotes can be bound at once. Slot index IS the logical button
- *  index, so this and FSD_BTN_MAX are the same number.
+/** How many remotes can be bound at once — a RADIO budget, nothing else.
+ *
+ *  🔴 THIS USED TO SAY "slot index IS the logical button index, so this and
+ *  FSD_BTN_MAX are the same number". That stopped being true when the J6 put
+ *  ten logical buttons on ONE link, and a comment asserting a retired invariant
+ *  is worse than none: someone reconciling the two would raise this to 10, and
+ *  10 + the phone exceeds the prebuilt controller — which boot-loops the board
+ *  (PR #57). The static_asserts below are what actually holds them apart.
  *
  *  🔴 FIVE IS MEASURED, NOT CHOSEN. The Arduino core ships a controller built
  *  for six simultaneous links (CONFIG_BT_CTRL_BLE_MAX_ACT=6) and the phone
@@ -116,6 +122,24 @@
  * connects, with nothing in the log. Booting proves nothing here.
  *
  * The phone holds one link at all times, hence the +1. */
+/* 🔴 PULL THE SDK CONFIG IN OURSELVES, or the guard below is not a guard.
+ *
+ * CONFIG_BT_CTRL_BLE_MAX_ACT is defined in the framework's sdkconfig.h, which
+ * arrives via <Arduino.h>. In ble_central.cpp and capability.cpp this header is
+ * the FIRST include, so the macro was not in scope and the #ifdef around the
+ * assertion read false — the guard silently vanished in exactly the two files
+ * where someone would go to change the number. It survived only because
+ * main.cpp and ble_server.cpp happen to include Arduino.h first (red team,
+ * 2026-08-19).
+ *
+ * A protection that depends on the include order of unrelated files is not a
+ * protection. */
+#if defined(__has_include)
+#  if __has_include(<sdkconfig.h>)
+#    include <sdkconfig.h>
+#  endif
+#endif
+
 #if defined(BLE_SERVER_ENABLED) && defined(CONFIG_BT_NIMBLE_MAX_CONNECTIONS)
 
 static_assert(BLE_CENTRAL_MAX_BUTTONS + 1 <= CONFIG_BT_NIMBLE_MAX_CONNECTIONS,
@@ -128,6 +152,11 @@ static_assert(CONFIG_BT_NIMBLE_MAX_CONNECTIONS <= CONFIG_BT_CTRL_BLE_MAX_ACT,
                  and this is read at the moment something is already wrong. */
               "CONFIG_BT_NIMBLE_MAX_CONNECTIONS exceeds the PREBUILT controller "
               "(CONFIG_BT_CTRL_BLE_MAX_ACT) - this boot-loops the board");
+#else
+/* Reaching here means NimBLE is configured but the controller's own limit is
+ * not visible, so the check above would be skipped in silence. Say so loudly
+ * instead: a vanished guard reads exactly like a passing one. */
+#error "CONFIG_BT_CTRL_BLE_MAX_ACT not in scope - the boot-loop guard would vanish. Include <sdkconfig.h> before ble_central.h."
 #endif
 
 #endif
@@ -242,16 +271,7 @@ void ble_central_set_action(uint8_t row, bool on);
 /** Bitmask of enabled rows, bit `row` = that row. */
 uint32_t ble_central_action_mask(void);
 
-/** Watch for double presses on one logical button. Persisted.
- *
- *  🔴 THE COST IS ON THAT BUTTON ALONE and it is real: a tap cannot be reported
- *  until a second one is known not to be coming, so every single press there is
- *  delayed by FSD_BTN_DOUBLE_MS. Turn it on where a second action is actually
- *  mapped, never "in case". */
-void ble_central_set_double(uint8_t btn, bool on);
 
-/** Bitmask of buttons with double-press on, bit N = button N. */
-uint16_t ble_central_double_mask(void);
 
 /** True when this firmware carries a decoder that was measured against a real
  *  device, rather than a guess waiting to be confirmed.
@@ -336,8 +356,6 @@ static inline bool ble_central_slot_connected(uint8_t) { return false; }
 static inline uint16_t ble_central_slot_decoded(uint8_t) { return 0; }
 static inline bool ble_central_decoder_verified(void) { return false; }
 static inline uint8_t ble_central_row_events(uint8_t) { return 0; }
-static inline void ble_central_set_double(uint8_t, bool) {}
-static inline uint16_t ble_central_double_mask(void) { return 0; }
 static inline void ble_central_set_action(uint8_t, bool) {}
 static inline uint32_t ble_central_action_mask(void) { return 0; }
 static inline uint8_t ble_central_bound_count(void) { return 0; }

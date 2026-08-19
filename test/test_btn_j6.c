@@ -433,6 +433,300 @@ static void test_swipes_get_a_wider_double_window(void) {
               "%s 의 창이 길게를 삼킨다", fsd_j6_name((FsdJ6Btn)b));
 }
 
+
+/* ── 뗌을 잃었을 때 ──────────────────────────────────────────────────────────
+ *
+ * 🔴 이것이 가정이 아니다. `ble_central.cpp` 는 24칸 링이 차면 리포트를 버리고
+ * 그 수를 센다 — 알림이 유실된다는 것을 코드가 이미 알고 있다. 끊김은 슬롯
+ * 정리가 다루지만, **살아 있는 링크에서 한 줄이 사라지는 것**은 아무도 안 봤다.
+ *
+ * 6번은 유일한 레벨 버튼이라 뗌이 올 때까지 눌린 채로 남는다. 그 뗌을 잃으면
+ * 상태가 걸리고, 걸린 상태에서 다음 버튼을 누르면 **그 입력이 삼켜지고 그
+ * 뗌이 6번의 뗌으로 발화한다** — 사장님이 누르지 않은 버튼이 동작한다.
+ */
+
+static void test_lost_level_release_does_not_swallow_the_next_button(void) {
+    FsdJ6 s;
+    fsd_j6_init(&s);
+
+    const FsdJ6Out down = fsd_j6_feed(&s, B6_PRESS, ROW, 1000);
+    CHECK(down.btn == FSD_J6_B6 && down.edge == FSD_J6_EDGE_DOWN, "6번 누름이 안 났다");
+
+    /* 뗌 리포트가 유실됐다 — B6_RELEASE 를 주지 않는다. */
+
+    /* 그 다음 7번 탭. 눌림이 삼켜지면 안 되고, 뗌이 7번으로 나와야 한다. */
+    const FsdJ6Out p = fsd_j6_feed(&s, B7_PRESS, ROW, 30000);
+    const FsdJ6Out r = fsd_j6_feed(&s, B7_RELEASE, ROW, 30100);
+
+    /* 누름 순간에 6번이 놓인 것으로 정리된다 — 다른 자리를 눌렀다는 것은 앞의
+     * 접촉이 끝났다는 뜻이기 때문이다(단일 접촉 기기다). */
+    CHECK(p.btn == FSD_J6_B6 && p.edge == FSD_J6_EDGE_UP,
+          "6번이 정리되지 않았다: btn=%d edge=%d", (int)p.btn, (int)p.edge);
+    CHECK(r.btn == FSD_J6_B7 && r.edge == FSD_J6_EDGE_PULSE,
+          "7번이 7번으로 안 났다: btn=%d edge=%d", (int)r.btn, (int)r.edge);
+}
+
+/* 같은 자리가 다시 눌린 것은 **같은 접촉**이다. 뗌을 잃었든 기기가 되풀이했든
+ * 물리적 사실은 "6번이 눌려 있다" 로 같으므로, 유지를 끊지 않는다. */
+static void test_the_same_point_again_is_the_same_hold(void) {
+    FsdJ6 s;
+    fsd_j6_init(&s);
+
+    fsd_j6_feed(&s, B6_PRESS, ROW, 1000);
+    const FsdJ6Out again = fsd_j6_feed(&s, B6_PRESS, ROW, 4000);
+    CHECK(again.edge == FSD_J6_EDGE_NONE,
+          "같은 자리 재누름이 사건을 냈다: btn=%d edge=%d", (int)again.btn, (int)again.edge);
+
+    const FsdJ6Out up = fsd_j6_feed(&s, B6_RELEASE, ROW, 6000);
+    CHECK(up.btn == FSD_J6_B6 && up.edge == FSD_J6_EDGE_UP, "유지가 끊겼다");
+}
+
+/* 🔴 뗌을 잃은 뒤의 **쓸기**도 자기 버튼으로 나야 한다. 탭만 고치면 쓸기가
+ * 여전히 6번의 뗌으로 둔갑한다 — 실제로 측정된 모양이 그것이었다. */
+static void test_lost_level_release_then_a_swipe(void) {
+    FsdJ6 s;
+    fsd_j6_init(&s);
+    fsd_j6_feed(&s, B6_PRESS, ROW, 1000);
+
+    int fired = 0;
+    const FsdJ6Out o = feed_burst(&s, B3_RIGHT, sizeof(B3_RIGHT) / ROW, 30000, &fired);
+    CHECK(o.btn == FSD_J6_B3 && o.edge == FSD_J6_EDGE_PULSE,
+          "쓸기가 3번으로 안 났다: btn=%d edge=%d", (int)o.btn, (int)o.edge);
+}
+
+
+/* ── 좌표 두 축을 각각 못 박는다 ─────────────────────────────────────────────
+ *
+ * 🔴 여기가 절반만 검사되고 있었다. 이름 없는 탭 벡터가 `(16,16)` 하나뿐이라
+ * **두 축이 동시에 다른** 값이었고, 그래서 비교의 절반(`x ==` 또는 `y ==`)을
+ * 지워도 남은 절반이 그 벡터를 걸러 냈다. 돌연변이 넷이 전부 살아남았다.
+ *
+ * 아래 두 벡터는 각 기준점과 **정확히 한 축만** 같다. 어느 쪽 비교를 지워도
+ * 하나는 반드시 틀린다.
+ *
+ *   (420, 500) — x 는 6번의 것, y 는 7번의 것
+ *   (300, 850) — x 는 7번의 것, y 는 6번의 것
+ *
+ * 헤더가 파는 안전 속성이 이것이다: **이름 붙일 수 없는 탭은 동작하는 버튼이
+ * 되면 안 된다.** 특히 6번은 유일한 레벨 버튼이라, 잘못 걸리면 유지가 시작되고
+ * 0.6초 뒤 유령 LONG, 10초 뒤 STUCK 이 잠긴다.
+ */
+
+static const uint8_t X6_Y7_PRESS[ROW]   = {0x03, 0xA4, 0x01, 0xF4, 0x01}; /* (420,500) */
+static const uint8_t X6_Y7_RELEASE[ROW] = {0x00, 0xA4, 0x01, 0xF4, 0x01};
+static const uint8_t X7_Y6_PRESS[ROW]   = {0x03, 0x2C, 0x01, 0x52, 0x03}; /* (300,850) */
+static const uint8_t X7_Y6_RELEASE[ROW] = {0x00, 0x2C, 0x01, 0x52, 0x03};
+
+static void test_one_matching_axis_is_not_enough(void) {
+    printf("한 축만 맞는 탭은 버튼이 아니다\n");
+
+    FsdJ6 a;
+    fsd_j6_init(&a);
+    const FsdJ6Out ap = fsd_j6_feed(&a, X6_Y7_PRESS, ROW, 1000);
+    const FsdJ6Out ar = fsd_j6_feed(&a, X6_Y7_RELEASE, ROW, 1100);
+    CHECK(ap.edge == FSD_J6_EDGE_NONE,
+          "(420,500) 이 눌림 사건을 냈다 — 6번을 x 만으로 판정한다: btn=%d edge=%d",
+          (int)ap.btn, (int)ap.edge);
+    CHECK(ar.edge == FSD_J6_EDGE_NONE,
+          "(420,500) 이 뗌 사건을 냈다 — 7번을 y 만으로 판정한다: btn=%d edge=%d",
+          (int)ar.btn, (int)ar.edge);
+
+    FsdJ6 c;
+    fsd_j6_init(&c);
+    const FsdJ6Out cp = fsd_j6_feed(&c, X7_Y6_PRESS, ROW, 1000);
+    const FsdJ6Out cr = fsd_j6_feed(&c, X7_Y6_RELEASE, ROW, 1100);
+    CHECK(cp.edge == FSD_J6_EDGE_NONE,
+          "(300,850) 이 눌림 사건을 냈다 — 6번을 y 만으로 판정한다: btn=%d edge=%d",
+          (int)cp.btn, (int)cp.edge);
+    CHECK(cr.edge == FSD_J6_EDGE_NONE,
+          "(300,850) 이 뗌 사건을 냈다 — 7번을 x 만으로 판정한다: btn=%d edge=%d",
+          (int)cr.btn, (int)cr.edge);
+}
+
+/* ── 쓸기 최소거리를 양쪽에서 조인다 ────────────────────────────────────────
+ *
+ * 🔴 `FSD_J6_SWIPE_MIN` 이 **어느 방향으로도** 안 물려 있었다. 1 로 낮춰도,
+ * 290 으로 올려도 전부 통과했다.
+ *
+ * 낮으면: 손떨림 한 칸이 쓸기가 되어 **7번 탭이 3번 쓸기로 둔갑한다** —
+ * 입력을 잃는 게 아니라 **다른 버튼이 눌린다.**
+ * 높으면: 실제 쓸기가 탭으로 떨어진다.
+ *
+ * 그래서 문턱 바로 아래와 바로 위를 각각 못 박는다. 시작점은 7번의 기준점이라,
+ * 쓸기가 아니면 반드시 7번 탭으로 떨어진다 — "아무 일도 안 났다" 로 뭉개지지
+ * 않고 어느 쪽으로 갈렸는지가 답에 남는다. */
+static void feed_pair(FsdJ6* s, uint16_t x1, uint16_t y1, FsdJ6Out* out) {
+    const uint8_t press[ROW]   = {0x03, 0x2C, 0x01, 0xF4, 0x01}; /* (300,500) */
+    const uint8_t release[ROW] = {0x00, (uint8_t)(x1 & 0xFFu), (uint8_t)(x1 >> 8),
+                                        (uint8_t)(y1 & 0xFFu), (uint8_t)(y1 >> 8)};
+    fsd_j6_feed(s, press, ROW, 1000);
+    *out = fsd_j6_feed(s, release, ROW, 1100);
+}
+
+/* 🔴 숫자를 손으로 박는다. `FSD_J6_SWIPE_MIN` 을 쓰면 안 된다.
+ *
+ * 처음엔 그렇게 썼고, **돌연변이가 그대로 살아남았다** — 상수를 1 로 바꾸면
+ * 시험 벡터도 1 을 기준으로 다시 계산되어 늘 통과한다. 검사 대상을 검사에
+ * 끌어다 쓰면 검사가 대상을 따라다닌다.
+ *
+ * 그래서 99 와 100 은 리터럴이다. 문턱을 정말 옮기려면 이 숫자도 함께 고쳐야
+ * 하고, **그것이 옳다** — 이 값은 실물 리모컨을 재서 나온 것이라(쓸기는
+ * 300~800, 탭은 0) 조용히 바뀔 값이 아니다. */
+#define SWIPE_JUST_UNDER 99u
+#define SWIPE_JUST_OVER 100u
+
+static void test_swipe_minimum_bites_from_both_sides(void) {
+    printf("쓸기 최소거리 — 문턱 바로 아래와 위\n");
+
+    FsdJ6 s;
+    FsdJ6Out o;
+
+    /* 문턱 바로 아래: 움직이지 않은 것으로 보고, 시작점이 7번이니 7번 탭이다.
+     * "아무 일도 안 났다" 로 뭉개지지 않고 어느 쪽으로 갈렸는지가 답에 남는다. */
+    fsd_j6_init(&s);
+    feed_pair(&s, 300u, (uint16_t)(500u + SWIPE_JUST_UNDER), &o);
+    CHECK(o.btn == FSD_J6_B7 && o.edge == FSD_J6_EDGE_PULSE,
+          "세로 %u 칸이 쓸기가 됐다 — 문턱이 너무 낮다: btn=%d",
+          (unsigned)SWIPE_JUST_UNDER, (int)o.btn);
+
+    fsd_j6_init(&s);
+    feed_pair(&s, (uint16_t)(300u + SWIPE_JUST_UNDER), 500u, &o);
+    CHECK(o.btn == FSD_J6_B7 && o.edge == FSD_J6_EDGE_PULSE,
+          "가로 %u 칸이 쓸기가 됐다: btn=%d", (unsigned)SWIPE_JUST_UNDER, (int)o.btn);
+
+    /* 문턱 정확히: 쓸기여야 한다. */
+    fsd_j6_init(&s);
+    feed_pair(&s, 300u, (uint16_t)(500u + SWIPE_JUST_OVER), &o);
+    CHECK(o.btn == FSD_J6_B1 && o.edge == FSD_J6_EDGE_PULSE,
+          "세로 %u 칸이 쓸기가 아니다 — 문턱이 너무 높다: btn=%d",
+          (unsigned)SWIPE_JUST_OVER, (int)o.btn);
+
+    fsd_j6_init(&s);
+    feed_pair(&s, (uint16_t)(300u + SWIPE_JUST_OVER), 500u, &o);
+    CHECK(o.btn == FSD_J6_B3 && o.edge == FSD_J6_EDGE_PULSE,
+          "가로 %u 칸이 쓸기가 아니다: btn=%d", (unsigned)SWIPE_JUST_OVER, (int)o.btn);
+
+    /* 그리고 리터럴이 헤더와 실제로 맞는지 여기서 못 박는다 — 안 그러면 문턱을
+     * 옮겼을 때 이 파일이 조용히 엉뚱한 경계를 재게 된다. */
+    CHECK(FSD_J6_SWIPE_MIN == SWIPE_JUST_OVER,
+          "헤더의 문턱이 %u 인데 이 테스트는 %u 를 기준으로 잰다",
+          (unsigned)FSD_J6_SWIPE_MIN, (unsigned)SWIPE_JUST_OVER);
+}
+
+/* ── 뗌 쪽의 노후 검사 ──────────────────────────────────────────────────────
+ *
+ * 🔴 이 줄을 통째로 지워도 전부 통과했다. 기존 노후 테스트 둘은 뗌 앞에 **새
+ * 누름을 넣어서**, 누름 쪽 가드(`gesture_expired` 를 부르는 다른 자리)가 먼저
+ * 접촉을 되살렸다 — 그래서 뗌 쪽 줄은 한 번도 안 지나갔다.
+ *
+ * 여기서는 **누름 없이** 한참 뒤의 `0x00` 만 준다. 그것이 이 줄의 유일한
+ * 경로다. 지워지면 1분 전 시작점으로 잰 쓸기가 발화한다. */
+static void test_a_lone_late_release_is_stale(void) {
+    printf("뗌만 한참 뒤에 오면 노후다\n");
+
+    FsdJ6 s;
+    fsd_j6_init(&s);
+
+    const uint8_t press[ROW]   = {0x03, 0x2C, 0x01, 0x20, 0x03}; /* (300,800) */
+    const uint8_t release[ROW] = {0x00, 0x2C, 0x01, 0x2C, 0x01}; /* (300,300) */
+
+    fsd_j6_feed(&s, press, ROW, 1000);
+    const FsdJ6Out o = fsd_j6_feed(&s, release, ROW, 1000 + FSD_J6_GESTURE_MAX_MS + 1000);
+
+    CHECK(o.edge == FSD_J6_EDGE_NONE,
+          "1분 묵은 시작점으로 잰 쓸기가 발화했다: btn=%d edge=%d", (int)o.btn, (int)o.edge);
+}
+
+
+/* ── 모양 관문 둘을 양쪽에서 조인다 ──────────────────────────────────────────
+ *
+ * 이 디코더가 남의 리포트를 막는 방법은 딱 둘이다: **길이**와 **좌표 범위**.
+ * 그런데 둘 다 한쪽만 재고 있었다.
+ *
+ * 🔴 무엇이 들어오는지가 중요하다. `subscribe_all()` 은 알림 가능한
+ * characteristic 을 **전부** 구독하고(어느 것이 눌림을 알릴지 모르니까),
+ * `on_notify` 는 **최대 20바이트**를 링에 넣는다. 표준 HID 키보드 리포트가
+ * 8바이트다 — 그것이 5바이트 디지타이저로 해석되면 **키보드 한 번 누름이
+ * 버튼 누름이 된다.**
+ */
+
+/* 길이: 3과 5만 뜻이 있다. 그 아래만 시험하고 있어서, `==` 를 `>=` 로 바꾸면
+ * 8바이트 키보드 리포트가 그대로 통과했다. */
+static void test_lengths_above_five_are_ignored_too(void) {
+    printf("길이 — 5보다 큰 것도 무시한다\n");
+
+    const uint8_t eight_down[8] = {0x03, 0x2C, 0x01, 0xF4, 0x01, 0x00, 0x00, 0x00};
+    const uint8_t eight_up[8]   = {0x00, 0x2C, 0x01, 0xF4, 0x01, 0x00, 0x00, 0x00};
+
+    for (uint8_t len = 6; len <= 8; len++) {
+        FsdJ6 s;
+        fsd_j6_init(&s);
+        const FsdJ6Out p = fsd_j6_feed(&s, eight_down, len, 1000);
+        const FsdJ6Out r = fsd_j6_feed(&s, eight_up, len, 1100);
+        CHECK(p.edge == FSD_J6_EDGE_NONE && r.edge == FSD_J6_EDGE_NONE,
+              "%u바이트 리포트가 버튼이 됐다: btn=%d edge=%d",
+              (unsigned)len, (int)r.btn, (int)r.edge);
+    }
+
+    /* 4바이트 컨슈머도 마찬가지 — 아래쪽만 막혀 있으면 위쪽이 샌다. */
+    const uint8_t four[4] = {0x00, 0x08, 0x00, 0x00};
+    FsdJ6 c;
+    fsd_j6_init(&c);
+    CHECK(fsd_j6_feed(&c, four, 4u, 1000).edge == FSD_J6_EDGE_NONE,
+          "4바이트가 컨슈머 코드로 읽혔다");
+}
+
+/* 좌표 범위: 두 축이 **동시에** 벗어난 벡터 하나로만 시험하고 있어서, 어느 한
+ * 축의 검사를 지워도 남은 쪽이 그 벡터를 걸러 냈다. 한 축씩 넘겨 본다. */
+static void test_each_axis_is_range_checked(void) {
+    printf("좌표 범위 — 한 축만 벗어나도 거른다\n");
+
+    /* x 만 범위 밖 (0x7FFF), y 는 정상 */
+    const uint8_t x_bad[ROW] = {0x03, 0xFF, 0x7F, 0xF4, 0x01};
+    /* y 만 범위 밖, x 는 정상 */
+    const uint8_t y_bad[ROW] = {0x03, 0x2C, 0x01, 0xFF, 0x7F};
+    /* 정상 뗌 — 눌림이 걸러졌다면 이것도 아무 일 없어야 한다 */
+    const uint8_t ok_up[ROW] = {0x00, 0x2C, 0x01, 0x2C, 0x01};
+
+    FsdJ6 a;
+    fsd_j6_init(&a);
+    CHECK(fsd_j6_feed(&a, x_bad, ROW, 1000).edge == FSD_J6_EDGE_NONE, "x 범위 초과가 통과했다");
+    CHECK(fsd_j6_feed(&a, ok_up, ROW, 1100).edge == FSD_J6_EDGE_NONE,
+          "x 범위 초과로 시작한 접촉이 뗌에서 발화했다");
+
+    FsdJ6 b;
+    fsd_j6_init(&b);
+    CHECK(fsd_j6_feed(&b, y_bad, ROW, 1000).edge == FSD_J6_EDGE_NONE, "y 범위 초과가 통과했다");
+    CHECK(fsd_j6_feed(&b, ok_up, ROW, 1100).edge == FSD_J6_EDGE_NONE,
+          "y 범위 초과로 시작한 접촉이 뗌에서 발화했다");
+}
+
+
+/* 두 축이 **똑같이** 움직였을 때 어느 쪽으로 가는가.
+ *
+ * 🔴 잡힌 벡터 중에 `|dx| == |dy|` 인 것이 하나도 없어서, 헤더가 적어 둔
+ * 세로 우선 규칙이 한 번도 안 재졌다. 규칙 자체는 아무래도 좋다 — **정해져
+ * 있어야** 한다는 것이 요점이다. 안 그러면 대각선 쓸기가 회차마다 1번이 됐다
+ * 3번이 됐다 하고, 그 흔들림은 사람이 손을 삐뚤게 놀린 탓으로만 보인다. */
+static void test_a_perfect_diagonal_is_vertical(void) {
+    printf("대각선은 세로로 간다 (정해져 있어야 한다)\n");
+
+    FsdJ6 s;
+    FsdJ6Out o;
+
+    /* 오른쪽-아래로 정확히 같은 거리 */
+    fsd_j6_init(&s);
+    feed_pair(&s, (uint16_t)(300u + SWIPE_JUST_OVER), (uint16_t)(500u + SWIPE_JUST_OVER), &o);
+    CHECK(o.btn == FSD_J6_B1 && o.edge == FSD_J6_EDGE_PULSE,
+          "오른쪽-아래 대각선이 세로(1번)로 안 갔다: btn=%d", (int)o.btn);
+
+    /* 왼쪽-위로 정확히 같은 거리 */
+    fsd_j6_init(&s);
+    feed_pair(&s, (uint16_t)(300u - SWIPE_JUST_OVER), (uint16_t)(500u - SWIPE_JUST_OVER), &o);
+    CHECK(o.btn == FSD_J6_B2 && o.edge == FSD_J6_EDGE_PULSE,
+          "왼쪽-위 대각선이 세로(2번)로 안 갔다: btn=%d", (int)o.btn);
+}
+
 int main(void) {
     printf("=== J6 리모컨 디코더 ===\n\n");
     test_swipes();
@@ -451,6 +745,15 @@ int main(void) {
     test_stale_gesture_swallows_the_level_button();
     test_gesture_in_progress_is_not_dropped();
     test_level_hold_is_not_stale();
+    test_lost_level_release_does_not_swallow_the_next_button();
+    test_the_same_point_again_is_the_same_hold();
+    test_lost_level_release_then_a_swipe();
+    test_one_matching_axis_is_not_enough();
+    test_swipe_minimum_bites_from_both_sides();
+    test_a_lone_late_release_is_stale();
+    test_lengths_above_five_are_ignored_too();
+    test_each_axis_is_range_checked();
+    test_a_perfect_diagonal_is_vertical();
     test_fits_the_button_table();
     test_every_button_has_a_one_word_name();
     test_names_are_distinct();

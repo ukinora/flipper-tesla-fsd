@@ -63,7 +63,16 @@ WIRE_SRC := test_wire.c $(ROOT)/fsd_logic/fsd_wire.c
 test_wire: $(WIRE_SRC) $(ROOT)/fsd_logic/fsd_wire.h
 	$(CC) $(CFLAGS) -I$(ROOT)/fsd_logic $(WIRE_SRC) -o $@
 
-check: test_fsd_core test_speed_profile test_camera test_gps test_body test_button test_btn_j6 test_wire
+# The Capability document's renderer. Pure C on purpose: this document has
+# outgrown the 512-byte ATT limit three times, and every time the overflow was
+# found on hardware because the builder could not be exercised anywhere else.
+# Now the worst case it can ever produce is measured here, on a desk.
+CAPJSON_SRC := test_cap_json.c $(ROOT)/fsd_logic/fsd_cap_json.c
+
+test_cap_json: $(CAPJSON_SRC) $(ROOT)/fsd_logic/fsd_cap_json.h
+	$(CC) $(CFLAGS) -I$(ROOT)/fsd_logic $(CAPJSON_SRC) -o $@
+
+check: test_fsd_core test_speed_profile test_camera test_gps test_body test_button test_btn_j6 test_wire test_cap_json
 	./test_fsd_core
 	./test_speed_profile
 	./test_camera
@@ -72,8 +81,9 @@ check: test_fsd_core test_speed_profile test_camera test_gps test_body test_butt
 	./test_button
 	./test_btn_j6
 	./test_wire
+	./test_cap_json
 
 clean:
-	rm -rf test_fsd_core test_speed_profile test_camera test_gps test_body test_button test_btn_j6 test_wire *.dSYM
+	rm -rf test_fsd_core test_speed_profile test_camera test_gps test_body test_button test_btn_j6 test_wire test_cap_json *.dSYM
 
 .PHONY: check clean

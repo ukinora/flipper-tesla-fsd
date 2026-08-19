@@ -105,6 +105,16 @@ String capability_scan_json();
 
 String capability_status_json();
 
+/** Which Bluetooth remotes are bound, and what they have pressed.
+ *
+ * 🔴 ITS OWN DOCUMENT since 2026-08-20. It used to be a block inside the
+ * Capability document, and together the two passed 512 bytes in the car — where
+ * the second bus enters the document and the bench replays never put it there.
+ * NimBLE refuses an oversized value rather than truncating it, so the
+ * characteristic held nothing at all and the buttons took the bus verdicts down
+ * with them. Served on BLE_UUID_BUTTONS. */
+String capability_buttons_json();
+
 /**
  * True while the listen window is still counting.
  *

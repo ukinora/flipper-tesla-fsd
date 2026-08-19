@@ -370,7 +370,22 @@ static void test_event_never_longs_or_sticks(void) {
     CHECK(fsd_btn_longs(&b, 0) == 0, "no longs");
 }
 
-/* A level report on an EVENT button is what opens the trap. Ignore it. */
+/* A level report on an EVENT button is what opens the trap. Ignore it.
+ *
+ * 🔴 THIS TEST DID NOT TEST WHAT IT IS NAMED FOR. Deleting the guard at
+ * fsd_button.c — the line the header calls "THE TRAP" — left all 126 tests
+ * green, because the assertions below only checked the SYMPTOM (no LONG, no
+ * STUCK) and a second, unrelated line prevents that symptom on its own:
+ * fsd_btn_tick() returns early for EVENT buttons before any timer runs. Either
+ * mechanism alone kept the test passing, so the one it names was unmeasured.
+ *
+ * The guard's real job is to stop the report pair from becoming a PRESS. So the
+ * assertion that bites is the count: a stray down/up must not add a short.
+ * Without the guard the release comes out as SHORT and shorts goes to 1.
+ *
+ * It is not theoretical. If anyone ever gives EVENT buttons a timer in tick() —
+ * removing that early return — the permanent-wedge failure the header describes
+ * comes back with nothing red to stop it. */
 static void test_event_ignores_level_reports(void) {
     printf("kind: EVENT ignores down/up reports\n");
     FsdButtons b;
@@ -381,6 +396,16 @@ static void test_event_ignores_level_reports(void) {
         if (fsd_btn_tick(&b, 0, t) != FSD_BTN_EV_NONE && !spoke_at) spoke_at = t;
     CHECK(spoke_at == 0, "20 s of ticks stayed silent (spoke at %u)", spoke_at);
     CHECK(!fsd_btn_is_stuck(&b, 0), "a stray down cannot wedge an event button");
+
+    /* The pair, and the count. This is the assertion the guard owns. */
+    FsdButtons c;
+    fsd_btn_init(&c);
+    CHECK(fsd_btn_report(&c, 0, true, 1000) == FSD_BTN_EV_NONE, "down ignored");
+    CHECK(fsd_btn_report(&c, 0, false, 1100) == FSD_BTN_EV_NONE,
+          "an EVENT button answered a release report");
+    CHECK(fsd_btn_shorts(&c, 0) == 0,
+          "a stray down/up pair counted as a press on an EVENT button (shorts=%u)",
+          fsd_btn_shorts(&c, 0));
 }
 
 static void test_event_double(void) {
@@ -519,6 +544,126 @@ static void test_double_window_defaults_and_bounds(void) {
     CHECK(fsd_btn_double_window(&b, FSD_BTN_MAX) == 0, "범위 밖은 0");
 }
 
+
+/* STUCK 가지가 기다리던 탭을 버리는지.
+ *
+ * 🔴 이 줄을 지워도 126건이 전부 통과했다. 닿으려면 **틱이 성기어야** 한다 —
+ * STUCK 이 LONG 보다 먼저 검사되므로, 촘촘한 틱에서는 LONG 이 먼저 나서
+ * 자기 가지에서 탭을 버린다. 그래서 기존 테스트로는 이 줄을 지날 수 없었다.
+ *
+ * 이 프로젝트에는 그 성긴 틱이 실제로 있다: 캡처 저장이 15초 창을 한 번에
+ * 쓴다(그래서 루프 WDT 를 자가진단 중에만 켠다). 그동안 버려졌어야 할 탭이
+ * 살아 있으면, **89초 전에 놓은 손가락이 지금 동작을 일으킨다.** */
+static void test_stuck_drops_a_waiting_tap(void) {
+    printf("kind: LEVEL STUCK 는 기다리던 탭을 버린다\n");
+    FsdButtons b;
+    fsd_btn_init(&b);
+    fsd_btn_set_kind(&b, 0, FSD_BTN_KIND_LEVEL);
+    fsd_btn_set_double(&b, 0, true);
+
+    /* 첫 탭 — 짝을 기다리며 보류된다. */
+    fsd_btn_report(&b, 0, true, 1000);
+    CHECK(fsd_btn_report(&b, 0, false, 1100) == FSD_BTN_EV_NONE, "첫 탭은 짝을 기다린다");
+
+    /* 두 번째 누름은 놓이지 않는다 — 버튼이 끼었다. */
+    fsd_btn_report(&b, 0, true, 1150);
+
+    /* 그리고 루프가 멎는다. 다시 돌 때는 이미 STUCK 시한을 한참 넘겼다. */
+    CHECK(fsd_btn_tick(&b, 0, 1150 + FSD_BTN_STUCK_MS + 2000) == FSD_BTN_EV_STUCK,
+          "성긴 틱에서 STUCK 이 안 났다");
+
+    /* 한참 뒤에 손을 뗀다. 보류된 탭이 아직 살아 있으면 여기서 되살아난다. */
+    fsd_btn_report(&b, 0, false, 90000);
+    uint32_t late = 0;
+    for (uint32_t t = 90000; t <= 92000; t += 50)
+        if (fsd_btn_tick(&b, 0, t) != FSD_BTN_EV_NONE && !late) late = t;
+
+    CHECK(late == 0, "89초 전 탭이 지금 발화했다 (t=%u)", late);
+    CHECK(fsd_btn_shorts(&b, 0) == 0,
+          "끼인 버튼이 짧게 누름을 하나 만들었다 (shorts=%u)", fsd_btn_shorts(&b, 0));
+}
+
+
+/* ── 못 박히지 않은 경계 셋 ─────────────────────────────────────────────────
+ *
+ * 셋 다 돌연변이가 그대로 살아남았다. 값은 맞는데 **그 값이라는 사실**이
+ * 어디에도 안 적혀 있었다.
+ */
+
+/* 창을 너무 크게 달라고 하면 얼마로 깎이는가.
+ *
+ * 🔴 기존 검사는 `< FSD_BTN_LONG_MS` 만 봤다. 그래서 깎인 값을 LONG-1 로 바꿔도
+ * 통과한다 — 그런데 그러면 **탭이 LONG 이 나기 1 ms 전에 풀린다.** 사람은
+ * 2회로 눌렀는데 짧게 하나와 길게 하나가 나가고, 걸어 둔 동작이 **둘 다** 뛴다.
+ * 100 ms 의 여유가 그것을 막는 값이고, 여유이므로 숫자로 적어야 한다. */
+static void test_double_window_clamp_leaves_room_before_long(void) {
+    printf("kind: 창 상한은 LONG 보다 넉넉히 앞에서 깎인다\n");
+    FsdButtons b;
+    fsd_btn_init(&b);
+
+    fsd_btn_set_double_window(&b, 0, (uint16_t)(FSD_BTN_LONG_MS + 5000u));
+    const uint16_t w = fsd_btn_double_window(&b, 0);
+
+    CHECK(w == (uint16_t)(FSD_BTN_LONG_MS - 100u),
+          "창이 %u 로 깎였다 — LONG(%u) 보다 100ms 앞이어야 한다",
+          (unsigned)w, (unsigned)FSD_BTN_LONG_MS);
+
+    /* 그 값이 실제로 여유를 만드는지도 본다: 창이 끝나도 LONG 은 아직이다. */
+    fsd_btn_set_kind(&b, 0, FSD_BTN_KIND_LEVEL);
+    fsd_btn_set_double(&b, 0, true);
+    fsd_btn_report(&b, 0, true, 1000);
+    fsd_btn_report(&b, 0, false, 1050);          // 첫 탭, 보류된다
+    const FsdBtnEvent e = fsd_btn_tick(&b, 0, 1050 + w);
+    CHECK(e == FSD_BTN_EV_SHORT, "창이 끝나면 짧게가 나와야 한다: %d", (int)e);
+    CHECK(fsd_btn_longs(&b, 0) == 0, "그 시점에 길게가 이미 나 있으면 안 된다");
+}
+
+/* 창의 **정확히 그 순간**이 어느 쪽인가.
+ *
+ * 🔴 기존 검사는 창−1 과 창+1 만 찔러서, `>=` 를 `>` 로 바꿔도 통과했다. 경계는
+ * 양쪽이 아니라 **그 위**에서 갈린다. */
+static void test_pending_releases_exactly_at_the_window(void) {
+    printf("kind: 창의 그 순간에 풀린다\n");
+    FsdButtons b;
+    fsd_btn_init(&b);
+    fsd_btn_set_kind(&b, 0, FSD_BTN_KIND_LEVEL);
+    fsd_btn_set_double(&b, 0, true);
+
+    const uint16_t w = fsd_btn_double_window(&b, 0);
+    fsd_btn_report(&b, 0, true, 1000);
+    fsd_btn_report(&b, 0, false, 1100);          // 보류
+
+    CHECK(fsd_btn_tick(&b, 0, 1100 + w - 1u) == FSD_BTN_EV_NONE,
+          "창 1ms 전에 풀렸다");
+    CHECK(fsd_btn_tick(&b, 0, 1100 + w) == FSD_BTN_EV_SHORT,
+          "창의 그 순간에 안 풀렸다 (창=%u)", (unsigned)w);
+}
+
+/* 2회 판정을 끄면 기다리던 탭은 어떻게 되나.
+ *
+ * 🔴 헤더가 **"끄면 기다리던 탭은 버려진다"** 고 적어 두었는데 아무도 안 쟀다.
+ * 안 버리면 그 탭이 나중에 되살아나서, 2회를 끈 뒤에 짧게가 하나 더 나온다. */
+static void test_turning_double_off_drops_a_waiting_tap(void) {
+    printf("kind: 2회를 끄면 기다리던 탭도 버린다\n");
+    FsdButtons b;
+    fsd_btn_init(&b);
+    fsd_btn_set_kind(&b, 0, FSD_BTN_KIND_LEVEL);
+    fsd_btn_set_double(&b, 0, true);
+
+    fsd_btn_report(&b, 0, true, 1000);
+    CHECK(fsd_btn_report(&b, 0, false, 1100) == FSD_BTN_EV_NONE, "첫 탭은 보류된다");
+
+    fsd_btn_set_double(&b, 0, false);            // 여기서 버려져야 한다
+
+    uint32_t late = 0;
+    for (uint32_t t = 1100; t <= 4000; t += 20)
+        if (fsd_btn_tick(&b, 0, t) != FSD_BTN_EV_NONE && !late) late = t;
+
+    CHECK(late == 0, "버려졌어야 할 탭이 t=%u 에 되살아났다", late);
+    CHECK(fsd_btn_shorts(&b, 0) == 0,
+          "2회를 끈 뒤에 짧게가 하나 나왔다 (shorts=%u)", fsd_btn_shorts(&b, 0));
+}
+
 int main(void) {
     printf("test_button\n");
     test_short_and_long();
@@ -545,6 +690,10 @@ int main(void) {
     test_kind_bounds();
     test_double_window_is_per_button();
     test_double_window_defaults_and_bounds();
+    test_stuck_drops_a_waiting_tap();
+    test_double_window_clamp_leaves_room_before_long();
+    test_pending_releases_exactly_at_the_window();
+    test_turning_double_off_drops_a_waiting_tap();
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }

@@ -162,13 +162,26 @@ void body_task_tick(uint32_t now_ms) {
     g_logged_gestures = gestures;
 
     Serial.printf(
-        "[BODY] t1:%u(%s) latch L:%X R:%X | t2:%u press:%ums gap:%ums rej:%u | "
-        "mux0:%ums drive:%s\n",
+        /* 🔴 win / b5 / last ARE THE MEASUREMENT. These detectors exist to
+         * measure, not to act — the whole point is to characterise T1's window
+         * and T2's gesture offline against the one-shot capture. Their
+         * accessors had no caller anywhere, tests included (red team,
+         * 2026-08-19), so the numbers were computed and thrown away.
+         *
+         *   win  how many T1 windows opened
+         *   b5   the raw 0x3C2 byte the T2 detector last saw — the byte a
+         *        person compares against the capture by eye
+         *   last when the last T2 gesture landed, so it can be found in a dump */
+        "[BODY] t1:%u(%s) win:%u latch L:%X R:%X | t2:%u press:%ums gap:%ums "
+        "rej:%u b5:%02X last:%ums | mux0:%ums drive:%s\n",
         (unsigned)g_t1_actions, fsd_body_verdict_str(fsd_t1_last_verdict(&g_t1)),
+        (unsigned)fsd_t1_window_count(&g_t1),
         (unsigned)fsd_t1_latch_raw(&g_t1, FSD_BODY_SIDE_LEFT),
         (unsigned)fsd_t1_latch_raw(&g_t1, FSD_BODY_SIDE_RIGHT), (unsigned)gestures,
         (unsigned)fsd_t2_last_press_ms(&g_t2), (unsigned)fsd_t2_last_gap_ms(&g_t2),
-        (unsigned)fsd_t2_last_reject(&g_t2), (unsigned)fsd_t2_mux0_min_gap_ms(&g_t2),
+        (unsigned)fsd_t2_last_reject(&g_t2),
+        (unsigned)fsd_t2_last_byte5(&g_t2), (unsigned)fsd_t2_last_gesture_ms(&g_t2),
+        (unsigned)fsd_t2_mux0_min_gap_ms(&g_t2),
         g_drive_session ? "yes" : "no");
 }
 

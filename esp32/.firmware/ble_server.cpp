@@ -46,6 +46,14 @@
  * thing from the capability document — transient, and as large as the room the
  * scan was taken in. Eight named devices are half a kilobyte on their own. */
 #define BLE_UUID_SCAN    "6b1a0009-4b53-4d4f-4432-43414e000001"
+/* Bound remotes and their press counts. Split out of the Capability document on
+ * 2026-08-20: five bound remotes are five 17-character addresses plus their
+ * state, and together with two buses' verdicts the one document passed 512
+ * bytes IN THE CAR — where the second bus enters it and the bench replays never
+ * put it there. NimBLE refuses an oversized value rather than truncating it, so
+ * the buttons would have taken the bus verdicts down with them, and the phone
+ * would have shown every screen blank with nothing to say why. */
+#define BLE_UUID_BUTTONS "6b1a000a-4b53-4d4f-4432-43414e000001"
 
 #define BLE_STATE_LEN  20u
 #define BLE_RESULT_LEN 4u
@@ -72,6 +80,7 @@ static NimBLECharacteristic *g_ch_bulk   = nullptr;
 static NimBLECharacteristic *g_ch_upload = nullptr;
 static NimBLECharacteristic *g_ch_camstat = nullptr;
 static NimBLECharacteristic *g_ch_scan    = nullptr;
+static NimBLECharacteristic *g_ch_buttons = nullptr;
 
 // Whether the radio is advertising, as reported by startAdvertising() -- both
 // at init and on every re-advertise after a disconnect. Read by the OTA
@@ -79,6 +88,22 @@ static NimBLECharacteristic *g_ch_scan    = nullptr;
 static bool g_adv_ok = false;
 
 static volatile bool g_connected = false;
+
+/* WHICH link the state below belongs to.
+ *
+ * 🔴 onDisconnect() USED TO IGNORE THE HANDLE, so any peer's disconnect tore
+ * down the phone's session: subscriptions cleared, an in-flight camera.bin
+ * upload aborted, MTU reset to 23 — while the phone was still connected and
+ * still sending. onMTUChange had the same hole, and a second peer's MTU would
+ * resize the bulk chunks under a running download (red team, 2026-08-19).
+ *
+ * NimBLE stops advertising once connected and we only re-advertise on
+ * disconnect, so a second link needs a direct connect to a cached address —
+ * uncommon, not impossible, and the failure is silent on both sides.
+ *
+ * 0xFFFF is BLE_HS_CONN_HANDLE_NONE: nobody. */
+#define BLE_CONN_NONE 0xFFFFu
+static volatile uint16_t g_conn_handle = BLE_CONN_NONE;
 static volatile bool g_state_subscribed = false;  // client enabled State notifications
 static volatile bool g_bulk_subscribed  = false;
 static volatile uint16_t g_mtu = 23;              // until the peer negotiates up
@@ -210,6 +235,25 @@ static void ble_pack_camstat(uint8_t *out, uint32_t now_ms) {
     portEXIT_CRITICAL(g_mux);
 
     FsdSupVerdict v = fsd_supervised_drive_why(&s, now_ms);
+
+    /* 🔴 SAY IT OUT LOUD WHEN IT MOVES. This verdict is the answer to "why will
+     * the camera path not arm", and until now it only ever left the board as a
+     * number inside CamStat — readable on the phone, invisible on the console.
+     * In the car there is no PC, and during a capture the phone is busy being a
+     * capture client.
+     *
+     * fsd_sup_verdict_str() existed for exactly this and had no caller anywhere,
+     * tests included (red team, 2026-08-19) — the repository's oldest pattern.
+     *
+     * On CHANGE only: this packer runs once a second and an unconditional line
+     * would bury everything else on the console. */
+    {
+        static FsdSupVerdict s_said = (FsdSupVerdict)0xFF;
+        if (v != s_said) {
+            s_said = v;
+            Serial.printf("[SUP] %s\n", fsd_sup_verdict_str(v));
+        }
+    }
 
     // Wait 0 because a status field is never worth blocking for: a missed
     // borrow reports "no database" for one notify and the next one is 1 s away.
@@ -538,6 +582,41 @@ static void ble_apply_blackbox_request(void) {
 // ble_server_init(), before any frame had arrived -- so the probe's answer to
 // "which bus is which" never reached anybody, and CAP_RECHECK re-ran a probe
 // whose result went nowhere.
+/* Put a document into a read-only characteristic and CHECK IT LANDED.
+ *
+ * 🔴 NimBLE does not truncate a value over the ATT limit — it REJECTS it, and
+ * leaves the characteristic holding ZERO BYTES. The phone cannot tell that
+ * apart from "not written yet", so the failure is invisible on both sides at
+ * once. It shipped that way for a whole build (2026-08-18): 566 bytes offered,
+ * 0 stored, and every screen quietly said "아직 확인되지 않았습니다".
+ *
+ * One helper for all three documents so the check cannot be present on some and
+ * forgotten on the next one added — which is how the buttons block grew past
+ * the limit unnoticed while sharing a characteristic that did have the check.
+ *
+ * `doc` is a named caller local on purpose. `f().c_str()` hands NimBLE a
+ * pointer into a temporary, and this project has already been bitten by
+ * setValue() not copying.
+ *
+ * `last_said` is per-characteristic: only a CHANGE in size is logged. This runs
+ * twice a second, and an unconditional line would bury every other message on
+ * the console — the one place the board explains itself. */
+static void publish_doc(NimBLECharacteristic* ch, const String& doc,
+                        const char* what, size_t* last_said) {
+    if (!ch) return;
+    ch->setValue((const uint8_t*)doc.c_str(), doc.length());
+    const size_t stored = ch->getValue().size();
+    if (stored != doc.length()) {
+        Serial.printf("[CAP] %s REFUSED: %u offered, %u stored (ATT limit %u)\n",
+                      what, (unsigned)doc.length(), (unsigned)stored, (unsigned)CAP_ATTR_MAX);
+        return;
+    }
+    if (last_said && *last_said != doc.length()) {
+        *last_said = doc.length();
+        Serial.printf("[CAP] %s now %u bytes\n", what, (unsigned)doc.length());
+    }
+}
+
 static void ble_refresh_capability(uint32_t now_ms) {
     /* 🔴 THIS USED TO RUN EXACTLY ONCE, at the edge where the listen window
      * closed, and then return forever (2026-08-19).
@@ -563,40 +642,24 @@ static void ble_refresh_capability(uint32_t now_ms) {
      * the scan, and a characteristic that was filled before it arrived is
      * indistinguishable from one that was never filled. */
     if (g_ch_scan) {
+        static size_t s_said = 0;
         const String doc = capability_scan_json();
-        g_ch_scan->setValue((const uint8_t*)doc.c_str(), doc.length());
-        if (g_ch_scan->getValue().size() != doc.length())
-            Serial.printf("[CAP] scan list REFUSED: %u bytes (ATT limit %u)\n",
-                          (unsigned)doc.length(), (unsigned)CAP_ATTR_MAX);
+        publish_doc(g_ch_scan, doc, "scan list", &s_said);
     }
 
     if (g_ch_cap) {
-        /* 🔴 Hold the String in a NAMED variable. `f().c_str()` hands NimBLE a
-         * pointer into a temporary that dies at the semicolon, and this project
-         * has already been bitten by setValue() not copying. */
+        static size_t s_said = 0;
         const String doc = capability_status_json();
-        g_ch_cap->setValue((const uint8_t*)doc.c_str(), doc.length());
+        publish_doc(g_ch_cap, doc, "Capability", &s_said);
+    }
 
-        /* 🔴 VERIFY IT TOOK, every time. NimBLE does not truncate a value over
-         * the ATT limit — it REJECTS it, and leaves the characteristic holding
-         * ZERO BYTES. The phone cannot tell that apart from "not written yet",
-         * so the failure is invisible on both sides at once. It shipped that
-         * way for a whole build (2026-08-18): 566 bytes offered, 0 stored, and
-         * every screen quietly said "아직 확인되지 않았습니다". */
-        const size_t stored = g_ch_cap->getValue().size();
-        if (stored != doc.length()) {
-            Serial.printf("[CAP] setValue REFUSED: %u offered, %u stored (ATT limit %u)\n",
-                          (unsigned)doc.length(), (unsigned)stored, (unsigned)CAP_ATTR_MAX);
-        } else {
-            /* Only when the size moves. This runs once a second now, and an
-             * unconditional line would bury every other message on the console
-             * — which is the one place the board explains itself. */
-            static size_t s_said = 0;
-            if (doc.length() != s_said) {
-                s_said = doc.length();
-                Serial.printf("[CAP] Capability now %u bytes\n", (unsigned)doc.length());
-            }
-        }
+    /* The buttons left the Capability document on 2026-08-20 — see
+     * BLE_UUID_BUTTONS. Same beat: press counts are the fastest-moving thing
+     * either document carries, and they are the whole point of the screen. */
+    if (g_ch_buttons) {
+        static size_t s_said = 0;
+        const String doc = capability_buttons_json();
+        publish_doc(g_ch_buttons, doc, "buttons", &s_said);
     }
 }
 
@@ -853,8 +916,25 @@ class CommandCB : public NimBLECharacteristicCallbacks {
             // that flag, so the camera path is shut regardless of what op_mode
             // still says. The floor is recomputed at the next boot anyway.
             if ((cur == OpMode_Autonomous || cur == OpMode_ListenOnly) && cur != floor) {
-                g_mode_req         = (uint8_t)floor;
-                g_mode_req_pending = true;
+                /* 🔴 DO NOT CLOBBER A PARKED REQUEST. There is one slot, and
+                 * SET_MODE guards it — this did not, so a SET_MODE(Active) that
+                 * loop() had not drained yet was silently replaced by the floor.
+                 * The phone then received a SET_MODE result reporting a mode it
+                 * never asked for (red team, 2026-08-19).
+                 *
+                 * The command is NOT refused wholesale: autonomy_enabled is
+                 * already set above, and turning autonomy OFF is the safe
+                 * direction — blocking that would be the wrong trade. Only the
+                 * floor adjustment is dropped, which the comment above already
+                 * establishes as safe: fsd_autonomy_allows() gates on the flag,
+                 * and the floor is recomputed at the next boot. */
+                if (g_mode_req_pending) {
+                    Serial.println("[BLE] a mode request is still parked - "
+                                   "the autonomy floor is left for the next boot");
+                } else {
+                    g_mode_req         = (uint8_t)floor;
+                    g_mode_req_pending = true;
+                }
             }
             // Persist from loop(), not here. This file's contract is that
             // nothing blocks the BLE host task, and an NVS commit is a flash
@@ -920,7 +1000,16 @@ class BulkCB : public NimBLECharacteristicCallbacks {
 };
 
 class ServerCB : public NimBLEServerCallbacks {
-    void onConnect(NimBLEServer *, NimBLEConnInfo &) override {
+    void onConnect(NimBLEServer *, NimBLEConnInfo &info) override {
+        if (g_conn_handle == BLE_CONN_NONE) {
+            g_conn_handle = info.getConnHandle();
+        } else {
+            /* Somebody else is already being served. Say so — the app's symptom
+             * for this is "the module stopped answering", which names nothing. */
+            Serial.printf("[BLE] a second client connected (handle %u); "
+                          "still serving %u\n",
+                          (unsigned)info.getConnHandle(), (unsigned)g_conn_handle);
+        }
         g_connected = true;
         // 🔴 The pending revoke is NOT cancelled here. At this point we know a
         // radio connected and nothing else — not who, not whether it can pair.
@@ -946,7 +1035,25 @@ class ServerCB : public NimBLEServerCallbacks {
             g_link_down_ms  = 0;   // owner is back in time — cancel the revoke
         }
     }
-    void onDisconnect(NimBLEServer *, NimBLEConnInfo &, int) override {
+    void onDisconnect(NimBLEServer *srv, NimBLEConnInfo &info, int) override {
+        /* Whose link went away?
+         *
+         * 🔴 The count is the safety net, not decoration. Trusting the handle
+         * alone would wedge the module for good if one ever went stale: the real
+         * client's disconnect would be ignored, g_connected would stay true, and
+         * Active would never be handed back. So: tear down when it is OUR link,
+         * or when nobody is left at all. */
+        const uint16_t who = info.getConnHandle();
+        const size_t remaining = srv ? srv->getConnectedCount() : 0u;
+        if (who != g_conn_handle && remaining > 0u) {
+            Serial.printf("[BLE] another client disconnected (handle %u); "
+                          "session %u is untouched\n",
+                          (unsigned)who, (unsigned)g_conn_handle);
+            /* Advertise again anyway — the slot it freed should be usable. */
+            g_adv_ok = NimBLEDevice::startAdvertising();
+            return;
+        }
+        g_conn_handle = BLE_CONN_NONE;
         g_connected = false;
         g_owner_present = false;  // re-established only by a resolved owner bond
         // A mode change asked for by a phone that is now gone must not be
@@ -975,7 +1082,14 @@ class ServerCB : public NimBLEServerCallbacks {
                       g_adv_ok ? "advertising again"
                                : "ADVERTISING FAILED, the module is not visible");
     }
-    void onMTUChange(uint16_t mtu, NimBLEConnInfo &) override {
+    void onMTUChange(uint16_t mtu, NimBLEConnInfo &info) override {
+        /* Only the link we are serving. A second peer negotiating its own MTU
+         * used to resize the bulk chunks under a running download. */
+        if (g_conn_handle != BLE_CONN_NONE && info.getConnHandle() != g_conn_handle) {
+            Serial.printf("[BLE] MTU %u on handle %u - not the served link, ignored\n",
+                          mtu, (unsigned)info.getConnHandle());
+            return;
+        }
         g_mtu = mtu;  // bulk chunk size follows this
         Serial.printf("[BLE] MTU %u\n", mtu);
     }
@@ -1058,12 +1172,17 @@ void ble_server_init(FSDState *state, portMUX_TYPE *state_mux) {
     // this tap cannot do (e.g. no 0x3C2 -> no scroll-based profile control).
     g_ch_cap = svc->createCharacteristic(BLE_UUID_CAPAB, NIMBLE_PROPERTY::READ);
     g_ch_scan = svc->createCharacteristic(BLE_UUID_SCAN, NIMBLE_PROPERTY::READ);
+    g_ch_buttons = svc->createCharacteristic(BLE_UUID_BUTTONS, NIMBLE_PROPERTY::READ);
+    /* Seed both so a phone that reads before the first refresh tick gets a
+     * document rather than an empty attribute — which it cannot tell apart from
+     * a module that is not answering. */
     {
-        const String doc = capability_status_json();
-        g_ch_cap->setValue((const uint8_t*)doc.c_str(), doc.length());
-        const size_t stored = g_ch_cap->getValue().size();
-        Serial.printf("[CAP] initial Capability %u bytes%s\n", (unsigned)doc.length(),
-                      (stored == doc.length()) ? "" : " - REFUSED, characteristic is EMPTY");
+        size_t said = 0;
+        const String cap = capability_status_json();
+        publish_doc(g_ch_cap, cap, "initial Capability", &said);
+        said = 0;
+        const String btn = capability_buttons_json();
+        publish_doc(g_ch_buttons, btn, "initial buttons", &said);
     }
 
     // Bulk: notify-only. Unencrypted like the rest — a capture is diagnostic
