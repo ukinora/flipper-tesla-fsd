@@ -921,6 +921,14 @@ void ble_central_tick(uint32_t now_ms) {
         const uint8_t i = rep.slot;
         const uint8_t len = rep.len;
 
+        /* slot_of() cannot return an out-of-range index and on_notify() drops
+         * anything it does not recognise, so this holds today. It is checked
+         * anyway because `i` indexes TWO arrays below and the invariant lives in
+         * a different function — the day slot_of() changes, the failure here is
+         * memory corruption on the loop task, which is the least debuggable
+         * thing this file could produce. */
+        if(i >= BLE_CENTRAL_MAX_BUTTONS) continue;
+
         if(g_verbose) {
             /* The handle is what makes seven report characteristics tellable
              * apart. Without it every key on this remote looks the same. */
@@ -965,10 +973,12 @@ void ble_central_tick(uint32_t now_ms) {
 
     /* LONG, DOUBLE and STUCK happen while nothing is being reported.
      *
-     * Over BUTTONS, not slots. Getting this bound wrong is quiet in both
-     * directions — too low and the top buttons never produce a LONG, too high
-     * and it reads past the array — which is why the two counts are asserted
-     * against each other in fsd_btn_j6.h rather than kept in step by hand. */
+     * Over REMOTES and then over BUTTONS — both, and they are different counts.
+     * BLE_CENTRAL_MAX_BUTTONS is a radio budget; FSD_BTN_MAX is an index space.
+     * Getting either bound wrong is quiet in both directions — too low and the
+     * top buttons never produce a LONG, too high and it reads past the array —
+     * which is why the counts are asserted against each other in fsd_btn_j6.h
+     * rather than kept in step by hand. */
     for(uint8_t i = 0; i < BLE_CENTRAL_MAX_BUTTONS; i++)
     for(uint8_t b = 0; b < FSD_BTN_MAX; b++) {
         const FsdBtnEvent e = fsd_btn_tick(&g_btns[i], b, now_ms);

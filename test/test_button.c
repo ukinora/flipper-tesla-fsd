@@ -664,6 +664,140 @@ static void test_turning_double_off_drops_a_waiting_tap(void) {
           "2회를 끈 뒤에 짧게가 하나 나왔다 (shorts=%u)", fsd_btn_shorts(&b, 0));
 }
 
+
+/* ── 리모컨이 둘 이상일 때 ────────────────────────────────────────────────────
+ *
+ * 🔴 이것이 실물로 확인할 수 없는 유일한 축이다 — 리모컨이 한 대뿐이다.
+ * 그래서 무엇이 무엇을 보증하는지 갈라 둔다:
+ *
+ *   ble_central.cpp 의 배선  → **컴파일러**. `g_btns` 가 배열이라 색인을
+ *     빠뜨린 `&g_btns` 는 `FsdButtons (*)[5]` 가 되어 변환되지 않는다.
+ *     실측으로 확인했다 (2026-08-19).
+ *   이 계층의 독립성        → **아래 테스트**. 인스턴스 둘이 서로를 건드리지
+ *     않는다는 것.
+ *
+ * 아래가 재현하는 것은 레드팀이 짚은 바로 그 시나리오다: 6번은 유일한 레벨
+ * 버튼이라 누름과 뗌이 별개 리포트이고, 상태를 공유하면
+ *
+ *   - A 가 쥔 동안 B 의 누름이 **반복 down 으로 버려지고**
+ *   - A 가 놓으면 **B 의 유지가 A 의 타이밍으로 끝난다**
+ *
+ * 지금은 구조체가 갈려 있어 당연히 통과한다 — 그것이 요점이다. 누군가
+ * fsd_button.c 안에 파일 범위 상태를 하나라도 들이면 여기가 빨개진다.
+ */
+
+/* 물리 버튼 하나를 리모컨 두 대가 함께 쓴다 — J6 는 논리 버튼이 기기와 무관
+ * 하므로(같은 리모컨을 둘 사면 같은 버튼을 낸다) 이것이 정상 배치다. */
+#define REMOTE_A 0
+#define REMOTE_B 1
+#define KEY6 5   /* FSD_J6_B6 — 유일한 레벨 버튼 */
+
+static void init_two_remotes(FsdButtons* a, FsdButtons* b) {
+    init_level(a);
+    init_level(b);
+}
+
+static void test_two_remotes_do_not_swallow_each_other(void) {
+    printf("\n-- 리모컨 둘: 한쪽이 쥐어도 다른 쪽 누름이 산다 --\n");
+
+    FsdButtons a, b;
+    init_two_remotes(&a, &b);
+
+    /* A 가 6번을 쥔다. */
+    CHECK(fsd_btn_report(&a, KEY6, true, 1000) == FSD_BTN_EV_NONE, "A 의 누름은 조용하다");
+
+    /* B 도 6번을 쥔다. 상태가 공유였다면 **반복 down 으로 버려진다.** */
+    CHECK(fsd_btn_report(&b, KEY6, true, 1050) == FSD_BTN_EV_NONE, "B 의 누름은 조용하다");
+
+    /* A 가 짧게 놓는다 — A 만 짧게가 나야 한다. */
+    CHECK(fsd_btn_report(&a, KEY6, false, 1150) == FSD_BTN_EV_SHORT, "A 의 짧게가 안 났다");
+    CHECK(fsd_btn_shorts(&a, KEY6) == 1, "A 의 셈이 1 이 아니다");
+    CHECK(fsd_btn_shorts(&b, KEY6) == 0,
+          "A 의 뗌이 B 의 셈을 올렸다 (B shorts=%u)", fsd_btn_shorts(&b, KEY6));
+
+    /* 🔴 그리고 B 의 유지는 아직 살아 있어야 한다 — A 의 뗌이 끝내면 안 된다. */
+    CHECK(fsd_btn_tick(&b, KEY6, 1050 + FSD_BTN_LONG_MS) == FSD_BTN_EV_LONG,
+          "A 가 놓자 B 의 유지가 함께 끝났다");
+    CHECK(fsd_btn_longs(&a, KEY6) == 0, "B 의 길게가 A 에게 셈됐다");
+}
+
+/* 한 대를 잊어도 다른 대의 진행 중인 유지가 풀리면 안 된다.
+ *
+ * 🔴 slot_drop() 이 슬롯과 무관하게 6번을 놓고 있었다 — **슬롯 0을 잊으면
+ * 슬롯 1에서 진행 중인 유지가 풀렸다.** 여기서는 그것을 계층 아래에서 못
+ * 박는다: 한쪽을 통째로 초기화해도 다른 쪽은 그대로여야 한다. */
+static void test_forgetting_one_remote_leaves_the_other_alone(void) {
+    printf("\n-- 리모컨 둘: 한 대를 잊어도 다른 대는 그대로 --\n");
+
+    FsdButtons a, b;
+    init_two_remotes(&a, &b);
+
+    fsd_btn_report(&a, KEY6, true, 1000);
+    fsd_btn_report(&b, KEY6, true, 1000);
+
+    /* A 를 잊는다 — 유지를 놓아 주고 상태를 지운다 (slot_drop 이 하는 것). */
+    fsd_btn_report(&a, KEY6, false, 1100);
+    init_level(&a);
+
+    /* B 의 유지는 계속되어야 하고, 제 시각에 길게가 나야 한다. */
+    CHECK(fsd_btn_tick(&b, KEY6, 1000 + FSD_BTN_LONG_MS) == FSD_BTN_EV_LONG,
+          "A 를 잊자 B 의 유지가 풀렸다");
+    CHECK(fsd_btn_longs(&b, KEY6) == 1, "B 의 길게가 셈되지 않았다");
+
+    /* 그리고 지워진 A 는 정말 비어 있어야 한다 — 슬롯은 재사용된다. */
+    CHECK(fsd_btn_shorts(&a, KEY6) == 0 && fsd_btn_longs(&a, KEY6) == 0,
+          "잊은 뒤에도 A 의 셈이 남아 있다");
+    CHECK(!fsd_btn_is_stuck(&a, KEY6), "잊은 뒤에도 A 가 끼인 채다");
+}
+
+/* 화면에 나가는 숫자는 **리모컨을 가로질러 합산**한다. 자리는 차주가 액션을
+ * 건 대상이고, 어느 리모컨이 냈는지는 상관없다 — 슬롯별로 가른 것은 서로의
+ * 타이밍을 망치지 않게 하려는 것이지 화면에 다섯 칸을 만들려는 것이 아니다.
+ *
+ * (합산 자체는 ble_central.cpp 에 있어 여기서 못 부른다. 여기서 재는 것은 그
+ * 합이 성립하려면 필요한 것 — 두 인스턴스가 **각자 따로** 센다는 것이다.) */
+static void test_each_remote_counts_on_its_own(void) {
+    printf("\n-- 리모컨 둘: 각자 따로 센다 --\n");
+
+    FsdButtons a, b;
+    init_two_remotes(&a, &b);
+
+    FsdBtnEvent rel = FSD_BTN_EV_NONE;
+    press(&a, 1000, 100, NULL, &rel);
+    press(&a, 2000, 100, NULL, &rel);
+    press(&b, 3000, 100, NULL, &rel);
+
+    CHECK(fsd_btn_shorts(&a, 0) == 2, "A 가 2 를 세지 않았다: %u", fsd_btn_shorts(&a, 0));
+    CHECK(fsd_btn_shorts(&b, 0) == 1, "B 가 1 을 세지 않았다: %u", fsd_btn_shorts(&b, 0));
+    CHECK(fsd_btn_shorts(&a, 0) + fsd_btn_shorts(&b, 0) == 3,
+          "합이 3 이 아니다 — 화면이 보는 숫자가 그것이다");
+}
+
+/* 설정은 리모컨마다 따로 걸린다. ble_central.cpp 는 액션 마스크를 모든 슬롯에
+ * 뿌리므로 실제로는 같은 값이 되지만, **그것이 뿌려서 같아지는 것이지 하나를
+ * 나눠 쓰는 것이 아니라는 것**을 여기서 못 박는다. 하나를 나눠 쓰면 한 대에
+ * 2회를 켜면 다른 대의 1회까지 느려진다. */
+static void test_settings_are_per_remote(void) {
+    printf("\n-- 리모컨 둘: 설정도 따로 --\n");
+
+    FsdButtons a, b;
+    init_two_remotes(&a, &b);
+
+    fsd_btn_set_double(&a, 0, true);
+    CHECK(fsd_btn_double_enabled(&a, 0), "A 에 2회가 안 켜졌다");
+    CHECK(!fsd_btn_double_enabled(&b, 0), "A 의 2회 설정이 B 에도 걸렸다");
+
+    /* 그래서 B 의 짧게는 여전히 즉시다 — 2회를 안 켰으니 기다릴 이유가 없다. */
+    FsdBtnEvent rel = FSD_BTN_EV_NONE;
+    press(&b, 1000, 100, NULL, &rel);
+    CHECK(rel == FSD_BTN_EV_SHORT, "B 의 짧게가 A 의 설정 때문에 늦어졌다");
+
+    fsd_btn_set_double_window(&a, 0, 450);
+    CHECK(fsd_btn_double_window(&a, 0) == 450, "A 의 창이 안 바뀌었다");
+    CHECK(fsd_btn_double_window(&b, 0) != 450,
+          "A 의 창이 B 에도 걸렸다 (B=%u)", fsd_btn_double_window(&b, 0));
+}
+
 int main(void) {
     printf("test_button\n");
     test_short_and_long();
@@ -694,6 +828,10 @@ int main(void) {
     test_double_window_clamp_leaves_room_before_long();
     test_pending_releases_exactly_at_the_window();
     test_turning_double_off_drops_a_waiting_tap();
+    test_two_remotes_do_not_swallow_each_other();
+    test_forgetting_one_remote_leaves_the_other_alone();
+    test_each_remote_counts_on_its_own();
+    test_settings_are_per_remote();
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }
