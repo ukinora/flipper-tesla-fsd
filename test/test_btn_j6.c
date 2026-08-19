@@ -701,6 +701,32 @@ static void test_each_axis_is_range_checked(void) {
           "y 범위 초과로 시작한 접촉이 뗌에서 발화했다");
 }
 
+
+/* 두 축이 **똑같이** 움직였을 때 어느 쪽으로 가는가.
+ *
+ * 🔴 잡힌 벡터 중에 `|dx| == |dy|` 인 것이 하나도 없어서, 헤더가 적어 둔
+ * 세로 우선 규칙이 한 번도 안 재졌다. 규칙 자체는 아무래도 좋다 — **정해져
+ * 있어야** 한다는 것이 요점이다. 안 그러면 대각선 쓸기가 회차마다 1번이 됐다
+ * 3번이 됐다 하고, 그 흔들림은 사람이 손을 삐뚤게 놀린 탓으로만 보인다. */
+static void test_a_perfect_diagonal_is_vertical(void) {
+    printf("대각선은 세로로 간다 (정해져 있어야 한다)\n");
+
+    FsdJ6 s;
+    FsdJ6Out o;
+
+    /* 오른쪽-아래로 정확히 같은 거리 */
+    fsd_j6_init(&s);
+    feed_pair(&s, (uint16_t)(300u + SWIPE_JUST_OVER), (uint16_t)(500u + SWIPE_JUST_OVER), &o);
+    CHECK(o.btn == FSD_J6_B1 && o.edge == FSD_J6_EDGE_PULSE,
+          "오른쪽-아래 대각선이 세로(1번)로 안 갔다: btn=%d", (int)o.btn);
+
+    /* 왼쪽-위로 정확히 같은 거리 */
+    fsd_j6_init(&s);
+    feed_pair(&s, (uint16_t)(300u - SWIPE_JUST_OVER), (uint16_t)(500u - SWIPE_JUST_OVER), &o);
+    CHECK(o.btn == FSD_J6_B2 && o.edge == FSD_J6_EDGE_PULSE,
+          "왼쪽-위 대각선이 세로(2번)로 안 갔다: btn=%d", (int)o.btn);
+}
+
 int main(void) {
     printf("=== J6 리모컨 디코더 ===\n\n");
     test_swipes();
@@ -727,6 +753,7 @@ int main(void) {
     test_a_lone_late_release_is_stale();
     test_lengths_above_five_are_ignored_too();
     test_each_axis_is_range_checked();
+    test_a_perfect_diagonal_is_vertical();
     test_fits_the_button_table();
     test_every_button_has_a_one_word_name();
     test_names_are_distinct();

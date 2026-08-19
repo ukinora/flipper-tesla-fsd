@@ -73,8 +73,14 @@
 #define BLE_CENTRAL_SCAN_SECS 5
 #endif
 
-/** How many remotes can be bound at once. Slot index IS the logical button
- *  index, so this and FSD_BTN_MAX are the same number.
+/** How many remotes can be bound at once — a RADIO budget, nothing else.
+ *
+ *  🔴 THIS USED TO SAY "slot index IS the logical button index, so this and
+ *  FSD_BTN_MAX are the same number". That stopped being true when the J6 put
+ *  ten logical buttons on ONE link, and a comment asserting a retired invariant
+ *  is worse than none: someone reconciling the two would raise this to 10, and
+ *  10 + the phone exceeds the prebuilt controller — which boot-loops the board
+ *  (PR #57). The static_asserts below are what actually holds them apart.
  *
  *  🔴 FIVE IS MEASURED, NOT CHOSEN. The Arduino core ships a controller built
  *  for six simultaneous links (CONFIG_BT_CTRL_BLE_MAX_ACT=6) and the phone

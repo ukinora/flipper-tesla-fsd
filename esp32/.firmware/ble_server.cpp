@@ -236,6 +236,25 @@ static void ble_pack_camstat(uint8_t *out, uint32_t now_ms) {
 
     FsdSupVerdict v = fsd_supervised_drive_why(&s, now_ms);
 
+    /* 🔴 SAY IT OUT LOUD WHEN IT MOVES. This verdict is the answer to "why will
+     * the camera path not arm", and until now it only ever left the board as a
+     * number inside CamStat — readable on the phone, invisible on the console.
+     * In the car there is no PC, and during a capture the phone is busy being a
+     * capture client.
+     *
+     * fsd_sup_verdict_str() existed for exactly this and had no caller anywhere,
+     * tests included (red team, 2026-08-19) — the repository's oldest pattern.
+     *
+     * On CHANGE only: this packer runs once a second and an unconditional line
+     * would bury everything else on the console. */
+    {
+        static FsdSupVerdict s_said = (FsdSupVerdict)0xFF;
+        if (v != s_said) {
+            s_said = v;
+            Serial.printf("[SUP] %s\n", fsd_sup_verdict_str(v));
+        }
+    }
+
     // Wait 0 because a status field is never worth blocking for: a missed
     // borrow reports "no database" for one notify and the next one is 1 s away.
     //
@@ -897,8 +916,25 @@ class CommandCB : public NimBLECharacteristicCallbacks {
             // that flag, so the camera path is shut regardless of what op_mode
             // still says. The floor is recomputed at the next boot anyway.
             if ((cur == OpMode_Autonomous || cur == OpMode_ListenOnly) && cur != floor) {
-                g_mode_req         = (uint8_t)floor;
-                g_mode_req_pending = true;
+                /* 🔴 DO NOT CLOBBER A PARKED REQUEST. There is one slot, and
+                 * SET_MODE guards it — this did not, so a SET_MODE(Active) that
+                 * loop() had not drained yet was silently replaced by the floor.
+                 * The phone then received a SET_MODE result reporting a mode it
+                 * never asked for (red team, 2026-08-19).
+                 *
+                 * The command is NOT refused wholesale: autonomy_enabled is
+                 * already set above, and turning autonomy OFF is the safe
+                 * direction — blocking that would be the wrong trade. Only the
+                 * floor adjustment is dropped, which the comment above already
+                 * establishes as safe: fsd_autonomy_allows() gates on the flag,
+                 * and the floor is recomputed at the next boot. */
+                if (g_mode_req_pending) {
+                    Serial.println("[BLE] a mode request is still parked - "
+                                   "the autonomy floor is left for the next boot");
+                } else {
+                    g_mode_req         = (uint8_t)floor;
+                    g_mode_req_pending = true;
+                }
             }
             // Persist from loop(), not here. This file's contract is that
             // nothing blocks the BLE host task, and an NVS commit is a flash
