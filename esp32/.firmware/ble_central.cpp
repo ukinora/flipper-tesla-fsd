@@ -99,14 +99,19 @@ typedef struct {
 } CentralSlot;
 static CentralSlot g_slot[BLE_CENTRAL_MAX_BUTTONS];
 
-static FsdButtons g_btns;
-
-/* The double-press choice lives in NVS, not in the session.
+/* Press classification is PER REMOTE, for the same reason the gesture state is.
  *
- * It is part of what a button MEANS — the same class of decision as which
- * remote is bound — and a mapping that evaporates on every reboot is a mapping
- * nobody can rely on. Stored as one mask so adding a button costs no new key. */
-static uint16_t g_double_mask = 0;
+ * 🔴 IT WAS ONE SHARED STRUCT and that broke the moment a second remote existed
+ * (red team, 2026-08-19). 6번 is a LEVEL button, so its press and release are
+ * two separate reports with a hold in between — and one shared FsdButtons meant
+ * remote B's 6번 press was discarded as a repeated down while remote A held it,
+ * and A's release ended B's hold with A's timing. slot_drop() was worse: it
+ * released 6번 with no dependence on the slot, so FORGETTING slot 0 let go of a
+ * hold in progress on slot 1.
+ *
+ * 360 bytes each, five slots, 1.8 KB. The blackbox ring lives in PSRAM, so this
+ * is not the RAM that competes with the one-shot capture. */
+static FsdButtons g_btns[BLE_CENTRAL_MAX_BUTTONS];
 
 /* Which rows are switched on. See ble_central.h for the row encoding. */
 static uint32_t g_action_mask = 0;
@@ -241,6 +246,7 @@ static void on_notify(NimBLERemoteCharacteristic* chr, uint8_t* data, size_t len
  */
 static int subscribe_all(NimBLEClient* c) {
     int n = 0;
+    int failed = 0;
     for(auto* svc : c->getServices(true)) {
         for(auto* chr : svc->getCharacteristics(true)) {
             if(!chr->canNotify() && !chr->canIndicate()) continue;
@@ -249,9 +255,29 @@ static int subscribe_all(NimBLEClient* c) {
                 Serial.printf("[BTN] subscribed %s / %s\n",
                               svc->getUUID().toString().c_str(),
                               chr->getUUID().toString().c_str());
+            } else {
+                failed++;
+                Serial.printf("[BTN] subscribe REFUSED %s / %s\n",
+                              svc->getUUID().toString().c_str(),
+                              chr->getUUID().toString().c_str());
             }
         }
     }
+
+    /* 🔴 A REFUSED SUBSCRIPTION USED TO BE INVISIBLE. Only successes were
+     * logged, and try_connect() warns only when the count is zero — so a remote
+     * that got half its characteristics connected, reported a healthy-looking
+     * number, and then never notified a press. Its `decoded` stayed at 0 and
+     * the app drew it as "connected but broken" with nothing to explain why.
+     *
+     * The way it happens is the CCCD table filling up: this device alone takes
+     * seven, so five remotes want thirty-five of the forty in platformio.ini
+     * and there is not much room left over. That is the fourth-remote failure
+     * the platformio comment warns about, and this is the line that names it. */
+    if(failed)
+        Serial.printf("[BTN] %d subscription(s) refused - the CCCD table "
+                      "(CONFIG_BT_NIMBLE_MAX_CCCDS) is probably full; this "
+                      "remote will not report every press\n", failed);
     return n;
 }
 
@@ -314,41 +340,53 @@ static void slots_save(void) {
     g_prefs.end();
 }
 
-void ble_central_init(void) {
-    fsd_btn_init(&g_btns);
-    memset(g_slot, 0, sizeof(g_slot));
-    for(uint8_t i = 0; i < BLE_CENTRAL_MAX_BUTTONS; i++) fsd_j6_init(&g_j6[i]);
+/* Give one slot's buttons their settings from scratch.
+ *
+ * Shared by init and slot_drop so a REUSED slot cannot come back configured
+ * differently from its neighbours — the kind above all, because registering a
+ * non-level button as LEVEL wedges it permanently: a hold it never ends becomes
+ * LONG at 0.6 s and STUCK at 10 s, and STUCK clears only on a release.
+ *
+ * Order is load-bearing. fsd_btn_set_kind() clears a button's in-progress
+ * state, so the kinds go on before the double-press choices, not after. */
+static void slot_buttons_reset(uint8_t i) {
+    fsd_btn_init(&g_btns[i]);
 
     /* 🔴 EVENT is the default and stays the default for eight of the nine.
-     * Only 6번 reports its release, and registering any of the others as LEVEL
-     * wedges it permanently: a hold it never ends becomes LONG at 0.6 s and
-     * STUCK at 10 s, and STUCK clears only on a release. Asking the table which
-     * ones are level — rather than listing them here — keeps that decision next
-     * to the measurement that justifies it. */
+     * Only 6번 reports its release. Asking the table which ones are level —
+     * rather than listing them here — keeps that decision next to the
+     * measurement that justifies it. */
     for(uint8_t b = 0; b < FSD_J6_COUNT; b++) {
-        if(fsd_j6_is_level((FsdJ6Btn)b)) fsd_btn_set_kind(&g_btns, b, FSD_BTN_KIND_LEVEL);
+        if(fsd_j6_is_level((FsdJ6Btn)b)) fsd_btn_set_kind(&g_btns[i], b, FSD_BTN_KIND_LEVEL);
         /* The window comes from the GESTURE, not from a setting. A swipe takes
          * a third of a second to finish, so a flat window makes its double
          * press fail one time in six — and a failed double fires the SINGLE
          * action twice. Costs nothing while double-press is off. */
-        fsd_btn_set_double_window(&g_btns, b, fsd_j6_double_window_ms((FsdJ6Btn)b));
+        fsd_btn_set_double_window(&g_btns[i], b, fsd_j6_double_window_ms((FsdJ6Btn)b));
     }
 
-    /* Restore the double-press choices. 🔴 AFTER the kinds are set, not before:
-     * fsd_btn_set_kind() clears a button's in-progress state, and doing it the
-     * other way round would be one more place where the order is load-bearing
-     * and nothing says so. (It happens not to clear want_double — that is a
-     * setting, not state — but relying on that is how the next edit breaks it.) */
+    /* The action mask is the truth; the timing is derived from it, never
+     * stored twice. */
+    for(uint8_t b = 0; b < FSD_BTN_MAX; b++) {
+        const uint8_t row = (uint8_t)(b * FSD_BTN_EVENTS + 1u);
+        fsd_btn_set_double(&g_btns[i], b, row < 32u && ((g_action_mask >> row) & 1uL));
+    }
+}
+
+void ble_central_init(void) {
+    memset(g_slot, 0, sizeof(g_slot));
+
+    /* 🔴 THE MASK IS LOADED FIRST because slot_buttons_reset() derives the
+     * double-press timing from it. Loading it after would give every slot the
+     * settings of an empty mask, and the next reset — a forget — would silently
+     * give that one slot different behaviour from its neighbours. */
     g_prefs.begin("btn", true);
     g_action_mask = g_prefs.getUInt("act", 0);
     g_prefs.end();
-    /* Rebuild the double-press state from the rows. The mask is the truth;
-     * the timing is derived from it, never stored twice. */
-    for(uint8_t b = 0; b < FSD_BTN_MAX; b++) {
-        const uint8_t row = (uint8_t)(b * FSD_BTN_EVENTS + 1u);
-        const bool on = row < 32u && ((g_action_mask >> row) & 1uL);
-        fsd_btn_set_double(&g_btns, b, on);
-        if(on) g_double_mask = (uint16_t)(g_double_mask | (1u << b));
+
+    for(uint8_t i = 0; i < BLE_CENTRAL_MAX_BUTTONS; i++) {
+        slot_buttons_reset(i);
+        fsd_j6_init(&g_j6[i]);
     }
 
     g_prefs.begin("btn", false);
@@ -624,7 +662,12 @@ static void slot_drop(uint8_t i) {
     /* 🔴 이 자리에서 지우지 않으면 다음에 묶는 기기가 **남의 증거**로
      * 동작 중처럼 보인다. 슬롯은 재사용된다. */
     g_slot[i].decoded = 0;
-    fsd_btn_report(&g_btns, FSD_J6_B6, false, millis());
+    /* 🔴 THIS SLOT's 6번, not every slot's. It used to release the shared
+     * struct, so forgetting one remote let go of a hold another was in the
+     * middle of. Then wipe the rest: a slot is reused, and the next remote to
+     * land here must not inherit a half-finished double press. */
+    fsd_btn_report(&g_btns[i], FSD_J6_B6, false, millis());
+    slot_buttons_reset(i);
 }
 
 int ble_central_add(const char* addr_str) {
@@ -740,35 +783,30 @@ bool ble_central_decoder_verified(void) { return true; }
 uint8_t ble_central_row_events(uint8_t row) {
     const uint8_t btn = (uint8_t)(row / FSD_BTN_EVENTS);
     if(btn >= FSD_BTN_MAX) return 0;
-    uint16_t n;
-    switch(row % FSD_BTN_EVENTS) {
-    case 0: n = fsd_btn_shorts(&g_btns, btn); break;
-    case 1: n = fsd_btn_doubles(&g_btns, btn); break;
-    default: n = fsd_btn_longs(&g_btns, btn); break;
+    /* Summed over remotes: the row is what the owner mapped an action to, and
+     * it does not matter which one produced it. The per-remote split exists so
+     * two of them cannot corrupt each other's timing, not so the screen grows
+     * five columns. */
+    uint32_t n = 0;
+    for(uint8_t i = 0; i < BLE_CENTRAL_MAX_BUTTONS; i++) {
+        switch(row % FSD_BTN_EVENTS) {
+        case 0: n += fsd_btn_shorts(&g_btns[i], btn); break;
+        case 1: n += fsd_btn_doubles(&g_btns[i], btn); break;
+        default: n += fsd_btn_longs(&g_btns[i], btn); break;
+        }
     }
     return (n > 0xFFu) ? 0xFFu : (uint8_t)n;
 }
 
-static void double_save(void) {
-    g_prefs.begin("btn", false);
-    g_prefs.putUShort("dbl", g_double_mask);
-    g_prefs.end();
-}
-
-void ble_central_set_double(uint8_t btn, bool on) {
-    if(btn >= FSD_BTN_MAX || btn >= 16u) return;
-    const uint16_t bit = (uint16_t)(1u << btn);
-    const uint16_t want = on ? (uint16_t)(g_double_mask | bit)
-                             : (uint16_t)(g_double_mask & (uint16_t)~bit);
-    fsd_btn_set_double(&g_btns, btn, on);
-    if(want == g_double_mask) return; // nothing to persist
-    g_double_mask = want;
-    double_save();
-    Serial.printf("[BTN] %s double-press %s\n", fsd_j6_name((FsdJ6Btn)btn),
-                  on ? "on" : "off");
-}
-
-uint16_t ble_central_double_mask(void) { return g_double_mask; }
+/* 🔴 ble_central_set_double() / _double_mask() / the "dbl" NVS key USED TO LIVE
+ * HERE and had no caller anywhere in the firmware (red team, 2026-08-19).
+ *
+ * The live path is ble_central_set_action(), which turns the DOUBLE row on and
+ * calls fsd_btn_set_double() itself. Keeping a second store meant two truths
+ * about the same thing, and the header already warns that a drifting second
+ * truth is invisible from the screen — you cannot see which one the module is
+ * actually using. The old "dbl" key is simply left unread.
+ */
 
 static void action_save(void) {
     g_prefs.begin("btn", false);
@@ -776,8 +814,28 @@ static void action_save(void) {
     g_prefs.end();
 }
 
+/* 🔴 THE MASK IS 32 BITS AND THE ROWS MUST FIT IN IT.
+ *
+ * Thirty rows today. At eleven logical buttons it would be thirty-three, and
+ * the `row >= 32u` bound below would start refusing the top rows with nothing
+ * in the log — the app would offer a mapping the module quietly ignores. Make
+ * it a compile error instead. */
+static_assert(FSD_BTN_MAX * FSD_BTN_EVENTS <= 32,
+              "the action mask is 32 bits; FSD_BTN_MAX * FSD_BTN_EVENTS no longer fits");
+
 void ble_central_set_action(uint8_t row, bool on) {
     if(row >= FSD_BTN_MAX * FSD_BTN_EVENTS || row >= 32u) return;
+
+    /* 🔴 Rows 0-2 belong to FSD_J6_NONE, which is the decoder's "I could not
+     * name this" sentinel — no gesture can ever produce it. Accepting a mapping
+     * there burned three of the thirty-two mask bits, left three counters
+     * permanently at 00, and printed "[BTN] none short enabled" as if something
+     * had been armed. Refuse it: the module should not agree to fire a button
+     * that does not exist. */
+    if((FsdJ6Btn)(row / FSD_BTN_EVENTS) == FSD_J6_NONE) {
+        Serial.printf("[BTN] row %u belongs to no button - ignored\n", (unsigned)row);
+        return;
+    }
     const uint32_t bit = 1uL << row;
     const uint32_t want = on ? (g_action_mask | bit) : (g_action_mask & ~bit);
     if(want == g_action_mask) return;
@@ -789,7 +847,9 @@ void ble_central_set_action(uint8_t row, bool on) {
      * Applying it here is what keeps the mask the ONE truth: a caller cannot
      * set the row and forget the timing, because there is nothing else to set. */
     const uint8_t btn = (uint8_t)(row / FSD_BTN_EVENTS);
-    if((row % FSD_BTN_EVENTS) == 1u) fsd_btn_set_double(&g_btns, btn, on);
+    if((row % FSD_BTN_EVENTS) == 1u)
+        for(uint8_t i = 0; i < BLE_CENTRAL_MAX_BUTTONS; i++)
+            fsd_btn_set_double(&g_btns[i], btn, on);
 
     Serial.printf("[BTN] %s %s %s\n", fsd_j6_name((FsdJ6Btn)btn),
                   (row % FSD_BTN_EVENTS) == 0u ? "short"
@@ -803,7 +863,8 @@ uint32_t ble_central_action_mask(void) { return g_action_mask; }
  * same thing; with the J6 that would count one button in nine. */
 static uint16_t sum_over_buttons(uint16_t (*f)(const FsdButtons*, uint8_t)) {
     uint32_t n = 0;
-    for(uint8_t b = 0; b < FSD_BTN_MAX; b++) n += f(&g_btns, b);
+    for(uint8_t i = 0; i < BLE_CENTRAL_MAX_BUTTONS; i++)
+        for(uint8_t b = 0; b < FSD_BTN_MAX; b++) n += f(&g_btns[i], b);
     return (n > 0xFFFFu) ? 0xFFFFu : (uint16_t)n;
 }
 uint16_t ble_central_short_presses(void)  { return sum_over_buttons(fsd_btn_shorts); }
@@ -886,9 +947,9 @@ void ble_central_tick(uint32_t now_ms) {
              * which was meant. A guess there double-counts a gesture. */
             FsdBtnEvent e = FSD_BTN_EV_NONE;
             switch(g.edge) {
-            case FSD_J6_EDGE_PULSE: e = fsd_btn_pulse(&g_btns, b, now_ms); break;
-            case FSD_J6_EDGE_DOWN:  e = fsd_btn_report(&g_btns, b, true, now_ms); break;
-            case FSD_J6_EDGE_UP:    e = fsd_btn_report(&g_btns, b, false, now_ms); break;
+            case FSD_J6_EDGE_PULSE: e = fsd_btn_pulse(&g_btns[i], b, now_ms); break;
+            case FSD_J6_EDGE_DOWN:  e = fsd_btn_report(&g_btns[i], b, true, now_ms); break;
+            case FSD_J6_EDGE_UP:    e = fsd_btn_report(&g_btns[i], b, false, now_ms); break;
             case FSD_J6_EDGE_NONE:  break; // unreachable; keeps the switch total
             }
 
@@ -898,7 +959,7 @@ void ble_central_tick(uint32_t now_ms) {
             if(e != FSD_BTN_EV_NONE)
                 Serial.printf("[BTN] slot%u %s -> %s (%ums)\n", (unsigned)i,
                               fsd_j6_name(g.btn), fsd_btn_event_str(e),
-                              (unsigned)fsd_btn_last_hold_ms(&g_btns, b));
+                              (unsigned)fsd_btn_last_hold_ms(&g_btns[i], b));
         }
     }
 
@@ -908,11 +969,12 @@ void ble_central_tick(uint32_t now_ms) {
      * directions — too low and the top buttons never produce a LONG, too high
      * and it reads past the array — which is why the two counts are asserted
      * against each other in fsd_btn_j6.h rather than kept in step by hand. */
+    for(uint8_t i = 0; i < BLE_CENTRAL_MAX_BUTTONS; i++)
     for(uint8_t b = 0; b < FSD_BTN_MAX; b++) {
-        const FsdBtnEvent e = fsd_btn_tick(&g_btns, b, now_ms);
+        const FsdBtnEvent e = fsd_btn_tick(&g_btns[i], b, now_ms);
         if(e != FSD_BTN_EV_NONE)
-            Serial.printf("[BTN] %s -> %s\n", fsd_j6_name((FsdJ6Btn)b),
-                          fsd_btn_event_str(e));
+            Serial.printf("[BTN] slot%u %s -> %s\n", (unsigned)i,
+                          fsd_j6_name((FsdJ6Btn)b), fsd_btn_event_str(e));
     }
 
     /* A press is CLASSIFIED and COUNTED here. Nothing acts on it: the only
