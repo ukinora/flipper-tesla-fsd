@@ -11,6 +11,21 @@
 #include "config.h"
 #include "../../fsd_logic/fsd_btn_j6.h"      // FSD_J6_COUNT — the logical button count
 #include "../../fsd_logic/fsd_capability.h"  // fsd_capability_eval
+#include "../../fsd_logic/fsd_cap_json.h"    // the renderers + their size guard
+
+/* The pure renderer and this file must agree about the limit and the shapes, or
+ * the host size guard measures a document the board does not build.
+ *
+ * These live in the .cpp rather than in capability.h on purpose: they name
+ * BLE_CENTRAL_MAX_BUTTONS and FSD_BTN_EVENTS, and a static_assert whose macros
+ * are not in scope does not fail — the #ifdef around it evaporates and the
+ * guard silently stops guarding. Here every include above is unconditional. */
+static_assert(CAP_ATTR_MAX == FSD_CAP_JSON_ATTR_MAX,
+              "the renderer and the board disagree about the ATT limit");
+static_assert(BLE_CENTRAL_MAX_BUTTONS <= FSD_CAP_JSON_MAX_BOUND,
+              "a slot the buttons document cannot carry is a slot the app cannot show");
+static_assert(FSD_J6_COUNT * FSD_BTN_EVENTS == FSD_CAP_JSON_ROWS,
+              "the row count moved; the btn hex string would no longer cover every row");
 
 // Capability-relevant ids, in a fixed slot order. Kept local so the counting
 // table and the seen-set construction can't drift.
@@ -107,11 +122,30 @@ static const char* hint_str(FSDCapBusHint h) {
     }
 }
 
-String capability_status_json() {
-    uint8_t st = g_cap_state;
+/* ── the two read-only documents ─────────────────────────────────────────────
+ *
+ * 🔴 THE FORMATTING MOVED OUT, to fsd_logic/fsd_cap_json.c, and the reason is
+ * that this document overflowed the 512-byte ATT limit three times and every
+ * one of those was found on hardware. It could not be found anywhere else: the
+ * builder needed an Arduino String, so nothing on a desk could ask it how large
+ * it gets. Now a host test builds the largest document each renderer can ever
+ * produce and asserts it fits, and these functions only gather values.
+ *
+ * 🔴 THE BUTTONS LEFT THE CAPABILITY DOCUMENT for the same reason the scan list
+ * did. Five bound remotes are five 17-character addresses plus their state —
+ * about four hundred bytes, most of the budget — and an attribute NimBLE
+ * refuses holds NOTHING, so an overflow caused by the buttons also erased the
+ * bus verdicts the other screens read. They are different questions asked by
+ * different screens anyway.
+ */
+static void fill_status(FsdCapJsonStatus* out) {
+    memset(out, 0, sizeof(*out));
+
     uint32_t now = millis();
-    uint32_t ms_left = (st == CAP_STATE_RUNNING && g_cap_deadline_ms > now)
-                           ? (g_cap_deadline_ms - now) : 0;
+    out->state     = g_cap_state;
+    out->ms_left   = (g_cap_state == CAP_STATE_RUNNING && g_cap_deadline_ms > now)
+                         ? (g_cap_deadline_ms - now) : 0u;
+    out->window_ms = CAP_WINDOW_MS;
 
     TeslaHWVersion hw = TeslaHW_Unknown;
     if (g_state && g_state_mux) {
@@ -119,18 +153,10 @@ String capability_status_json() {
         hw = g_state->hw_version;
         portEXIT_CRITICAL(g_state_mux);
     }
+    out->hw = (uint8_t)hw;
 
-    String j;
-    j.reserve(CAP_ATTR_MAX + 64);
-    j  = "{";
-    j += "\"state\":";   j += (int)st;       j += ',';
-    j += "\"ms_left\":"; j += ms_left;       j += ',';
-    j += "\"window_ms\":"; j += CAP_WINDOW_MS; j += ',';
-    j += "\"hw\":";      j += (int)hw;       j += ',';
-    j += "\"buses\":[";
-
-    bool first = true;
-    for (uint8_t b = 0; b < CAN_BUS_COUNT; b++) {
+    uint8_t n = 0;
+    for (uint8_t b = 0; b < CAN_BUS_COUNT && n < FSD_CAP_JSON_MAX_BUSES; b++) {
         uint32_t total = bus_total(b);
         // Always report can0; report a secondary bus only when it carried frames
         // (single-CAN boards never receive on can1).
@@ -139,25 +165,22 @@ String capability_status_json() {
         FSDCapSeen seen = seen_for_bus(b);
         FSDCapReport r = fsd_capability_eval(seen, hw);
 
-        if (!first) j += ',';
-        first = false;
-        j += "{\"bus\":\""; j += can_bus_name((CanBusId)b); j += "\",";
-        j += "\"frames\":"; j += total; j += ',';
+        FsdCapJsonBus* d = &out->bus[n++];
+        snprintf(d->name, sizeof(d->name), "%s", can_bus_name((CanBusId)b));
+        d->frames = total;
+
         /* ── the seen-id set, as a BITMASK ───────────────────────────────────
          *
          * 🔴 THIS USED TO BE ELEVEN NAMED BOOLEANS and that is what broke the
-         * whole document. `{"epas":false,"das_hw4":false,...}` is ~190 bytes
-         * PER BUS, so two buses spent 400 of the 512 an ATT attribute may hold
-         * (2026-08-18). NimBLE rejected the oversized value outright and the
-         * phone read an empty document — for every screen, not just this one.
-         *
-         * A set of booleans is a bitmask; writing it as prose was the mistake.
-         * 190 bytes becomes about 6.
+         * whole document the first time. `{"epas":false,"das_hw4":false,...}` is
+         * ~190 bytes PER BUS, so two buses spent 400 of the 512 an ATT attribute
+         * may hold (2026-08-18). A set of booleans is a bitmask; writing it as
+         * prose was the mistake.
          *
          * ⚠️ THE BIT ORDER IS A CONTRACT. wire/Capability.kt decodes it back
          * into the same named fields, so inserting a bit in the middle silently
-         * renames every flag above it. Append only, and the app's CapIdsTest
-         * pins this exact mapping. */
+         * renames every flag above it. Append only; CapabilityTest pins this
+         * exact mapping. */
         uint32_t ids = 0;
         if (seen.epas)        ids |= CAP_ID_BIT_EPAS;
         if (seen.das_hw4)     ids |= CAP_ID_BIT_DAS_HW4;
@@ -170,90 +193,84 @@ String capability_status_json() {
         if (seen.body_window) ids |= CAP_ID_BIT_BODY_WINDOW;
         if (seen.body_lights) ids |= CAP_ID_BIT_BODY_LIGHTS;
         if (seen.scroll)      ids |= CAP_ID_BIT_SCROLL;
-        j += "\"ids\":"; j += (unsigned long)ids; j += ',';
-        j += "\"nag_killer\":";     j += (int)r.nag_killer;     j += ',';
-        j += "\"ap_first\":";       j += (int)r.ap_first;       j += ',';
-        j += "\"fsd_activation\":"; j += (int)r.fsd_activation; j += ',';
-        j += "\"soft_engage\":";    j += (int)r.soft_engage;    j += ',';
-        j += "\"body_control\":";   j += (int)r.body_control;   j += ',';
-        j += "\"scroll_profile\":"; j += (int)r.scroll_profile; j += ',';
-        j += "\"hw_unconfirmed\":"; j += r.hw_unconfirmed ? "true" : "false"; j += ',';
-        j += "\"hint\":\"";         j += hint_str(r.bus_hint);  j += "\"}";
-    }
-    j += "],";
+        d->ids = ids;
 
-    /* Bluetooth buttons.
-     *
-     * 🔴 This document is where scan results reach the phone. A separate
-     * characteristic would have been tidier, but this one already answers
-     * "what does the module see" and the app already re-reads it on demand —
-     * and the alternative was the app having no way at all, which is what it
-     * had. The scan itself is a command (BLE_CMD_BTN_SCAN); this is the answer.
-     *
-     * 🔴 `verified` WAS HARDCODED false here, from the months before a button
-     * had been bought — and it stayed false after the J6 decoder was measured
-     * and shipped, so the app told the owner a working remote did not work.
-     * It comes from the firmware now, and cannot freeze again.
-     *
-     * `verified` answers "does this build have a real decoder"; it says nothing
-     * about the device in a given slot. `decoded` does that — presses from THAT
-     * remote that we could name. The app needs both: without the count, a
-     * remote we do not understand connects and looks fine. */
-    j += "\"buttons\":{";
-    j += "\"connected\":"; j += ble_central_any_connected() ? "true" : "false"; j += ',';
-    j += "\"verified\":"; j += ble_central_decoder_verified() ? "true" : "false"; j += ',';
-    j += "\"bound\":[";
-    for (uint8_t i = 0; i < BLE_CENTRAL_MAX_BUTTONS; i++) {
+        /* The six verdicts, the HW caveat and the bus hint ride in one packed
+         * word — see FSD_CAP_V_*_SHIFT. Spelling them out cost ~160 bytes per
+         * bus for what is fifteen bits. */
+        d->nag_killer     = (uint8_t)r.nag_killer;
+        d->ap_first       = (uint8_t)r.ap_first;
+        d->fsd_activation = (uint8_t)r.fsd_activation;
+        d->soft_engage    = (uint8_t)r.soft_engage;
+        d->body_control   = (uint8_t)r.body_control;
+        d->scroll_profile = (uint8_t)r.scroll_profile;
+        d->hw_unconfirmed = r.hw_unconfirmed;
+        d->hint           = (uint8_t)r.bus_hint;
+    }
+    out->bus_count = n;
+}
+
+String capability_status_json() {
+    FsdCapJsonStatus s;
+    fill_status(&s);
+
+    char buf[CAP_ATTR_MAX + 1u];
+    const size_t n = fsd_cap_json_status(buf, sizeof(buf), &s);
+
+    /* Cannot happen — the host test proves the worst case fits — but say so
+     * rather than handing back an empty document in silence if it ever does. */
+    if (n == 0u) {
+        Serial.println("[CAP] status document did not fit; see test_cap_json");
+        return String("");
+    }
+    return String(buf);
+}
+
+/* Which remotes are bound, and what they have pressed.
+ *
+ * 🔴 `verified` WAS HARDCODED false here, from the months before a button had
+ * been bought — and it stayed false after the J6 decoder was measured and
+ * shipped, so the app told the owner a working remote did not work. It comes
+ * from the firmware now, and cannot freeze again.
+ *
+ * `verified` answers "does this build have a real decoder"; it says nothing
+ * about the device in a given slot. `d` (decoded) does that — presses from THAT
+ * remote that we could name. The app needs both: without the count, a remote we
+ * do not understand connects and looks fine.
+ *
+ * The per-row counts are what let a person find which row is the key under
+ * their thumb: press it, watch a number move. Without them the screen can only
+ * say "something arrived", which names nothing. */
+String capability_buttons_json() {
+    FsdCapJsonButtons t;
+    memset(&t, 0, sizeof(t));
+
+    t.connected = ble_central_any_connected();
+    t.verified  = ble_central_decoder_verified();
+    t.slots     = (uint8_t)BLE_CENTRAL_MAX_BUTTONS;
+
+    uint8_t n = 0;
+    for (uint8_t i = 0; i < BLE_CENTRAL_MAX_BUTTONS && n < FSD_CAP_JSON_MAX_BOUND; i++) {
         const char* a = ble_central_slot_addr(i);
         if (!a || !a[0]) continue;
-        if (j[j.length() - 1] != '[') j += ',';
-        j += "{\"slot\":";      j += (int)i; j += ',';
-        j += "\"addr\":\"";    j += a;      j += "\",";
-        j += "\"connected\":";  j += ble_central_slot_connected(i) ? "true" : "false"; j += ',';
-        j += "\"decoded\":";    j += (int)ble_central_slot_decoded(i);
-        j += '}';
+        FsdCapJsonBound* e = &t.bound[n++];
+        e->slot = i;
+        snprintf(e->addr, sizeof(e->addr), "%s", a);
+        e->connected = ble_central_slot_connected(i);
+        e->decoded   = (uint8_t)ble_central_slot_decoded(i);
     }
-    j += "],";
-    j += "\"slots\":"; j += (int)BLE_CENTRAL_MAX_BUTTONS; j += ',';
+    t.bound_count = n;
 
-    /* Per LOGICAL button: how many gestures it has produced, and which ones are
-     * watching for doubles. Compact on purpose — the app knows the order from
-     * fsd_btn_j6.h, and spelling nine of anything out as named objects is
-     * exactly what pushed this document past the ATT limit once already.
-     *
-     * The counts are what let a person find which row is the key under their
-     * thumb: press it, watch a number move. Without them the screen can only
-     * say "something arrived", which names nothing. */
-    /* 🔴 HEX STRING, NOT AN ARRAY, and the reason is size. Thirty rows written
-     * as decimal numbers grow with the counts — a document that fits today
-     * stops fitting after a hundred presses, and NimBLE answers an oversized
-     * value by storing NOTHING. Two hex characters per row is 60 bytes no
-     * matter what the counts are, so the document cannot outgrow the ATT limit
-     * by being used. */
-    j += "\"btn\":\"";
-    for (uint8_t r = 0; r < FSD_J6_COUNT * FSD_BTN_EVENTS; r++) {
-        const uint8_t n = ble_central_row_events(r);
-        static const char kHex[] = "0123456789abcdef";
-        j += kHex[(n >> 4) & 0xFu];
-        j += kHex[n & 0xFu];
+    for (uint8_t r = 0; r < FSD_CAP_JSON_ROWS; r++) t.rows[r] = ble_central_row_events(r);
+    t.act = ble_central_action_mask();
+
+    char buf[CAP_ATTR_MAX + 1u];
+    const size_t len = fsd_cap_json_buttons(buf, sizeof(buf), &t);
+    if (len == 0u) {
+        Serial.println("[CAP] buttons document did not fit; see test_cap_json");
+        return String("");
     }
-    j += "\",";
-    /* 🔴 LAST FIELD, so no trailing comma. The scan list used to follow it, and
-     * removing that left `"act":N,}}` — not JSON at all. The phone read 455
-     * perfectly good bytes and threw them away, which without the parse log
-     * would have looked exactly like the module answering nothing. */
-    j += "\"act\":"; j += (unsigned long)ble_central_action_mask();
-
-    j += "}}";
-
-    /* Last line of defence. An empty characteristic is the worst possible
-     * answer — indistinguishable from "not read yet" — so say it out loud
-     * rather than letting NimBLE refuse the value in silence. */
-    if (j.length() > CAP_ATTR_MAX) {
-        Serial.printf("[CAP] %u bytes exceeds the %u-byte ATT limit\n",
-                      (unsigned)j.length(), (unsigned)CAP_ATTR_MAX);
-    }
-    return j;
+    return String(buf);
 }
 
 /* ── the scan list, in its own document ──────────────────────────────────────
