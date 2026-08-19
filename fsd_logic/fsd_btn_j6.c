@@ -87,17 +87,52 @@ static FsdJ6Out decode_touch(FsdJ6* s, const uint8_t* b, uint32_t now_ms) {
     if(x > FSD_J6_COORD_MAX || y > FSD_J6_COORD_MAX) return none();
 
     if(st == 0x03u) {
-        if(s->down) {
+        bool lost_release = false;
+
+        if(s->down && s->level) {
+            /* 🔴 A HELD LEVEL NEVER TIMES OUT, so it cannot be cleared the way
+             * a swipe is — and that is what wedged the decoder.
+             *
+             * If 6번's release notification is lost, `down` and `level` stay
+             * set forever. The next button's press was then swallowed
+             * (gesture_expired is false while level is set) and ITS release
+             * came out as 6번's release — a button nobody touched fired, and
+             * the one the owner did press vanished. ble_central.cpp already
+             * counts dropped reports, so this is not hypothetical.
+             *
+             * A single-touch digitiser cannot hold two contacts. So a press at
+             * a DIFFERENT point proves the held one ended, whatever happened to
+             * its release. Report that release now and start the new gesture in
+             * the same breath.
+             *
+             * The SAME point is the same contact — a lost release and a
+             * repeated report are indistinguishable, and both mean "6번 is
+             * still down". Do not break the hold; just keep it fresh. */
+            if(x == FSD_J6_B6_X && y == FSD_J6_B6_Y) {
+                s->down_ms = now_ms;
+                return none();
+            }
+            lost_release = true;
+        }
+        else if(s->down) {
             /* Mid-gesture. Either it is the same swipe still moving — nothing
              * to say — or the release was lost and this is a new gesture
-             * starting on top of a corpse. */
+             * starting on top of a corpse. Coordinates cannot decide it here:
+             * a swipe in progress reports a MOVING point, which is exactly what
+             * a new gesture looks like. Only time can, hence the timeout. */
             if(!gesture_expired(s, now_ms)) return none();
         }
+
         s->down = true;
         s->x0 = x;
         s->y0 = y;
         s->down_ms = now_ms;
         s->level = (x == FSD_J6_B6_X && y == FSD_J6_B6_Y);
+
+        /* The new contact is armed, so the lost release can be reported without
+         * losing anything: this point is not the level point (that path
+         * returned above), so there is no DOWN edge competing for this call. */
+        if(lost_release) return made(FSD_J6_B6, FSD_J6_EDGE_UP);
 
         /* 🔴 The level button is announced HERE, not on release. Waiting for
          * the release would collapse a five-second hold into one instant and

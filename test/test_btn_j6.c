@@ -433,6 +433,67 @@ static void test_swipes_get_a_wider_double_window(void) {
               "%s 의 창이 길게를 삼킨다", fsd_j6_name((FsdJ6Btn)b));
 }
 
+
+/* ── 뗌을 잃었을 때 ──────────────────────────────────────────────────────────
+ *
+ * 🔴 이것이 가정이 아니다. `ble_central.cpp` 는 24칸 링이 차면 리포트를 버리고
+ * 그 수를 센다 — 알림이 유실된다는 것을 코드가 이미 알고 있다. 끊김은 슬롯
+ * 정리가 다루지만, **살아 있는 링크에서 한 줄이 사라지는 것**은 아무도 안 봤다.
+ *
+ * 6번은 유일한 레벨 버튼이라 뗌이 올 때까지 눌린 채로 남는다. 그 뗌을 잃으면
+ * 상태가 걸리고, 걸린 상태에서 다음 버튼을 누르면 **그 입력이 삼켜지고 그
+ * 뗌이 6번의 뗌으로 발화한다** — 사장님이 누르지 않은 버튼이 동작한다.
+ */
+
+static void test_lost_level_release_does_not_swallow_the_next_button(void) {
+    FsdJ6 s;
+    fsd_j6_init(&s);
+
+    const FsdJ6Out down = fsd_j6_feed(&s, B6_PRESS, ROW, 1000);
+    CHECK(down.btn == FSD_J6_B6 && down.edge == FSD_J6_EDGE_DOWN, "6번 누름이 안 났다");
+
+    /* 뗌 리포트가 유실됐다 — B6_RELEASE 를 주지 않는다. */
+
+    /* 그 다음 7번 탭. 눌림이 삼켜지면 안 되고, 뗌이 7번으로 나와야 한다. */
+    const FsdJ6Out p = fsd_j6_feed(&s, B7_PRESS, ROW, 30000);
+    const FsdJ6Out r = fsd_j6_feed(&s, B7_RELEASE, ROW, 30100);
+
+    /* 누름 순간에 6번이 놓인 것으로 정리된다 — 다른 자리를 눌렀다는 것은 앞의
+     * 접촉이 끝났다는 뜻이기 때문이다(단일 접촉 기기다). */
+    CHECK(p.btn == FSD_J6_B6 && p.edge == FSD_J6_EDGE_UP,
+          "6번이 정리되지 않았다: btn=%d edge=%d", (int)p.btn, (int)p.edge);
+    CHECK(r.btn == FSD_J6_B7 && r.edge == FSD_J6_EDGE_PULSE,
+          "7번이 7번으로 안 났다: btn=%d edge=%d", (int)r.btn, (int)r.edge);
+}
+
+/* 같은 자리가 다시 눌린 것은 **같은 접촉**이다. 뗌을 잃었든 기기가 되풀이했든
+ * 물리적 사실은 "6번이 눌려 있다" 로 같으므로, 유지를 끊지 않는다. */
+static void test_the_same_point_again_is_the_same_hold(void) {
+    FsdJ6 s;
+    fsd_j6_init(&s);
+
+    fsd_j6_feed(&s, B6_PRESS, ROW, 1000);
+    const FsdJ6Out again = fsd_j6_feed(&s, B6_PRESS, ROW, 4000);
+    CHECK(again.edge == FSD_J6_EDGE_NONE,
+          "같은 자리 재누름이 사건을 냈다: btn=%d edge=%d", (int)again.btn, (int)again.edge);
+
+    const FsdJ6Out up = fsd_j6_feed(&s, B6_RELEASE, ROW, 6000);
+    CHECK(up.btn == FSD_J6_B6 && up.edge == FSD_J6_EDGE_UP, "유지가 끊겼다");
+}
+
+/* 🔴 뗌을 잃은 뒤의 **쓸기**도 자기 버튼으로 나야 한다. 탭만 고치면 쓸기가
+ * 여전히 6번의 뗌으로 둔갑한다 — 실제로 측정된 모양이 그것이었다. */
+static void test_lost_level_release_then_a_swipe(void) {
+    FsdJ6 s;
+    fsd_j6_init(&s);
+    fsd_j6_feed(&s, B6_PRESS, ROW, 1000);
+
+    int fired = 0;
+    const FsdJ6Out o = feed_burst(&s, B3_RIGHT, sizeof(B3_RIGHT) / ROW, 30000, &fired);
+    CHECK(o.btn == FSD_J6_B3 && o.edge == FSD_J6_EDGE_PULSE,
+          "쓸기가 3번으로 안 났다: btn=%d edge=%d", (int)o.btn, (int)o.edge);
+}
+
 int main(void) {
     printf("=== J6 리모컨 디코더 ===\n\n");
     test_swipes();
@@ -451,6 +512,9 @@ int main(void) {
     test_stale_gesture_swallows_the_level_button();
     test_gesture_in_progress_is_not_dropped();
     test_level_hold_is_not_stale();
+    test_lost_level_release_does_not_swallow_the_next_button();
+    test_the_same_point_again_is_the_same_hold();
+    test_lost_level_release_then_a_swipe();
     test_fits_the_button_table();
     test_every_button_has_a_one_word_name();
     test_names_are_distinct();
