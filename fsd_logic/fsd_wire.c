@@ -26,6 +26,11 @@ static uint8_t sat8(uint32_t v) {
     return (v > 0xFFu) ? 0xFFu : (uint8_t)v;
 }
 
+bool fsd_speed_limit_fresh(bool seen, uint32_t last_ms, uint32_t now_ms) {
+    if(!seen) return false;
+    return (uint32_t)(now_ms - last_ms) < FSD_SPEED_LIMIT_MAX_AGE_MS;
+}
+
 void fsd_wire_pack_state(const FsdWireState* in, uint8_t* out) {
     if(!in || !out) return;
 
@@ -79,8 +84,12 @@ void fsd_wire_pack_state(const FsdWireState* in, uint8_t* out) {
     /* Byte 20, added in version 3. Two 2-bit lamp-phase fields, laid out the
      * same way the CAN frame lays them out so a reader can compare the two
      * side by side without a table. */
+    /* bits[3:0] lamp phase, bits[5:4] where the speed limit came from.
+     * Source is zeroed when the limit itself is not being sent -- a source
+     * without a value would be a label on an empty box. */
     out[20] = (uint8_t)((in->blinker_left_blinking & 0x03u) |
-                        ((in->blinker_right_blinking & 0x03u) << 2));
+                        ((in->blinker_right_blinking & 0x03u) << 2) |
+                        ((in->speed_limit_seen ? (in->speed_limit_source & 0x03u) : 0u) << 4));
 }
 
 void fsd_wire_pack_camstat(const FsdWireCamStat* in, uint8_t* out) {

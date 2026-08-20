@@ -1639,13 +1639,13 @@ static void process_frame(CanBusId bus, const CanFrame &frame) {
     FSDState das_state = state_snapshot();
     if (!das_cfg && hw_uses_hw3_das_status(das_state.hw_version) && frame.id == CAN_ID_DAS_STATUS_HW3) {
         state_enter();
-        fsd_handle_das_status_hw3(&g_state, &frame);
+        fsd_handle_das_status_hw3(&g_state, &frame, millis());
         state_exit();
         return;
     }
     if (!das_cfg && hw_uses_hw4_das_status(das_state.hw_version) && frame.id == CAN_ID_DAS_STATUS_HW4) {
         state_enter();
-        fsd_handle_das_status_hw4(&g_state, &frame);
+        fsd_handle_das_status_hw4(&g_state, &frame, millis());
         uint8_t ap = g_state.das_ap_state;         // as read by the std parser
         uint8_t ho = g_state.das_hands_on_state;
         state_exit();

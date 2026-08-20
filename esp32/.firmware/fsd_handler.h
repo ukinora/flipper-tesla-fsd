@@ -199,10 +199,10 @@ void fsd_build_precondition_frame(CanFrame *frame);
 bool fsd_handle_tlssc_restore(FSDState *state, CanFrame *frame);
 
 /** Parse DAS_status from Legacy/HW3 0x399 — updates AP/speed/hands-on state. */
-void fsd_handle_das_status_hw3(FSDState *state, const CanFrame *frame);
+void fsd_handle_das_status_hw3(FSDState *state, const CanFrame *frame, uint32_t now_ms);
 
 /** Parse DAS_status from HW4 0x39B — updates AP/speed/hands-on state. */
-void fsd_handle_das_status_hw4(FSDState *state, const CanFrame *frame);
+void fsd_handle_das_status_hw4(FSDState *state, const CanFrame *frame, uint32_t now_ms);
 
 /** HW4 hands-on fallback: read only DAS_handsOnState (byte5[5:2]) from 0x399,
  *  for HW4 trims that never broadcast 0x39B. Call only when

@@ -214,8 +214,13 @@ static void ble_pack_state(uint8_t *out, uint16_t rx_fps) {
     w.speed_kph        = s.vehicle_speed_kph;
     w.soc_percent      = s.soc_percent;
     w.gear             = s.di_gear;
-    w.speed_limit_seen = s.speed_limit_seen;
+    /* 🔴 낡은 제한속도는 아예 안 보낸다. 세 프레임이 같은 칸을 덮어쓰는데
+     * 아무도 지우지 않아서, 30분 전 값이 지금 도로의 값처럼 앉아 있었다.
+     * 판정은 fsd_wire.c 의 순수 함수이고 호스트 테스트가 지킨다. */
+    w.speed_limit_seen = fsd_speed_limit_fresh(s.speed_limit_seen,
+                                               s.speed_limit_last_ms, millis());
     w.speed_limit_kph  = s.speed_limit_kph;
+    w.speed_limit_source = (uint8_t)s.speed_limit_source;
     w.rx_fps           = rx_fps;
     w.crc_err_count    = s.crc_err_count;
     w.uptime_s         = millis() / 1000u;

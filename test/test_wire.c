@@ -105,6 +105,71 @@ static void test_state_layout(void) {
  * with themselves -- one big-endian with range [0|3], the other little-endian
  * with range [0|15] -- so "left leaks into right" is a live failure mode, not
  * a theoretical one. Values above 3 are masked rather than trusted. */
+/* Where the speed limit came from rides in the same byte as the lamp phase.
+ * Two things must hold and they pull in opposite directions: the source must
+ * survive next to the lamp bits, and it must NOT be sent when there is no
+ * limit to label. A source on an empty box reads as "we know where this
+ * nothing came from". */
+static void test_state_speed_limit_source(void) {
+    printf("''' + NL + '''-- State: speed limit source --''' + NL + '''");
+
+    struct {
+        bool seen;
+        uint8_t src, lampL, lampR, want20;
+        uint16_t want_limit;
+    } cases[] = {
+        /* seen, src, lampL, lampR -> byte20, limit */
+        {true, 1u, 0u, 0u, 0x10u, 60u},   /* map    */
+        {true, 2u, 0u, 0u, 0x20u, 60u},   /* vision */
+        {true, 3u, 0u, 0u, 0x30u, 60u},   /* acc    */
+        {true, 0u, 0u, 0u, 0x00u, 60u},   /* none   */
+        /* Not seen: the limit goes out as 0 AND the source goes with it. */
+        {false, 2u, 0u, 0u, 0x00u, 0u},
+        /* Lamp bits and source share the byte without touching each other. */
+        {true, 2u, 2u, 1u, 0x26u, 60u},
+        {true, 3u, 3u, 3u, 0x3Fu, 60u},
+        /* Out of range must not spill into the lamp bits below it. */
+        {true, 0xFFu, 0u, 0u, 0x30u, 60u},
+    };
+    for(size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        FsdWireState w = {0};
+        w.speed_limit_seen = cases[i].seen;
+        w.speed_limit_kph = 60.0f;
+        w.speed_limit_source = cases[i].src;
+        w.blinker_left_blinking = cases[i].lampL;
+        w.blinker_right_blinking = cases[i].lampR;
+        uint8_t b[FSD_WIRE_STATE_LEN];
+        fsd_wire_pack_state(&w, b);
+        CHECK(b[20] == cases[i].want20, "case %u: byte20 0x%02X, got 0x%02X",
+              (unsigned)i, cases[i].want20, b[20]);
+        CHECK(le16(&b[10]) == cases[i].want_limit, "case %u: limit %u, got %u",
+              (unsigned)i, cases[i].want_limit, le16(&b[10]));
+    }
+}
+
+/* The limit expires. Written because it never did: speed_limit_seen only ever
+ * went true and speed_limit_last_ms was stamped and never read, so a value
+ * picked up half an hour ago sat on the dashboard as the road you are on. */
+static void test_speed_limit_freshness(void) {
+    printf("''' + NL + '''-- State: a speed limit stops being believable --''' + NL + '''");
+
+    CHECK(!fsd_speed_limit_fresh(false, 1000u, 1000u), "never seen is never fresh");
+    CHECK(fsd_speed_limit_fresh(true, 1000u, 1000u), "same instant is fresh");
+    CHECK(fsd_speed_limit_fresh(true, 1000u, 1000u + FSD_SPEED_LIMIT_MAX_AGE_MS - 1u),
+          "just inside the window is fresh");
+    CHECK(!fsd_speed_limit_fresh(true, 1000u, 1000u + FSD_SPEED_LIMIT_MAX_AGE_MS),
+          "exactly at the window is stale");
+    CHECK(!fsd_speed_limit_fresh(true, 1000u, 1000u + 1800000u), "half an hour is stale");
+
+    /* millis() wraps every ~49 days. Unsigned subtraction crosses the wrap
+     * correctly, so a limit seen just before it stays fresh just after. */
+    CHECK(fsd_speed_limit_fresh(true, 0xFFFFF000u, 0xFFFFF000u + 500u),
+          "across the millis wrap, a recent limit stays fresh");
+    /* And a clock that appears to run backwards reads as stale, not as
+     * infinitely fresh. Stale is the safe direction. */
+    CHECK(!fsd_speed_limit_fresh(true, 5000u, 1000u), "backwards clock is stale");
+}
+
 static void test_state_blink_nibble(void) {
     printf("\n-- State: the two lamp fields do not bleed into each other --\n");
 
@@ -388,6 +453,13 @@ static void emit_fixture(FILE* f) {
         /* The same signal on the dark half of the cycle. The pair is what
          * proves the app can tell "blinking but dark" from "off" -- one bit
          * could not have. */
+        /* A limit with its provenance attached. Its own vector because the
+         * number alone was never readable -- three frames write it. */
+        {"limit_from_vision",
+         {.rx_seen = true, .op_mode = 0, .hw_version = 2, .gear = 4,
+          .speed_kph = 55.0f, .soc_percent = 70.0f, .speed_limit_seen = true,
+          .speed_limit_kph = 80.0f, .speed_limit_source = 2u,
+          .rx_fps = 1000, .uptime_s = 300}},
         {"both_lamps_dark",
          {.rx_seen = true, .blinker_left = true, .blinker_right = true,
           .blinker_left_blinking = 1u, .blinker_right_blinking = 1u,
@@ -407,13 +479,14 @@ static void emit_fixture(FILE* f) {
                 "\"hw\": %u, \"speed_profile\": %u, \"ap_state\": %u, "
                 "\"speed_kph_x10\": %u, \"soc\": %u, \"gear\": %u, "
                 "\"speed_limit\": %u, \"rx_fps\": %u, \"crc_err\": %u, "
-                "\"uptime_s\": %u, \"blink_l\": %u, \"blink_r\": %u } }%s\n",
+                "\"uptime_s\": %u, \"blink_l\": %u, \"blink_r\": %u, \"limit_src\": %u } }%s\n",
                 (unsigned)b[0], (unsigned)b[1], (unsigned)w->op_mode,
                 (unsigned)w->hw_version, (unsigned)b[4], (unsigned)w->ap_state,
                 (unsigned)le16(&b[6]), (unsigned)b[8], (unsigned)w->gear,
                 (unsigned)le16(&b[10]), (unsigned)w->rx_fps,
                 (unsigned)le16(&b[14]), (unsigned)le32(&b[16]),
                 (unsigned)(b[20] & 0x03u), (unsigned)((b[20] >> 2) & 0x03u),
+                (unsigned)((b[20] >> 4) & 0x03u),
                 (i + 1 < ns) ? "," : "");
     }
     fprintf(f, "  ],\n  \"camstat\": [\n");
@@ -519,6 +592,8 @@ int main(void) {
     test_state_layout();
     test_state_structural_zeros();
     test_state_blink_nibble();
+    test_state_speed_limit_source();
+    test_speed_limit_freshness();
     test_state_clamps();
     test_camstat_layout();
     test_camstat_packing_cannot_bleed();
