@@ -39,13 +39,13 @@ extern "C" {
 
 /* Both payloads are 20 bytes because that is the most a default 23-byte ATT MTU
  * carries. Not a coincidence and not adjustable without a version bump. */
-#define FSD_WIRE_STATE_LEN 20u
+#define FSD_WIRE_STATE_LEN 21u
 #define FSD_WIRE_CAMSTAT_LEN 20u
 #define FSD_WIRE_RESULT_LEN 4u
 
 /* Wire versions. Each payload carries its own — sharing one meant that bumping
  * State also announced a CamStat change that had not happened. */
-#define FSD_WIRE_STATE_VERSION 2u
+#define FSD_WIRE_STATE_VERSION 3u
 #define FSD_WIRE_CAMSTAT_VERSION 2u
 
 /* FSD v14 Lite exposes four speed profiles. */
@@ -60,8 +60,14 @@ extern "C" {
 typedef struct {
     bool rx_seen; // any CAN frame ever received
     bool ota_in_progress;
-    bool blinker_left;
+    bool blinker_left;  // *BlinkerOn  — closer to the stalk than the lamp
     bool blinker_right;
+
+    /* Byte 20. 2 bits each: 0 off, 1 blinking-dark, 2 blinking-lit.
+     * The LAMP. See FSDState for why both pairs are carried and why nothing
+     * may depend on these being non-zero. */
+    uint8_t blinker_left_blinking;
+    uint8_t blinker_right_blinking;
     bool brake_applied;
 
     /* bit 4. Whether the capture recorder is actually recording -- the RING is

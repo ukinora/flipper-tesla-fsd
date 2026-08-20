@@ -252,6 +252,24 @@ typedef struct FSDState {
     // --- UI_warning (0x311) — dashboard indicators ---
     bool ui_left_blinker;
     bool ui_right_blinker;
+
+    /* 0x311 leftBlinkerBlinking / rightBlinkerBlinking — 2 bits each.
+     *   0 = off
+     *   1 = blinking, lamp currently OFF
+     *   2 = blinking, lamp currently ON
+     *
+     * These are the LAMP, where ui_*_blinker above is closer to the STALK: the
+     * party DBC notes that *BlinkerOn "only describes stalk position if half
+     * pressed". Hazards do not move the stalk, so they may not appear there at
+     * all — which is exactly why these two are read.
+     *
+     * UNVERIFIED on this car. Bit positions come from the community DBC and the
+     * right-hand definition there contradicts itself (26|2@1+ with range
+     * [0|15], and the opposite endianness from its left-hand twin). 0x311 is in
+     * the capture filter; the visit settles it. Until then nothing may FAIL
+     * when these read zero — see turnSignalLit() on the app side. */
+    uint8_t ui_left_blinker_blinking;
+    uint8_t ui_right_blinker_blinking;
     bool ui_any_door_open;
     bool ui_buckle_status;       // seatbelt
     bool ui_high_beam;

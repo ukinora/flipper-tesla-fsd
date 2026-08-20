@@ -34,11 +34,11 @@ void fsd_wire_pack_state(const FsdWireState* in, uint8_t* out) {
     if(in->ota_in_progress) flags |= (1u << 1);
     if(in->blinker_left) flags |= (1u << 2);
     if(in->blinker_right) flags |= (1u << 3);
-    /* Bits 4 and 5 (blind spot L/R) are deliberately never set:
-     * DAS_sideCollisionWarning is not extracted on the ESP32 path, and its bit
-     * position is confirmed only for 0x39B (HW4). Left zero rather than guessed.
-     * Bit 7 (profile change in progress) belongs to the SET_PROFILE closed
-     * loop, which emits nothing while both of its gates are shut. */
+    /* Bit 5 (blind spot) is deliberately never set: DAS_sideCollisionWarning
+     * is not extracted on the ESP32 path, and its bit position is confirmed
+     * only for 0x39B (HW4). Left zero rather than guessed. Bit 7 (profile
+     * change in progress) belongs to the SET_PROFILE closed loop, which emits
+     * nothing while both of its gates are shut. */
     if(in->blackbox_recording) flags |= (1u << 4);
     if(in->brake_applied) flags |= (1u << 6);
 
@@ -76,6 +76,11 @@ void fsd_wire_pack_state(const FsdWireState* in, uint8_t* out) {
     put_le16(&out[12], in->rx_fps);
     put_le16(&out[14], sat16(in->crc_err_count));
     put_le32(&out[16], in->uptime_s);
+    /* Byte 20, added in version 3. Two 2-bit lamp-phase fields, laid out the
+     * same way the CAN frame lays them out so a reader can compare the two
+     * side by side without a table. */
+    out[20] = (uint8_t)((in->blinker_left_blinking & 0x03u) |
+                        ((in->blinker_right_blinking & 0x03u) << 2));
 }
 
 void fsd_wire_pack_camstat(const FsdWireCamStat* in, uint8_t* out) {

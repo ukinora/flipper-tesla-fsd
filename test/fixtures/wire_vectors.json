@@ -1,17 +1,19 @@
 {
   "_generated_by": "test/test_wire.c — do not hand-edit",
-  "state_version": 2,
+  "state_version": 3,
   "camstat_version": 2,
-  "state_len": 20,
+  "state_len": 21,
   "camstat_len": 20,
   "state": [
-    { "name": "zeroed", "hex": "0200000000000000000000000000000000000000", "fields": { "ver": 2, "flags": 0, "op_mode": 0, "hw": 0, "speed_profile": 0, "ap_state": 0, "speed_kph_x10": 0, "soc": 0, "gear": 0, "speed_limit": 0, "rx_fps": 0, "crc_err": 0, "uptime_s": 0 } },
-    { "name": "driving_hw3", "hex": "0249010202067a024e043c00b004030080510100", "fields": { "ver": 2, "flags": 73, "op_mode": 1, "hw": 2, "speed_profile": 2, "ap_state": 6, "speed_kph_x10": 634, "soc": 78, "gear": 4, "speed_limit": 60, "rx_fps": 1200, "crc_err": 3, "uptime_s": 86400 } },
-    { "name": "parked_listen_only", "hex": "020100020000000038010000d40300002a000000", "fields": { "ver": 2, "flags": 1, "op_mode": 0, "hw": 2, "speed_profile": 0, "ap_state": 0, "speed_kph_x10": 0, "soc": 56, "gear": 1, "speed_limit": 0, "rx_fps": 980, "crc_err": 0, "uptime_s": 42 } },
-    { "name": "autonomous_no_phone", "hex": "02010302010078031f0464007e040000100e0000", "fields": { "ver": 2, "flags": 1, "op_mode": 3, "hw": 2, "speed_profile": 1, "ap_state": 0, "speed_kph_x10": 888, "soc": 31, "gear": 4, "speed_limit": 100, "rx_fps": 1150, "crc_err": 0, "uptime_s": 3600 } },
-    { "name": "clamped_extremes", "hex": "020000000300ffff640000000000ffffffffffff", "fields": { "ver": 2, "flags": 0, "op_mode": 0, "hw": 0, "speed_profile": 3, "ap_state": 0, "speed_kph_x10": 65535, "soc": 100, "gear": 0, "speed_limit": 0, "rx_fps": 0, "crc_err": 65535, "uptime_s": 4294967295 } },
-    { "name": "ota_running", "hex": "020300020000000000010000e803000000000000", "fields": { "ver": 2, "flags": 3, "op_mode": 0, "hw": 2, "speed_profile": 0, "ap_state": 0, "speed_kph_x10": 0, "soc": 0, "gear": 1, "speed_limit": 0, "rx_fps": 1000, "crc_err": 0, "uptime_s": 0 } },
-    { "name": "recording", "hex": "021100020000000000010000e80300003c000000", "fields": { "ver": 2, "flags": 17, "op_mode": 0, "hw": 2, "speed_profile": 0, "ap_state": 0, "speed_kph_x10": 0, "soc": 0, "gear": 1, "speed_limit": 0, "rx_fps": 1000, "crc_err": 0, "uptime_s": 60 } }
+    { "name": "zeroed", "hex": "030000000000000000000000000000000000000000", "fields": { "ver": 3, "flags": 0, "op_mode": 0, "hw": 0, "speed_profile": 0, "ap_state": 0, "speed_kph_x10": 0, "soc": 0, "gear": 0, "speed_limit": 0, "rx_fps": 0, "crc_err": 0, "uptime_s": 0, "blink_l": 0, "blink_r": 0 } },
+    { "name": "driving_hw3", "hex": "0349010202067a024e043c00b00403008051010000", "fields": { "ver": 3, "flags": 73, "op_mode": 1, "hw": 2, "speed_profile": 2, "ap_state": 6, "speed_kph_x10": 634, "soc": 78, "gear": 4, "speed_limit": 60, "rx_fps": 1200, "crc_err": 3, "uptime_s": 86400, "blink_l": 0, "blink_r": 0 } },
+    { "name": "parked_listen_only", "hex": "030100020000000038010000d40300002a00000000", "fields": { "ver": 3, "flags": 1, "op_mode": 0, "hw": 2, "speed_profile": 0, "ap_state": 0, "speed_kph_x10": 0, "soc": 56, "gear": 1, "speed_limit": 0, "rx_fps": 980, "crc_err": 0, "uptime_s": 42, "blink_l": 0, "blink_r": 0 } },
+    { "name": "autonomous_no_phone", "hex": "03010302010078031f0464007e040000100e000000", "fields": { "ver": 3, "flags": 1, "op_mode": 3, "hw": 2, "speed_profile": 1, "ap_state": 0, "speed_kph_x10": 888, "soc": 31, "gear": 4, "speed_limit": 100, "rx_fps": 1150, "crc_err": 0, "uptime_s": 3600, "blink_l": 0, "blink_r": 0 } },
+    { "name": "clamped_extremes", "hex": "030000000300ffff640000000000ffffffffffff00", "fields": { "ver": 3, "flags": 0, "op_mode": 0, "hw": 0, "speed_profile": 3, "ap_state": 0, "speed_kph_x10": 65535, "soc": 100, "gear": 0, "speed_limit": 0, "rx_fps": 0, "crc_err": 65535, "uptime_s": 4294967295, "blink_l": 0, "blink_r": 0 } },
+    { "name": "ota_running", "hex": "030300020000000000010000e80300000000000000", "fields": { "ver": 3, "flags": 3, "op_mode": 0, "hw": 2, "speed_profile": 0, "ap_state": 0, "speed_kph_x10": 0, "soc": 0, "gear": 1, "speed_limit": 0, "rx_fps": 1000, "crc_err": 0, "uptime_s": 0, "blink_l": 0, "blink_r": 0 } },
+    { "name": "recording", "hex": "031100020000000000010000e80300003c00000000", "fields": { "ver": 3, "flags": 17, "op_mode": 0, "hw": 2, "speed_profile": 0, "ap_state": 0, "speed_kph_x10": 0, "soc": 0, "gear": 1, "speed_limit": 0, "rx_fps": 1000, "crc_err": 0, "uptime_s": 60, "blink_l": 0, "blink_r": 0 } },
+    { "name": "both_lamps_lit", "hex": "030d00020000000000010000e8030000780000000a", "fields": { "ver": 3, "flags": 13, "op_mode": 0, "hw": 2, "speed_profile": 0, "ap_state": 0, "speed_kph_x10": 0, "soc": 0, "gear": 1, "speed_limit": 0, "rx_fps": 1000, "crc_err": 0, "uptime_s": 120, "blink_l": 2, "blink_r": 2 } },
+    { "name": "both_lamps_dark", "hex": "030d00020000000000010000e80300007900000005", "fields": { "ver": 3, "flags": 13, "op_mode": 0, "hw": 2, "speed_profile": 0, "ap_state": 0, "speed_kph_x10": 0, "soc": 0, "gear": 1, "speed_limit": 0, "rx_fps": 1000, "crc_err": 0, "uptime_s": 121, "blink_l": 1, "blink_r": 1 } }
   ],
   "camstat": [
     { "name": "zeroed", "hex": "0200000000000000000000000000000000000000", "fields": { "ver": 2, "flags": 0, "sup_verdict": 0, "op_mode": 0, "camera_count": 0, "built_at": 0, "gps_verdict": 0, "pol_phase": 0, "pol_action": 0, "pol_target": 0, "nearest_m": 0, "gps_accuracy_raw": 0, "raw_profile": 0, "learned_count": 0, "scan_full_count": 0 } },

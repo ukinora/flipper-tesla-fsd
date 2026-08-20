@@ -60,6 +60,10 @@ static void test_state_layout(void) {
     memset(&w, 0, sizeof(w));
     w.rx_seen = true;
     w.blinker_right = true;
+    /* Lamp on the lit half of its cycle. Set here rather than in its own test
+     * so the round-trip vector carries a non-zero byte 20 -- a field that is
+     * always zero in every vector is a field nobody notices losing. */
+    w.blinker_right_blinking = 2u;
     w.brake_applied = true;
     w.blackbox_recording = true;
     w.op_mode = 1;      // Active
@@ -78,7 +82,7 @@ static void test_state_layout(void) {
     uint8_t b[FSD_WIRE_STATE_LEN];
     fsd_wire_pack_state(&w, b);
 
-    CHECK(b[0] == 2, "ver 2, got %u", b[0]);
+    CHECK(b[0] == 3, "ver 3, got %u", b[0]);
     // bit0 rx, bit3 right blinker, bit4 recording, bit6 brake = 0x59
     CHECK(b[1] == 0x59u, "flags 0x59, got 0x%02X", b[1]);
     CHECK(b[2] == 1, "op_mode");
@@ -92,6 +96,36 @@ static void test_state_layout(void) {
     CHECK(le16(&b[12]) == 1200u, "rx_fps");
     CHECK(le16(&b[14]) == 3u, "crc errors");
     CHECK(le32(&b[16]) == 86400u, "uptime");
+    /* Lamp phase, added in v3. Right blinking-lit (2), left off (0). */
+    CHECK(b[20] == 0x08u, "blink byte 0x08, got 0x%02X", b[20]);
+}
+
+/* The two 2-bit lamp fields must tile byte 20 without bleeding into each
+ * other. Written because the two halves came from DBC entries that disagree
+ * with themselves -- one big-endian with range [0|3], the other little-endian
+ * with range [0|15] -- so "left leaks into right" is a live failure mode, not
+ * a theoretical one. Values above 3 are masked rather than trusted. */
+static void test_state_blink_nibble(void) {
+    printf("\n-- State: the two lamp fields do not bleed into each other --\n");
+
+    struct {
+        uint8_t l, r, want;
+    } cases[] = {
+        {0u, 0u, 0x00u},   {1u, 0u, 0x01u},   {2u, 0u, 0x02u},
+        {0u, 1u, 0x04u},   {0u, 2u, 0x08u},   {2u, 2u, 0x0Au},
+        {1u, 2u, 0x09u},   {3u, 3u, 0x0Fu},
+        /* Out of range on either side must not spill past its own two bits. */
+        {0xFFu, 0u, 0x03u}, {0u, 0xFFu, 0x0Cu}, {0xFFu, 0xFFu, 0x0Fu},
+    };
+    for(size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        FsdWireState w = {0};
+        w.blinker_left_blinking = cases[i].l;
+        w.blinker_right_blinking = cases[i].r;
+        uint8_t b[FSD_WIRE_STATE_LEN];
+        fsd_wire_pack_state(&w, b);
+        CHECK(b[20] == cases[i].want, "l=%u r=%u -> 0x%02X, got 0x%02X",
+              cases[i].l, cases[i].r, cases[i].want, b[20]);
+    }
 }
 
 static void test_state_structural_zeros(void) {
@@ -342,6 +376,23 @@ static void emit_fixture(FILE* f) {
          * both sides of the link rather than on neither. */
         {"recording", {.rx_seen = true, .blackbox_recording = true, .op_mode = 0,
                        .hw_version = 2, .gear = 1, .rx_fps = 1000, .uptime_s = 60}},
+        /* Both lamps lit at once. What hazards would look like IF they set
+         * these bits -- which is exactly what has not been measured yet. Its
+         * own vector so the app's rendering of that case is checked against
+         * bytes the packer really produced, whatever the car turns out to do. */
+        {"both_lamps_lit",
+         {.rx_seen = true, .blinker_left = true, .blinker_right = true,
+          .blinker_left_blinking = 2u, .blinker_right_blinking = 2u,
+          .op_mode = 0, .hw_version = 2, .gear = 1, .rx_fps = 1000,
+          .uptime_s = 120}},
+        /* The same signal on the dark half of the cycle. The pair is what
+         * proves the app can tell "blinking but dark" from "off" -- one bit
+         * could not have. */
+        {"both_lamps_dark",
+         {.rx_seen = true, .blinker_left = true, .blinker_right = true,
+          .blinker_left_blinking = 1u, .blinker_right_blinking = 1u,
+          .op_mode = 0, .hw_version = 2, .gear = 1, .rx_fps = 1000,
+          .uptime_s = 121}},
     };
 
     const size_t ns = sizeof(states) / sizeof(states[0]);
@@ -356,12 +407,13 @@ static void emit_fixture(FILE* f) {
                 "\"hw\": %u, \"speed_profile\": %u, \"ap_state\": %u, "
                 "\"speed_kph_x10\": %u, \"soc\": %u, \"gear\": %u, "
                 "\"speed_limit\": %u, \"rx_fps\": %u, \"crc_err\": %u, "
-                "\"uptime_s\": %u } }%s\n",
+                "\"uptime_s\": %u, \"blink_l\": %u, \"blink_r\": %u } }%s\n",
                 (unsigned)b[0], (unsigned)b[1], (unsigned)w->op_mode,
                 (unsigned)w->hw_version, (unsigned)b[4], (unsigned)w->ap_state,
                 (unsigned)le16(&b[6]), (unsigned)b[8], (unsigned)w->gear,
                 (unsigned)le16(&b[10]), (unsigned)w->rx_fps,
                 (unsigned)le16(&b[14]), (unsigned)le32(&b[16]),
+                (unsigned)(b[20] & 0x03u), (unsigned)((b[20] >> 2) & 0x03u),
                 (i + 1 < ns) ? "," : "");
     }
     fprintf(f, "  ],\n  \"camstat\": [\n");
@@ -466,6 +518,7 @@ int main(void) {
     printf("test_wire\n");
     test_state_layout();
     test_state_structural_zeros();
+    test_state_blink_nibble();
     test_state_clamps();
     test_camstat_layout();
     test_camstat_packing_cannot_bleed();

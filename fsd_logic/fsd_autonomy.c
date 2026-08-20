@@ -143,8 +143,17 @@ void fsd_drive_observe_belt(FSDState* state, const CANFRAME* frame, uint32_t now
         state->ui_left_blinker = ((frame->buffer[2] >> 6) & 0x01u) != 0u;
         state->ui_right_blinker = ((frame->buffer[2] >> 7) & 0x01u) != 0u;
     }
-    if(frame->data_lenght > 3)
+    if(frame->data_lenght > 3) {
+        /* Byte 3 packs three things side by side, which is the strongest
+         * argument that these positions are right despite the DBC's muddled
+         * endianness notation: they tile without overlapping.
+         *   bits[1:0] leftBlinkerBlinking   (25|2, MSB at bit 25 -> byte3 bit1)
+         *   bits[3:2] rightBlinkerBlinking  (26|2, LSB at bit 26 -> byte3 bit2)
+         *   bit 4     anyDoorOpen           (28|1) */
+        state->ui_left_blinker_blinking = (uint8_t)(frame->buffer[3] & 0x03u);
+        state->ui_right_blinker_blinking = (uint8_t)((frame->buffer[3] >> 2) & 0x03u);
         state->ui_any_door_open = ((frame->buffer[3] >> 4) & 0x01u) != 0u;
+    }
     state->ui_warning_seen = true;
 }
 

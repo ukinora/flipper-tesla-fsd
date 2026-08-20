@@ -32,7 +32,7 @@
 //   1 — initial layout; byte 9 carried DI_cruiseState as a stand-in
 //   2 — byte 9 is the gear (PRND), which is what it was specified as; the
 //       stand-in existed only because this build had no gear parser
-#define BLE_PROTO_VERSION 2
+#define BLE_PROTO_VERSION 3
 
 // State notify cadence. With nobody subscribed the tick returns before the
 // serialisation — it stops rather than slowing down, which is worth saying
