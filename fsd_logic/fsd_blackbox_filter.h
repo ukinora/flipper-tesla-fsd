@@ -114,6 +114,39 @@ static const uint32_t FSD_BLACKBOX_KEY_IDS[] = {
              //   still read-only — the capture runs Listen-Only — but if an
              //   emitter is ever wired, an A-B diff on this id would show our
              //   own frames as well as TSL's. Note it before concluding.
+
+    /* ── comfort control (2026-08-20) ────────────────────────────────────────
+     *
+     * 🔴 ADDED AFTER THE PRIORITIES TURNED OUT TO BE WRITTEN DOWN WRONG.
+     *
+     * Every plan in this repository said the top feature was the speed-camera
+     * profile drop, and this set was chosen against that. The owner corrected
+     * it: the first three features are comfort control from a Bluetooth
+     * button, comfort control from the car's OWN buttons, and automation from
+     * vehicle state. The camera work is phase two.
+     *
+     * Most of what those need was already above, because the T1/T2 work chose
+     * ids by "we must not become unable to see it" rather than by "we know we
+     * need it". That judgement paid for itself here. These four were missed. */
+
+    0x273u,  // UI_vehicleControl — mirror fold, lock, wiper, horn, seat heat.
+             //   The single frame carrying most of what "comfort function"
+             //   means, and it was in config.h and in the capability prober
+             //   but NOT here.
+    0x343u,  // VCRIGHT_status — rear defrost, mirror heat, footwell light
+             //   current. More comfort actuation, and the footwell light is
+             //   interior lighting, which is feature #1 on the owner's list.
+    0x229u,  // SCCM_rightStalk — carries SCCM_parkButtonStatus, a button on
+             //   the car that the owner may want as a trigger.
+             //   ⚠️ This is the GEAR LEVER frame. Recording it is read-only and
+             //   carries no transmit risk: send_on_bus() refuses this id
+             //   unconditionally, ahead of every other gate. It is excluded as
+             //   a TRIGGER for good reasons (pressing it changes gear); that is
+             //   a separate decision from whether we may LOOK at it.
+    0x257u,  // DI_speed — road speed. "Automation from vehicle state" has to be
+             //   correlated against whether the car was moving, and 0x118 gives
+             //   gear only. Also the only proof the car actually moves, which
+             //   the GPS freeze detector already depends on.
 };
 
 #define FSD_BLACKBOX_KEY_ID_COUNT \

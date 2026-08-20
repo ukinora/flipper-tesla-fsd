@@ -2183,6 +2183,37 @@ static void test_blackbox_filter(void) {
     CHECK(fsd_blackbox_should_record(0x3E9u), "0x3E9 DAS_bodyControls (body actuation)");
     CHECK(fsd_blackbox_should_record(0x249u), "0x249 SCCM_leftStalk (wash/wipe trigger cand.)");
 
+    /* ── the comfort-control set (owner's priorities, 2026-08-20) ───────────
+     *
+     * 🔴 THE PRIORITIES WERE WRITTEN DOWN WRONG. Every plan in this repository
+     * said the top feature was the speed-camera profile drop, and the capture
+     * set was chosen against that. The owner corrected it: the first three
+     * features are comfort control from a Bluetooth button, comfort control
+     * from the car's OWN buttons, and automation from vehicle state. The
+     * camera work is phase two.
+     *
+     * Most of what that needs was already here, because the T1/T2 work chose
+     * ids by "we must not become unable to see it" rather than by "we know we
+     * need it". These four were not, and each one is a frame the corrected
+     * priorities put in the middle of the picture:
+     *
+     *   0x273  mirror fold, lock, wiper, horn, seat heat. The single frame
+     *          carrying most of what "comfort function" means. It was in
+     *          config.h and in the capability prober and NOT in this set.
+     *   0x343  rear defrost, mirror heat, footwell light current - more
+     *          comfort actuation, and the footwell light is interior lighting.
+     *   0x229  the park button on the right stalk: a car button the owner may
+     *          want as a trigger. Capturing it carries no transmit risk -
+     *          send_on_bus() refuses this id unconditionally.
+     *   0x257  road speed. Automation from vehicle state has to be correlated
+     *          against whether the car was moving, and 0x118 gives gear only.
+     *
+     * Named one by one, for the reason above the previous block. */
+    CHECK(fsd_blackbox_should_record(0x273u), "0x273 UI_vehicleControl (mirror/lock/horn/seat)");
+    CHECK(fsd_blackbox_should_record(0x343u), "0x343 VCRIGHT_status (defrost/mirror heat/footwell)");
+    CHECK(fsd_blackbox_should_record(0x229u), "0x229 right stalk incl. park button");
+    CHECK(fsd_blackbox_should_record(0x257u), "0x257 road speed (state for automation)");
+
     // Chatty non-diagnostic frames are dropped (the ~15x rate cut).
     CHECK(!fsd_blackbox_should_record(CAN_ID_BMS_HV_BUS),  "0x132 BMS dropped");
     CHECK(!fsd_blackbox_should_record(CAN_ID_ESP_WHEELSPD),"0x175 wheel speeds dropped");
