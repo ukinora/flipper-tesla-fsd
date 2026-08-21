@@ -1696,6 +1696,12 @@ static void process_frame(CanBusId bus, const CanFrame &frame) {
         }
         return;
     }
+    if (frame.id == CAN_ID_TPMS) {
+        state_enter();
+        fsd_handle_tpms(&g_state, &frame, millis());
+        state_exit();
+        return;
+    }
     if (frame.id == CAN_ID_UI_MAP_DATA) {
         state_enter();
         fsd_handle_ui_map_data(&g_state, &frame, millis());

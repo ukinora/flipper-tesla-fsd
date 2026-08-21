@@ -201,6 +201,9 @@ bool fsd_handle_tlssc_restore(FSDState *state, CanFrame *frame);
 /** Parse DAS_status from Legacy/HW3 0x399 — updates AP/speed/hands-on state. */
 void fsd_handle_das_status_hw3(FSDState *state, const CanFrame *frame, uint32_t now_ms);
 
+/** 0x219 VCSEC_TPMSData. One wheel per frame; stores by the frame's index. */
+void fsd_handle_tpms(FSDState *state, const CanFrame *frame, uint32_t now_ms);
+
 /** Parse DAS_status from HW4 0x39B — updates AP/speed/hands-on state. */
 void fsd_handle_das_status_hw4(FSDState *state, const CanFrame *frame, uint32_t now_ms);
 

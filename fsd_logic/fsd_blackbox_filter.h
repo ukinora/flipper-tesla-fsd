@@ -143,6 +143,29 @@ static const uint32_t FSD_BLACKBOX_KEY_IDS[] = {
              //   unconditionally, ahead of every other gate. It is excluded as
              //   a TRIGGER for good reasons (pressing it changes gear); that is
              //   a separate decision from whether we may LOOK at it.
+    /* ── tyre pressure (2026-08-21) ──────────────────────────────────────
+     *
+     * 0x219 VCSEC_TPMSData carries all four wheels, multiplexed by byte 0:
+     *   byte 1 pressure (x0.025 bar), byte 2 temperature, byte 3 sensor
+     *   battery, byte 4 bits[2:0] LOCATION -- the frame says which corner a
+     *   reading belongs to, so the mapping does not have to be guessed.
+     *
+     * 🔴 Added because it is the ONLY way to settle two unknowns, and both
+     * are unanswerable once the car is gone: does this frame reach OUR tap,
+     * and what do the location values 0..4 actually mean. Neither is in any
+     * document we have.
+     *
+     * ⚠️ joshwardell's DBC labels this ChassisBus -- but it labels 0x399
+     * ChassisBus too, and 0x399 comes from the AP ECU, which Tesla's own
+     * network drawing puts on Vehicle CAN. The label is not a reliable
+     * predictor for our tap. VCSEC itself IS on Vehicle CAN per that
+     * drawing, so this frame is likely reachable; "likely" is exactly what
+     * a capture is for.
+     *
+     * Rate is low (a TPMS sensor reports every few seconds), so this costs
+     * the ring almost nothing. */
+    0x219u,  // VCSEC_TPMSData — four wheels, muxed
+
     0x257u,  // DI_speed — road speed. "Automation from vehicle state" has to be
              //   correlated against whether the car was moving, and 0x118 gives
              //   gear only. Also the only proof the car actually moves, which

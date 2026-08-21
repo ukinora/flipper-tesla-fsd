@@ -68,6 +68,12 @@ static void test_state_layout(void) {
      * Set here so the round-trip vector carries a non-zero byte 21 -- a field
      * that is zero in every vector is a field nobody notices losing. */
     w.blind_spot_right = 2u;
+    /* 42, 42, 41, 43 psi in counts of 0.025 bar. Real-ish and all different,
+     * so a packer that wrote one wheel four times would fail here. */
+    w.tyre_pressure[0] = 116u;
+    w.tyre_pressure[1] = 116u;
+    w.tyre_pressure[2] = 113u;
+    w.tyre_pressure[3] = 119u;
     w.brake_applied = true;
     w.blackbox_recording = true;
     w.op_mode = 1;      // Active
@@ -86,7 +92,7 @@ static void test_state_layout(void) {
     uint8_t b[FSD_WIRE_STATE_LEN];
     fsd_wire_pack_state(&w, b);
 
-    CHECK(b[0] == 4, "ver 4, got %u", b[0]);
+    CHECK(b[0] == 5, "ver 5, got %u", b[0]);
     // bit0 rx, bit3 right blinker, bit4 recording, bit6 brake = 0x59
     CHECK(b[1] == 0x59u, "flags 0x59, got 0x%02X", b[1]);
     CHECK(b[2] == 1, "op_mode");
@@ -104,6 +110,54 @@ static void test_state_layout(void) {
     CHECK(b[20] == 0x08u, "blink byte 0x08, got 0x%02X", b[20]);
     /* Blind spot, added in v4. Right at level 2, left clear. */
     CHECK(b[21] == 0x08u, "blind spot byte 0x08, got 0x%02X", b[21]);
+    /* Tyres, added in v5. Order matters -- a display puts these in a square. */
+    CHECK(b[22] == 116u && b[23] == 116u && b[24] == 113u && b[25] == 119u,
+          "tyres %u %u %u %u", b[22], b[23], b[24], b[25]);
+}
+
+/* Each wheel lands in its own byte, in order.
+ *
+ * Worth its own test because the failure is silent and specific: a loop that
+ * writes the wrong index puts a real pressure under the wrong wheel, and four
+ * plausible numbers in a square look right whichever way they are shuffled.
+ * Nobody spots that by looking. */
+static void test_state_tyre_pressure(void) {
+    printf("''' + NL + '''-- State: four tyres, four bytes, in order --''' + NL + '''");
+
+    for(size_t w = 0; w < 4; w++) {
+        FsdWireState in = {0};
+        in.tyre_pressure[w] = (uint8_t)(100u + w);
+        uint8_t b[FSD_WIRE_STATE_LEN];
+        fsd_wire_pack_state(&in, b);
+        for(size_t i = 0; i < 4; i++) {
+            const uint8_t want = (i == w) ? (uint8_t)(100u + w) : 0u;
+            CHECK(b[22 + i] == want, "wheel %u -> byte %u = %u, got %u",
+                  (unsigned)w, (unsigned)(22 + i), want, b[22 + i]);
+        }
+        /* And it must not disturb the bytes beside it. */
+        CHECK(b[21] == 0u, "wheel %u leaked into byte 21", (unsigned)w);
+    }
+}
+
+/* A pressure expires, on a much longer clock than the speed limit.
+ *
+ * Written because "the sensor is asleep" and "the sensor has stopped" look
+ * identical from here, and the two want opposite answers. Sixty seconds is
+ * long enough for the first and short enough for the second. */
+static void test_tyre_freshness(void) {
+    printf("''' + NL + '''-- State: a tyre reading stops being believable --''' + NL + '''");
+
+    CHECK(!fsd_tyre_fresh(false, 1000u, 1000u), "never seen is never fresh");
+    CHECK(fsd_tyre_fresh(true, 1000u, 1000u), "same instant is fresh");
+    CHECK(fsd_tyre_fresh(true, 1000u, 1000u + FSD_TYRE_MAX_AGE_MS - 1u),
+          "just inside the window is fresh");
+    CHECK(!fsd_tyre_fresh(true, 1000u, 1000u + FSD_TYRE_MAX_AGE_MS),
+          "exactly at the window is stale");
+    /* A sensor that reports every few seconds must never blink out. */
+    CHECK(fsd_tyre_fresh(true, 1000u, 1000u + 10000u), "ten seconds is still fresh");
+    /* Same wrap and backwards-clock rules as the speed limit. */
+    CHECK(fsd_tyre_fresh(true, 0xFFFFF000u, 0xFFFFF000u + 500u), "across the wrap");
+    CHECK(!fsd_tyre_fresh(true, 5000u, 1000u), "backwards clock is stale");
 }
 
 /* The two 2-bit blind spot fields tile byte 21 without bleeding into each
@@ -508,6 +562,12 @@ static void emit_fixture(FILE* f) {
           .blinker_left = true, .blinker_left_blinking = 2u,
           .blind_spot_left = 2u,
           .rx_fps = 1000, .uptime_s = 400}},
+        /* Four tyres, one of them low. Its own vector because the app lays
+         * these out in a square, and a square hides a shuffle. */
+        {"tyres_one_low",
+         {.rx_seen = true, .op_mode = 0, .hw_version = 2, .gear = 1,
+          .soc_percent = 72.0f, .rx_fps = 1000, .uptime_s = 500,
+          .tyre_pressure = {116u, 116u, 96u, 117u}}},
         {"both_lamps_dark",
          {.rx_seen = true, .blinker_left = true, .blinker_right = true,
           .blinker_left_blinking = 1u, .blinker_right_blinking = 1u,
@@ -527,7 +587,7 @@ static void emit_fixture(FILE* f) {
                 "\"hw\": %u, \"speed_profile\": %u, \"ap_state\": %u, "
                 "\"speed_kph_x10\": %u, \"soc\": %u, \"gear\": %u, "
                 "\"speed_limit\": %u, \"rx_fps\": %u, \"crc_err\": %u, "
-                "\"uptime_s\": %u, \"blink_l\": %u, \"blink_r\": %u, \"limit_src\": %u, \"bs_l\": %u, \"bs_r\": %u } }%s\n",
+                "\"uptime_s\": %u, \"blink_l\": %u, \"blink_r\": %u, \"limit_src\": %u, \"bs_l\": %u, \"bs_r\": %u, \"tyre0\": %u, \"tyre1\": %u, \"tyre2\": %u, \"tyre3\": %u } }%s\n",
                 (unsigned)b[0], (unsigned)b[1], (unsigned)w->op_mode,
                 (unsigned)w->hw_version, (unsigned)b[4], (unsigned)w->ap_state,
                 (unsigned)le16(&b[6]), (unsigned)b[8], (unsigned)w->gear,
@@ -536,6 +596,7 @@ static void emit_fixture(FILE* f) {
                 (unsigned)(b[20] & 0x03u), (unsigned)((b[20] >> 2) & 0x03u),
                 (unsigned)((b[20] >> 4) & 0x03u),
                 (unsigned)(b[21] & 0x03u), (unsigned)((b[21] >> 2) & 0x03u),
+                (unsigned)b[22], (unsigned)b[23], (unsigned)b[24], (unsigned)b[25],
                 (i + 1 < ns) ? "," : "");
     }
     fprintf(f, "  ],\n  \"camstat\": [\n");
@@ -642,6 +703,8 @@ int main(void) {
     test_state_structural_zeros();
     test_state_blink_nibble();
     test_state_blind_spot();
+    test_state_tyre_pressure();
+    test_tyre_freshness();
     test_state_speed_limit_source();
     test_speed_limit_freshness();
     test_state_clamps();

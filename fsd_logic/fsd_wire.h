@@ -39,13 +39,13 @@ extern "C" {
 
 /* Both payloads are 20 bytes because that is the most a default 23-byte ATT MTU
  * carries. Not a coincidence and not adjustable without a version bump. */
-#define FSD_WIRE_STATE_LEN 22u
+#define FSD_WIRE_STATE_LEN 26u
 #define FSD_WIRE_CAMSTAT_LEN 20u
 #define FSD_WIRE_RESULT_LEN 4u
 
 /* Wire versions. Each payload carries its own — sharing one meant that bumping
  * State also announced a CamStat change that had not happened. */
-#define FSD_WIRE_STATE_VERSION 4u
+#define FSD_WIRE_STATE_VERSION 5u
 #define FSD_WIRE_CAMSTAT_VERSION 2u
 
 /* FSD v14 Lite exposes four speed profiles. */
@@ -87,6 +87,17 @@ typedef struct {
      * the warning outranks the intention. */
     uint8_t blind_spot_left;
     uint8_t blind_spot_right;
+
+    /* Bytes 22..25. Tyre pressure, raw counts of 0.025 bar, one per sensor.
+     * Zero means no reading -- zero bar is not a pressure a mounted tyre can
+     * have, so the sentinel costs nothing and needs no extra flag.
+     *
+     * 🔴 Indexed by the FRAME'S sensor index, not by corner. 0x219 carries a
+     * location field too, but nothing documents what its values mean, so
+     * which reading belongs to which wheel is unresolved until a capture
+     * compares these against the car's own screen. Four numbers laid out in
+     * a square imply corners; that implication is not yet earned. */
+    uint8_t tyre_pressure[4];
     bool brake_applied;
 
     /* bit 4. Whether the capture recorder is actually recording -- the RING is
@@ -171,6 +182,22 @@ typedef struct {
  * Unsigned subtraction handles the millis() wrap: a wrapped delta comes out
  * enormous, which reads as stale. That is the safe direction. */
 bool fsd_speed_limit_fresh(bool seen, uint32_t last_ms, uint32_t now_ms);
+
+/** How long a tyre pressure stays believable after that sensor last spoke.
+ *
+ * Much longer than the speed limit's window and for the opposite reason:
+ * pressure barely moves, and a TPMS sensor reports every few seconds at best
+ * -- on a parked car it may sleep for minutes. A short window here would
+ * blank a perfectly good reading. Sixty seconds is long enough to ride out
+ * the quiet and short enough that a sensor which has actually stopped does
+ * not keep a number on the dashboard.
+ *
+ * ⚠️ PROVISIONAL, like the speed limit's. The real reporting interval on this
+ * car has never been measured; 0x219 is in the capture filter. */
+#define FSD_TYRE_MAX_AGE_MS 60000u
+
+/** Is this wheel's last reading recent enough to send? */
+bool fsd_tyre_fresh(bool seen, uint32_t last_ms, uint32_t now_ms);
 
 /** Pack State. `out` must hold FSD_WIRE_STATE_LEN bytes and is fully written.
  *  Does every clamp and saturation itself, so a caller cannot skip one. */

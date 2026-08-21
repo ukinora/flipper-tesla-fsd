@@ -284,6 +284,14 @@ typedef struct FSDState {
      * up is worse than no warning. */
     uint8_t das_blind_spot_left;
     uint8_t das_blind_spot_right;
+
+    /* 0x219 VCSEC_TPMSData. Raw counts, 0.025 bar each; zero is not a real
+     * pressure so it doubles as "no reading yet". Indexed by the frame's own
+     * sensor index, NOT by corner -- see can_signals.h. */
+    uint8_t tpms_pressure[4];
+    uint8_t tpms_location[4];
+    uint32_t tpms_seen_ms[4];
+    bool tpms_seen;
     bool ui_any_door_open;
     bool ui_buckle_status;       // seatbelt
     bool ui_high_beam;

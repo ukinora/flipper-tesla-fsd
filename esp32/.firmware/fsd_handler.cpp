@@ -913,6 +913,19 @@ static void fsd_handle_das_status_common(FSDState *state, const CanFrame *frame,
 
 // ── DAS status — nag killer gating / AP active status ────────────────────────
 
+void fsd_handle_tpms(FSDState *state, const CanFrame *frame, uint32_t now_ms) {
+    if (frame->dlc < SIG_TPMS_MIN_DLC) return;
+    const uint8_t idx = frame->data[SIG_TPMS_INDEX_BYTE] & SIG_TPMS_INDEX_MASK;
+    /* The mask makes idx 0..3 by construction; the array is 4 wide. Said out
+     * loud because the same shape has bitten this project when the bound came
+     * from somewhere other than the index itself. */
+    state->tpms_pressure[idx] = frame->data[SIG_TPMS_PRESSURE_BYTE];
+    state->tpms_location[idx] =
+        frame->data[SIG_TPMS_LOCATION_BYTE] & SIG_TPMS_LOCATION_MASK;
+    state->tpms_seen_ms[idx] = now_ms;
+    state->tpms_seen = true;
+}
+
 void fsd_handle_das_status_hw3(FSDState *state, const CanFrame *frame, uint32_t now_ms) {
     if (frame->dlc != CAN_FRAME_MAX_DATA_LEN) return;
 

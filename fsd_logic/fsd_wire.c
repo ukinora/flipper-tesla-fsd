@@ -31,6 +31,11 @@ bool fsd_speed_limit_fresh(bool seen, uint32_t last_ms, uint32_t now_ms) {
     return (uint32_t)(now_ms - last_ms) < FSD_SPEED_LIMIT_MAX_AGE_MS;
 }
 
+bool fsd_tyre_fresh(bool seen, uint32_t last_ms, uint32_t now_ms) {
+    if(!seen) return false;
+    return (uint32_t)(now_ms - last_ms) < FSD_TYRE_MAX_AGE_MS;
+}
+
 void fsd_wire_pack_state(const FsdWireState* in, uint8_t* out) {
     if(!in || !out) return;
 
@@ -94,6 +99,10 @@ void fsd_wire_pack_state(const FsdWireState* in, uint8_t* out) {
      * the CAN frame's own byte 0 so the two can be read side by side. */
     out[21] = (uint8_t)((in->blind_spot_left & 0x03u) |
                         ((in->blind_spot_right & 0x03u) << 2));
+    /* Bytes 22..25, added in version 5. Straight copies -- the scale lives in
+     * the DBC and the conversion to psi on the phone, because a count is what
+     * a capture shows and keeping the two the same makes them comparable. */
+    for(size_t i = 0; i < 4; i++) out[22 + i] = in->tyre_pressure[i];
 }
 
 void fsd_wire_pack_camstat(const FsdWireCamStat* in, uint8_t* out) {

@@ -55,7 +55,7 @@
  * would have shown every screen blank with nothing to say why. */
 #define BLE_UUID_BUTTONS "6b1a000a-4b53-4d4f-4432-43414e000001"
 
-#define BLE_STATE_LEN  22u   // v4: +byte 21, blind spot (v3 added byte 20)
+#define BLE_STATE_LEN  26u   // v5: +bytes 22..25, tyre pressure
 #define BLE_RESULT_LEN 4u
 #define BLE_BULK_HDR   2u   // seq prefix on every bulk frame
 
@@ -182,7 +182,7 @@ static uint32_t g_bulk_busy   = 0;     // notify() refusals (radio queue full)
 static uint32_t g_bulk_stall  = 0;     // ticks that got nothing out at all
 static uint32_t g_bulk_next_ms = 0;    // pacing gate — earliest next burst
 
-// ── State serialisation (22 B, little-endian) ────────────────────────────────
+// ── State serialisation (26 B, little-endian) ────────────────────────────────
 // Layout is fixed; the app parses by offset. Bump BLE_PROTO_VERSION on change.
 // GATHERS ONLY. Every clamp, scale and byte position lives in
 // fsd_logic/fsd_wire.c, which is pure C and host-tested — this file cannot be
@@ -205,6 +205,16 @@ static void ble_pack_state(uint8_t *out, uint16_t rx_fps) {
     w.blinker_right_blinking = s.ui_right_blinker_blinking;
     w.blind_spot_left  = s.das_blind_spot_left;
     w.blind_spot_right = s.das_blind_spot_right;
+    /* 🔴 A stale pressure is worse than none. A tyre reads every few seconds
+     * while the car is awake; if a sensor goes quiet the last number would
+     * otherwise sit there looking current. Same rule the speed limit got,
+     * same pure predicate, a much longer window -- pressure genuinely does
+     * not change fast, and a sleeping sensor is normal on a parked car. */
+    for (size_t i = 0; i < 4; i++) {
+        w.tyre_pressure[i] =
+            fsd_tyre_fresh(s.tpms_seen, s.tpms_seen_ms[i], millis())
+                ? s.tpms_pressure[i] : 0u;
+    }
     w.brake_applied    = s.driver_brake_applied;
     // The ring, not the wish: blackbox_is_enabled() is false when the heap
     // guard refused, which is exactly the case the operator must not miss.
