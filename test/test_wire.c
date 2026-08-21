@@ -64,6 +64,10 @@ static void test_state_layout(void) {
      * so the round-trip vector carries a non-zero byte 20 -- a field that is
      * always zero in every vector is a field nobody notices losing. */
     w.blinker_right_blinking = 2u;
+    /* A car on the right, close enough that changing lanes is the wrong move.
+     * Set here so the round-trip vector carries a non-zero byte 21 -- a field
+     * that is zero in every vector is a field nobody notices losing. */
+    w.blind_spot_right = 2u;
     w.brake_applied = true;
     w.blackbox_recording = true;
     w.op_mode = 1;      // Active
@@ -82,7 +86,7 @@ static void test_state_layout(void) {
     uint8_t b[FSD_WIRE_STATE_LEN];
     fsd_wire_pack_state(&w, b);
 
-    CHECK(b[0] == 3, "ver 3, got %u", b[0]);
+    CHECK(b[0] == 4, "ver 4, got %u", b[0]);
     // bit0 rx, bit3 right blinker, bit4 recording, bit6 brake = 0x59
     CHECK(b[1] == 0x59u, "flags 0x59, got 0x%02X", b[1]);
     CHECK(b[2] == 1, "op_mode");
@@ -98,6 +102,41 @@ static void test_state_layout(void) {
     CHECK(le32(&b[16]) == 86400u, "uptime");
     /* Lamp phase, added in v3. Right blinking-lit (2), left off (0). */
     CHECK(b[20] == 0x08u, "blink byte 0x08, got 0x%02X", b[20]);
+    /* Blind spot, added in v4. Right at level 2, left clear. */
+    CHECK(b[21] == 0x08u, "blind spot byte 0x08, got 0x%02X", b[21]);
+}
+
+/* The two 2-bit blind spot fields tile byte 21 without bleeding into each
+ * other, and out-of-range values are masked rather than trusted.
+ *
+ * Worth its own test because this is the one field on the dashboard that
+ * OVERRIDES another: it takes the whole side bar away from the turn signal.
+ * A left value leaking into the right half would put a warning on the wrong
+ * side of the car, which is worse than no warning at all. */
+static void test_state_blind_spot(void) {
+    printf("''' + NL + '''-- State: blind spot, two bits a side --''' + NL + '''");
+
+    struct {
+        uint8_t l, r, want;
+    } cases[] = {
+        {0u, 0u, 0x00u},   {1u, 0u, 0x01u},   {2u, 0u, 0x02u},   {3u, 0u, 0x03u},
+        {0u, 1u, 0x04u},   {0u, 2u, 0x08u},   {0u, 3u, 0x0Cu},
+        {1u, 2u, 0x09u},   {2u, 1u, 0x06u},   {3u, 3u, 0x0Fu},
+        /* Out of range on either side must not spill past its own two bits. */
+        {0xFFu, 0u, 0x03u}, {0u, 0xFFu, 0x0Cu}, {0xFFu, 0xFFu, 0x0Fu},
+    };
+    for(size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        FsdWireState w = {0};
+        w.blind_spot_left = cases[i].l;
+        w.blind_spot_right = cases[i].r;
+        uint8_t b[FSD_WIRE_STATE_LEN];
+        fsd_wire_pack_state(&w, b);
+        CHECK(b[21] == cases[i].want, "l=%u r=%u -> 0x%02X, got 0x%02X",
+              cases[i].l, cases[i].r, cases[i].want, b[21]);
+        /* And it must not disturb the byte beside it. */
+        CHECK(b[20] == 0x00u, "case %u leaked into byte 20: 0x%02X",
+              (unsigned)i, b[20]);
+    }
 }
 
 /* The two 2-bit lamp fields must tile byte 20 without bleeding into each
@@ -460,6 +499,15 @@ static void emit_fixture(FILE* f) {
           .speed_kph = 55.0f, .soc_percent = 70.0f, .speed_limit_seen = true,
           .speed_limit_kph = 80.0f, .speed_limit_source = 2u,
           .rx_fps = 1000, .uptime_s = 300}},
+        /* A car on the left while the left blinker is on -- the moment the
+         * override exists for. Its own vector so the app's handling of "both
+         * at once" is checked against bytes the packer really produced. */
+        {"blind_spot_left_while_signalling",
+         {.rx_seen = true, .op_mode = 0, .hw_version = 2, .gear = 4,
+          .speed_kph = 80.0f, .soc_percent = 65.0f,
+          .blinker_left = true, .blinker_left_blinking = 2u,
+          .blind_spot_left = 2u,
+          .rx_fps = 1000, .uptime_s = 400}},
         {"both_lamps_dark",
          {.rx_seen = true, .blinker_left = true, .blinker_right = true,
           .blinker_left_blinking = 1u, .blinker_right_blinking = 1u,
@@ -479,7 +527,7 @@ static void emit_fixture(FILE* f) {
                 "\"hw\": %u, \"speed_profile\": %u, \"ap_state\": %u, "
                 "\"speed_kph_x10\": %u, \"soc\": %u, \"gear\": %u, "
                 "\"speed_limit\": %u, \"rx_fps\": %u, \"crc_err\": %u, "
-                "\"uptime_s\": %u, \"blink_l\": %u, \"blink_r\": %u, \"limit_src\": %u } }%s\n",
+                "\"uptime_s\": %u, \"blink_l\": %u, \"blink_r\": %u, \"limit_src\": %u, \"bs_l\": %u, \"bs_r\": %u } }%s\n",
                 (unsigned)b[0], (unsigned)b[1], (unsigned)w->op_mode,
                 (unsigned)w->hw_version, (unsigned)b[4], (unsigned)w->ap_state,
                 (unsigned)le16(&b[6]), (unsigned)b[8], (unsigned)w->gear,
@@ -487,6 +535,7 @@ static void emit_fixture(FILE* f) {
                 (unsigned)le16(&b[14]), (unsigned)le32(&b[16]),
                 (unsigned)(b[20] & 0x03u), (unsigned)((b[20] >> 2) & 0x03u),
                 (unsigned)((b[20] >> 4) & 0x03u),
+                (unsigned)(b[21] & 0x03u), (unsigned)((b[21] >> 2) & 0x03u),
                 (i + 1 < ns) ? "," : "");
     }
     fprintf(f, "  ],\n  \"camstat\": [\n");
@@ -592,6 +641,7 @@ int main(void) {
     test_state_layout();
     test_state_structural_zeros();
     test_state_blink_nibble();
+    test_state_blind_spot();
     test_state_speed_limit_source();
     test_speed_limit_freshness();
     test_state_clamps();

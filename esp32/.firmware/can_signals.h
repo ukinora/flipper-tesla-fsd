@@ -139,6 +139,22 @@
 // bytes 6-7: counter / checksum
 #define SIG_DAS_HW3_AP_STATE_BYTE           0
 #define SIG_DAS_HW3_AP_STATE_MASK        0x0Fu
+/* Blind spot rides in the TOP half of the same byte the AP state sits in --
+ * the mask above was throwing it away.
+ *   DAS_blindSpotRearLeft  : 4|2  -> byte 0 bits[5:4]
+ *   DAS_blindSpotRearRight : 6|2  -> byte 0 bits[7:6]
+ *   0 no warning, 1 vehicle present, 2 do not change lanes, 3 SNA
+ *
+ * Unusually for this project, BOTH community DBCs agree on the position:
+ * opendbc tesla_can.dbc (legacy 0x399) and tesla_model3_party.dbc (0x39B)
+ * carry identical start bits. Two independently maintained sources agreeing
+ * is the strongest evidence available short of a capture -- and it is the
+ * opposite of the blinker case, where the two definitions contradicted each
+ * other. Still unconfirmed on THIS car; 0x399 is in the capture filter. */
+#define SIG_DAS_BLIND_SPOT_BYTE             0
+#define SIG_DAS_BLIND_SPOT_LEFT_SHIFT       4
+#define SIG_DAS_BLIND_SPOT_RIGHT_SHIFT      6
+#define SIG_DAS_BLIND_SPOT_MASK          0x03u
 #define SIG_DAS_HW3_AP_ACTIVE_STATE         3u
 #define SIG_DAS_HW4_AP_STATE_BYTE           1
 #define SIG_DAS_HW4_AP_STATE_SHIFT          4

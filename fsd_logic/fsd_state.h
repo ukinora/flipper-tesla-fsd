@@ -270,6 +270,20 @@ typedef struct FSDState {
      * when these read zero — see turnSignalLit() on the app side. */
     uint8_t ui_left_blinker_blinking;
     uint8_t ui_right_blinker_blinking;
+
+    /* 0x399 / 0x39B DAS_blindSpotRearLeft / RearRight -- 2 bits each.
+     *   0 = no warning
+     *   1 = a vehicle is in the blind spot
+     *   2 = do not change lanes now
+     *   3 = SNA (the system cannot say)
+     *
+     * On the phone these take over the whole side bar, above the turn signal
+     * (owner's decision 2026-08-21). SNA and anything unexpected must fall
+     * back to the turn signal rather than warn: "no car there" and "we are
+     * reading the wrong bits" both look like 0, so a warning we cannot back
+     * up is worse than no warning. */
+    uint8_t das_blind_spot_left;
+    uint8_t das_blind_spot_right;
     bool ui_any_door_open;
     bool ui_buckle_status;       // seatbelt
     bool ui_high_beam;

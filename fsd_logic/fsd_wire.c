@@ -90,6 +90,10 @@ void fsd_wire_pack_state(const FsdWireState* in, uint8_t* out) {
     out[20] = (uint8_t)((in->blinker_left_blinking & 0x03u) |
                         ((in->blinker_right_blinking & 0x03u) << 2) |
                         ((in->speed_limit_seen ? (in->speed_limit_source & 0x03u) : 0u) << 4));
+    /* Byte 21, added in version 4. Blind spot, 2 bits a side, laid out like
+     * the CAN frame's own byte 0 so the two can be read side by side. */
+    out[21] = (uint8_t)((in->blind_spot_left & 0x03u) |
+                        ((in->blind_spot_right & 0x03u) << 2));
 }
 
 void fsd_wire_pack_camstat(const FsdWireCamStat* in, uint8_t* out) {

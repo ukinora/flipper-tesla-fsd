@@ -874,6 +874,15 @@ static void fsd_handle_das_status_common(FSDState *state, const CanFrame *frame,
                                          uint32_t now_ms) {
     if (frame->dlc != CAN_FRAME_MAX_DATA_LEN) return;
 
+    /* Blind spot. Same byte as the AP state, whose mask discarded it. Both
+     * DBCs put it here for 0x399 and 0x39B alike, so one parse serves both. */
+    state->das_blind_spot_left =
+        (frame->data[SIG_DAS_BLIND_SPOT_BYTE] >> SIG_DAS_BLIND_SPOT_LEFT_SHIFT) &
+        SIG_DAS_BLIND_SPOT_MASK;
+    state->das_blind_spot_right =
+        (frame->data[SIG_DAS_BLIND_SPOT_BYTE] >> SIG_DAS_BLIND_SPOT_RIGHT_SHIFT) &
+        SIG_DAS_BLIND_SPOT_MASK;
+
     state->das_speed_limit_1 = frame->data[SIG_DAS_SPEED_LIMIT_BYTE_1];
     state->das_speed_limit_2 = frame->data[SIG_DAS_SPEED_LIMIT_BYTE_2];
     uint8_t vision_raw =

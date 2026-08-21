@@ -39,13 +39,13 @@ extern "C" {
 
 /* Both payloads are 20 bytes because that is the most a default 23-byte ATT MTU
  * carries. Not a coincidence and not adjustable without a version bump. */
-#define FSD_WIRE_STATE_LEN 21u
+#define FSD_WIRE_STATE_LEN 22u
 #define FSD_WIRE_CAMSTAT_LEN 20u
 #define FSD_WIRE_RESULT_LEN 4u
 
 /* Wire versions. Each payload carries its own — sharing one meant that bumping
  * State also announced a CamStat change that had not happened. */
-#define FSD_WIRE_STATE_VERSION 3u
+#define FSD_WIRE_STATE_VERSION 4u
 #define FSD_WIRE_CAMSTAT_VERSION 2u
 
 /* FSD v14 Lite exposes four speed profiles. */
@@ -78,6 +78,15 @@ typedef struct {
      * cruise is holding to. The firmware always knew which; it just never
      * said. */
     uint8_t speed_limit_source;
+
+    /* Byte 21 bits[3:0]. 2 bits each: 0 none, 1 vehicle present, 2 do not
+     * change lanes, 3 SNA. Byte 20 had only two spare bits and four were
+     * needed, so this cost a byte and a version.
+     *
+     * On the phone these OVERRIDE the turn signal on the same side bar --
+     * the warning outranks the intention. */
+    uint8_t blind_spot_left;
+    uint8_t blind_spot_right;
     bool brake_applied;
 
     /* bit 4. Whether the capture recorder is actually recording -- the RING is
