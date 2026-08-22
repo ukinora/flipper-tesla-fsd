@@ -3,3 +3,8 @@
 build_output/
 TESLA.md
 PROJECT.md
+
+# Generated before every build by gen_build_stamp.py. Committing it would put
+# a one-line diff in every commit and, worse, let a stale copy be built when
+# the pre-script does not run -- the exact staleness this mechanism removes.
+.firmware/fsd_build_stamp.cpp

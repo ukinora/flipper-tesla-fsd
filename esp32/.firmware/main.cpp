@@ -50,6 +50,7 @@
 #include "../../fsd_logic/fsd_events.h"
 #include "prefs.h"
 #include "power_log.h"
+#include "fsd_build_stamp.h"   // 🔴 조건부 블록 밖 — 모든 보드가 쓴다
 #if defined(BOARD_TTGO_DISPLAY)
 #include "display.h"
 #endif
@@ -1984,7 +1985,7 @@ void setup() {
     Serial.println("\n============================");
     Serial.println(" Tesla FSD Unlock — ESP32   ");
     Serial.println("============================");
-    Serial.printf("[FSD] Build: %s %s\n", __DATE__, __TIME__);
+    Serial.printf("[FSD] Build: %s\n", FSD_BUILD_STAMP);
 
     const esp_partition_t *running = esp_ota_get_running_partition();
     if (running) {
