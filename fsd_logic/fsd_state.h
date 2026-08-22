@@ -252,6 +252,46 @@ typedef struct FSDState {
     // --- UI_warning (0x311) — dashboard indicators ---
     bool ui_left_blinker;
     bool ui_right_blinker;
+
+    /* 0x311 leftBlinkerBlinking / rightBlinkerBlinking — 2 bits each.
+     *   0 = off
+     *   1 = blinking, lamp currently OFF
+     *   2 = blinking, lamp currently ON
+     *
+     * These are the LAMP, where ui_*_blinker above is closer to the STALK: the
+     * party DBC notes that *BlinkerOn "only describes stalk position if half
+     * pressed". Hazards do not move the stalk, so they may not appear there at
+     * all — which is exactly why these two are read.
+     *
+     * UNVERIFIED on this car. Bit positions come from the community DBC and the
+     * right-hand definition there contradicts itself (26|2@1+ with range
+     * [0|15], and the opposite endianness from its left-hand twin). 0x311 is in
+     * the capture filter; the visit settles it. Until then nothing may FAIL
+     * when these read zero — see turnSignalLit() on the app side. */
+    uint8_t ui_left_blinker_blinking;
+    uint8_t ui_right_blinker_blinking;
+
+    /* 0x399 / 0x39B DAS_blindSpotRearLeft / RearRight -- 2 bits each.
+     *   0 = no warning
+     *   1 = a vehicle is in the blind spot
+     *   2 = do not change lanes now
+     *   3 = SNA (the system cannot say)
+     *
+     * On the phone these take over the whole side bar, above the turn signal
+     * (owner's decision 2026-08-21). SNA and anything unexpected must fall
+     * back to the turn signal rather than warn: "no car there" and "we are
+     * reading the wrong bits" both look like 0, so a warning we cannot back
+     * up is worse than no warning. */
+    uint8_t das_blind_spot_left;
+    uint8_t das_blind_spot_right;
+
+    /* 0x219 VCSEC_TPMSData. Raw counts, 0.025 bar each; zero is not a real
+     * pressure so it doubles as "no reading yet". Indexed by the frame's own
+     * sensor index, NOT by corner -- see can_signals.h. */
+    uint8_t tpms_pressure[4];
+    uint8_t tpms_location[4];
+    uint32_t tpms_seen_ms[4];
+    bool tpms_seen;
     bool ui_any_door_open;
     bool ui_buckle_status;       // seatbelt
     bool ui_high_beam;

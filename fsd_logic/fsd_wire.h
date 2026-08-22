@@ -39,13 +39,13 @@ extern "C" {
 
 /* Both payloads are 20 bytes because that is the most a default 23-byte ATT MTU
  * carries. Not a coincidence and not adjustable without a version bump. */
-#define FSD_WIRE_STATE_LEN 20u
+#define FSD_WIRE_STATE_LEN 26u
 #define FSD_WIRE_CAMSTAT_LEN 20u
 #define FSD_WIRE_RESULT_LEN 4u
 
 /* Wire versions. Each payload carries its own — sharing one meant that bumping
  * State also announced a CamStat change that had not happened. */
-#define FSD_WIRE_STATE_VERSION 2u
+#define FSD_WIRE_STATE_VERSION 5u
 #define FSD_WIRE_CAMSTAT_VERSION 2u
 
 /* FSD v14 Lite exposes four speed profiles. */
@@ -60,8 +60,44 @@ extern "C" {
 typedef struct {
     bool rx_seen; // any CAN frame ever received
     bool ota_in_progress;
-    bool blinker_left;
+    bool blinker_left;  // *BlinkerOn  — closer to the stalk than the lamp
     bool blinker_right;
+
+    /* Byte 20 bits[3:0]. 2 bits each: 0 off, 1 blinking-dark, 2 blinking-lit.
+     * The LAMP. See FSDState for why both pairs are carried and why nothing
+     * may depend on these being non-zero. */
+    uint8_t blinker_left_blinking;
+    uint8_t blinker_right_blinking;
+
+    /* Byte 20 bits[5:4]. Where the speed limit came from -- SpeedLimitSource:
+     * 0 none, 1 map, 2 vision, 3 ACC.
+     *
+     * The number alone could not be read. Three CAN frames write the same
+     * field and the last one wins, so "60" might be a sign the camera just
+     * read, what the navigation map says about this road, or what adaptive
+     * cruise is holding to. The firmware always knew which; it just never
+     * said. */
+    uint8_t speed_limit_source;
+
+    /* Byte 21 bits[3:0]. 2 bits each: 0 none, 1 vehicle present, 2 do not
+     * change lanes, 3 SNA. Byte 20 had only two spare bits and four were
+     * needed, so this cost a byte and a version.
+     *
+     * On the phone these OVERRIDE the turn signal on the same side bar --
+     * the warning outranks the intention. */
+    uint8_t blind_spot_left;
+    uint8_t blind_spot_right;
+
+    /* Bytes 22..25. Tyre pressure, raw counts of 0.025 bar, one per sensor.
+     * Zero means no reading -- zero bar is not a pressure a mounted tyre can
+     * have, so the sentinel costs nothing and needs no extra flag.
+     *
+     * 🔴 Indexed by the FRAME'S sensor index, not by corner. 0x219 carries a
+     * location field too, but nothing documents what its values mean, so
+     * which reading belongs to which wheel is unresolved until a capture
+     * compares these against the car's own screen. Four numbers laid out in
+     * a square imply corners; that implication is not yet earned. */
+    uint8_t tyre_pressure[4];
     bool brake_applied;
 
     /* bit 4. Whether the capture recorder is actually recording -- the RING is
@@ -122,6 +158,46 @@ typedef struct {
     uint16_t learned_count;    // saturates into a byte
     uint16_t scan_full_count;  // saturates into a byte
 } FsdWireCamStat;
+
+/** How long a speed limit stays believable after the car last reported it.
+ *
+ * ⚠️ **PROVISIONAL.** The right number depends on how often 0x238 and 0x399
+ * actually arrive on this car, which has never been measured -- see B-2 in
+ * 차량-방문-체크리스트.md. 10 s was chosen because it is long compared with any
+ * plausible rate (1-25 Hz => 10 to 250 missed frames), so it fires on a real
+ * loss of signal rather than on jitter.
+ *
+ * The criterion is deliberately NOT "the sign changed" -- it is "the car has
+ * stopped telling us", which does not depend on how fast you are driving. */
+#define FSD_SPEED_LIMIT_MAX_AGE_MS 10000u
+
+/** Is a seen speed limit still supported by something the car said recently?
+ *
+ * 🔴 Written because the field never expired. `speed_limit_seen` only ever
+ * went true, and `speed_limit_last_ms` was stamped and **never read** -- so a
+ * limit picked up half an hour ago sat on the dashboard as though it were the
+ * road you are on now. The whole-State freshness warning does not cover it:
+ * that only says the module is talking.
+ *
+ * Unsigned subtraction handles the millis() wrap: a wrapped delta comes out
+ * enormous, which reads as stale. That is the safe direction. */
+bool fsd_speed_limit_fresh(bool seen, uint32_t last_ms, uint32_t now_ms);
+
+/** How long a tyre pressure stays believable after that sensor last spoke.
+ *
+ * Much longer than the speed limit's window and for the opposite reason:
+ * pressure barely moves, and a TPMS sensor reports every few seconds at best
+ * -- on a parked car it may sleep for minutes. A short window here would
+ * blank a perfectly good reading. Sixty seconds is long enough to ride out
+ * the quiet and short enough that a sensor which has actually stopped does
+ * not keep a number on the dashboard.
+ *
+ * ⚠️ PROVISIONAL, like the speed limit's. The real reporting interval on this
+ * car has never been measured; 0x219 is in the capture filter. */
+#define FSD_TYRE_MAX_AGE_MS 60000u
+
+/** Is this wheel's last reading recent enough to send? */
+bool fsd_tyre_fresh(bool seen, uint32_t last_ms, uint32_t now_ms);
 
 /** Pack State. `out` must hold FSD_WIRE_STATE_LEN bytes and is fully written.
  *  Does every clamp and saturation itself, so a caller cannot skip one. */

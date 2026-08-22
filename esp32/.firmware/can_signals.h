@@ -139,6 +139,43 @@
 // bytes 6-7: counter / checksum
 #define SIG_DAS_HW3_AP_STATE_BYTE           0
 #define SIG_DAS_HW3_AP_STATE_MASK        0x0Fu
+/* Blind spot rides in the TOP half of the same byte the AP state sits in --
+ * the mask above was throwing it away.
+ *   DAS_blindSpotRearLeft  : 4|2  -> byte 0 bits[5:4]
+ *   DAS_blindSpotRearRight : 6|2  -> byte 0 bits[7:6]
+ *   0 no warning, 1 vehicle present, 2 do not change lanes, 3 SNA
+ *
+ * Unusually for this project, BOTH community DBCs agree on the position:
+ * opendbc tesla_can.dbc (legacy 0x399) and tesla_model3_party.dbc (0x39B)
+ * carry identical start bits. Two independently maintained sources agreeing
+ * is the strongest evidence available short of a capture -- and it is the
+ * opposite of the blinker case, where the two definitions contradicted each
+ * other. Still unconfirmed on THIS car; 0x399 is in the capture filter. */
+/* 0x219 VCSEC_TPMSData -- one wheel per frame, cycling.
+ *   byte 0 bits[1:0] index    which sensor this frame is about
+ *   byte 1           pressure x0.025 bar  (x14.5038 for psi)
+ *   byte 4 bits[2:0] location which CORNER it belongs to
+ *
+ * Only the pressure is carried to the phone. Temperature and sensor battery
+ * are in the same frame and deliberately left alone: nothing asks for them,
+ * and a field nobody reads is a field nobody notices breaking.
+ *
+ * 🔴 The location values 0..4 have NO meaning attached anywhere -- the source
+ * DBC gives no value table. So the corner mapping is a guess until a capture
+ * compares these against what the car shows on its own screen. The value is
+ * parsed and kept so the serial log can show it; the phone lays the four
+ * readings out by INDEX for now. */
+#define SIG_TPMS_INDEX_BYTE                 0
+#define SIG_TPMS_INDEX_MASK              0x03u
+#define SIG_TPMS_PRESSURE_BYTE              1
+#define SIG_TPMS_LOCATION_BYTE              4
+#define SIG_TPMS_LOCATION_MASK           0x07u
+#define SIG_TPMS_MIN_DLC                    5
+
+#define SIG_DAS_BLIND_SPOT_BYTE             0
+#define SIG_DAS_BLIND_SPOT_LEFT_SHIFT       4
+#define SIG_DAS_BLIND_SPOT_RIGHT_SHIFT      6
+#define SIG_DAS_BLIND_SPOT_MASK          0x03u
 #define SIG_DAS_HW3_AP_ACTIVE_STATE         3u
 #define SIG_DAS_HW4_AP_STATE_BYTE           1
 #define SIG_DAS_HW4_AP_STATE_SHIFT          4

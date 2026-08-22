@@ -10,6 +10,7 @@
  */
 
 #include "web_dashboard.h"
+#include "fsd_build_stamp.h"
 #include "can_dump.h"
 #include "http_can_stream.h"
 #include "mode_switch.h"
@@ -1598,7 +1599,7 @@ static String build_json() {
     j += "\"fps\":";           j += fps_s;                             j += ',';
     j += "\"bms\":";           j += bms;                               j += ',';
     j += "\"uptime_s\":";      j += uptime_s;                          j += ',';
-    j += "\"fw_build\":\"";    j += __DATE__;  j += ' '; j += __TIME__; j += "\",";
+    j += "\"fw_build\":\"";    j += FSD_BUILD_STAMP; j += "\",";
     j += "\"can_dump\":";      j += can_dump_active()                 ? "true" : "false"; j += ',';
     // blackbox/capability/profile moved OFF the hot WS state push (#124): they
     // are large and blackbox_status_json() scans the LittleFS dir every call.

@@ -50,6 +50,7 @@
 #include "../../fsd_logic/fsd_events.h"
 #include "prefs.h"
 #include "power_log.h"
+#include "fsd_build_stamp.h"   // 🔴 조건부 블록 밖 — 모든 보드가 쓴다
 #if defined(BOARD_TTGO_DISPLAY)
 #include "display.h"
 #endif
@@ -1639,13 +1640,13 @@ static void process_frame(CanBusId bus, const CanFrame &frame) {
     FSDState das_state = state_snapshot();
     if (!das_cfg && hw_uses_hw3_das_status(das_state.hw_version) && frame.id == CAN_ID_DAS_STATUS_HW3) {
         state_enter();
-        fsd_handle_das_status_hw3(&g_state, &frame);
+        fsd_handle_das_status_hw3(&g_state, &frame, millis());
         state_exit();
         return;
     }
     if (!das_cfg && hw_uses_hw4_das_status(das_state.hw_version) && frame.id == CAN_ID_DAS_STATUS_HW4) {
         state_enter();
-        fsd_handle_das_status_hw4(&g_state, &frame);
+        fsd_handle_das_status_hw4(&g_state, &frame, millis());
         uint8_t ap = g_state.das_ap_state;         // as read by the std parser
         uint8_t ho = g_state.das_hands_on_state;
         state_exit();
@@ -1694,6 +1695,12 @@ static void process_frame(CanBusId bus, const CanFrame &frame) {
         if (frame.dlc > SIG_GEAR_LEVER_COUNTER_BYTE) {
             if (gear_sequence_active() && fsd_can_transmit(&s)) gear_sequence_tick(now_ms, "CONT-AP");
         }
+        return;
+    }
+    if (frame.id == CAN_ID_TPMS) {
+        state_enter();
+        fsd_handle_tpms(&g_state, &frame, millis());
+        state_exit();
         return;
     }
     if (frame.id == CAN_ID_UI_MAP_DATA) {
@@ -1978,7 +1985,7 @@ void setup() {
     Serial.println("\n============================");
     Serial.println(" Tesla FSD Unlock — ESP32   ");
     Serial.println("============================");
-    Serial.printf("[FSD] Build: %s %s\n", __DATE__, __TIME__);
+    Serial.printf("[FSD] Build: %s\n", FSD_BUILD_STAMP);
 
     const esp_partition_t *running = esp_ota_get_running_partition();
     if (running) {

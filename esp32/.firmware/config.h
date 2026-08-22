@@ -27,6 +27,7 @@
 #define CAN_ID_UI_VEHICLE_CTRL 0x273u // 627  - UI_vehicleControl: mirror fold/lock/wiper/horn/seat heat
 #define CAN_ID_VCLEFT_DOOR     0x102u // 258  - VCLEFT_doorStatus: mirror state/tilt read-back
 #define CAN_ID_VCSEC_WINDOW    0x119u // 281  - VCSEC_windowRequests: windows
+#define CAN_ID_TPMS            0x219u // 537  - VCSEC_TPMSData: tyre pressure, muxed
 #define CAN_ID_DAS_BODY        0x3E9u // 1001 - DAS_bodyControls: lights/hazards/turn/wipers
 #define CAN_ID_VCLEFT_SWITCH   0x3C2u // 962  - VCLEFT_switchStatus: right scroll wheel (speed profile). Vehicle CAN only, NOT forwarded to Bus 6
 #define CAN_ID_DI_STATE        0x286u // 646  - DI_state: NOT where DI_gear lives (PR #18)

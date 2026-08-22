@@ -276,7 +276,7 @@ pio device monitor -b 115200
 ============================
  Tesla FSD Unlock — ESP32
 ============================
-[FSD] Build: Apr  8 2026 18:59:17
+[FSD] Build: 2026-08-23 01:11:41 36ba4a11-dirty
 [CAN] Driver: ESP32 TWAI (M5Stack ATOM Lite + ATOMIC CAN Base)
 [CAN] 500 kbps — Listen-Only
 [BTN] Single click : toggle Listen-Only / Active

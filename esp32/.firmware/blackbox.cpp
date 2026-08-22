@@ -26,7 +26,8 @@
 // so main.cpp / prefs.cpp share one source of truth.
 
 // ── Tunable window ───────────────────────────────────────────────────────────
-// 6 s total, split 5 pre / 1 post (was 10/5 = 15 s; changed 2026-08-17).
+// 10 s total, split 5 pre / 5 post (was 10/5 = 15 s, then 5/1; post restored
+// to 5 s on 2026-08-23 -- see the POST-ROLL note below).
 //
 // Why shrink: capture bytes are linear in window length, and on this fork both
 // costs that matter are bytes. Measured 2026-08-17 on the bench —
@@ -37,24 +38,41 @@
 // A and B sets, many actions — at 15 s that is hours of downloading, with a
 // delete-between-every-capture dance because only one fits.
 //
-// Why the split is lopsided rather than 3/3: for BB_TRIG_MANUAL — the trigger
-// the pre-teardown TSL capture actually uses — the operator performs the action
-// and THEN reaches for `mark`. The pre-roll is the evidence; the post-roll holds
-// nothing but the operator's own hand. So the pre-roll gets what is left after
-// giving the post-roll the minimum that keeps a flush honest.
+// 🔴 POST-ROLL WENT BACK UP: 1 s -> 5 s (owner's call, 2026-08-23).
 //
-// 🔴 The cost is the operator's reaction budget: 5 s from the end of the action
-// to `mark`, not 10 s. Overrun it and the capture still succeeds, still
-// downloads, and simply does not contain the gesture — which for the one-shot
-// pre-teardown capture is discovered at home, after the TSL is out. blackbox_arm()
-// therefore prints the pre-roll, and the field checklist states the budget.
-// If it turns out to be too tight in the car, this is a build flag:
-//     build_flags = -D BLACKBOX_PRE_MS=8000
+// The 1 s post-roll was argued from the MANUAL sequence — the operator performs
+// the action and THEN reaches for `mark`, so the evidence is all pre-roll and
+// the post-roll holds nothing but the operator's own hand. That reasoning is
+// sound for that ONE sequence, and it quietly made that sequence mandatory:
+// with 1 s of post-roll there is no other way to take a capture.
+//
+// A 5 s post-roll buys a SECOND procedure, and it is the safer one:
+//
+//     press `mark` FIRST, then perform the action within 5 s.
+//
+// That matters because the reaction budget is this capture's single largest
+// risk, and it fails SILENTLY — overrun it and the capture still succeeds,
+// still downloads, is still the right size, and simply does not contain the
+// gesture, which for the one-shot pre-teardown capture is discovered at home
+// after the TSL is out. Symmetric 5/5 gives the operator a budget in whichever
+// direction they are able to work, and a way to retry an action that went wrong
+// without re-arming. It also covers a delayed reaction — TSL answering an input
+// a beat later, or the second half of an event (door closes -> light fades).
+//
+// What it does NOT cost: the ring. At 40000 frames a 10 s window is nowhere
+// near capacity on a filtered bus, and the ring caps a capture's worst case at
+// ~3.2 MB regardless of window length (bb_would_fit refuses rather than
+// overrunning the partition). Disk cost is frames x BB_BYTES_PER_LINE, so it
+// scales with the bus's FILTERED rate — which we have never measured in the
+// car. Measure it on the first capture rather than guessing here.
+//
+// Both are build flags if the car says otherwise:
+//     build_flags = -D BLACKBOX_PRE_MS=8000 -D BLACKBOX_POST_MS=3000
 #ifndef BLACKBOX_PRE_MS
 #define BLACKBOX_PRE_MS    5000u   // pre-roll kept before the trigger
 #endif
 #ifndef BLACKBOX_POST_MS
-#define BLACKBOX_POST_MS   1000u   // post-roll recorded after the trigger
+#define BLACKBOX_POST_MS   5000u   // post-roll recorded after the trigger
 #endif
 // Floors, not preferences. A pre-roll under ~2 s cannot span a human noticing
 // they finished the action and pressing the button, so a manual capture would
@@ -69,7 +87,7 @@ static_assert(BLACKBOX_POST_MS >= 500u,  "post-roll too short: flush races the l
 // The internal-RAM fallback must cover the window on its own — PSRAM is never
 // required and no build enables it:
 //   - S3-class (512 KB SRAM): 6000 frames ≈ 114 KB → ≥15 s even at ~400 f/s,
-//     so it covers the 6 s window with room to spare.
+//     so it covers the 10 s window with room to spare.
 //     Only paired with the persistent disk backends here, which stream the ring
 //     straight to file (no frozen copy), so the ring is the whole footprint.
 //   - Classic ESP32: 3000 frames ≈ 57 KB safety cap. These are the volatile
@@ -425,7 +443,7 @@ static uint32_t bb_free_bytes() {
 
 /* Would this capture fit? Answering NO is a feature.
  *
- * 🔴 Even a 6 s window on a busy bus is thousands of frames, so a capture is
+ * 🔴 Even a 10 s window on a busy bus is thousands of frames, so a capture is
  * still ~1 MB against a 3.5 MB partition -- a few of them fill it. And
  * retention cannot rescue us: bb_enforce_retention() deliberately never deletes
  * a MANUAL capture, because the one-shot capture taken before the TSL comes out
@@ -921,7 +939,7 @@ static void bb_record(CanBusId bus, const CanFrame& frame, uint32_t now_ms, uint
     if (g_cap == 0 || g_state == nullptr || !g_state->blackbox_enabled) return;
     // Store only the key diagnostic IDs (fsd_blackbox_filter.h). On a busy full
     // bus (~3300 f/s) recording everything fills the ring in ~1.8 s, truncating
-    // the 5 s pre / 1 s post window; the filter drops the stored rate ~15x so
+    // the 5 s pre / 5 s post window; the filter drops the stored rate ~15x so
     // the whole window survives. Define BLACKBOX_CAPTURE_ALL to keep every frame.
     if (!fsd_blackbox_should_record(frame.id)) return;
     if (ring_next(g_head) == g_tail) g_tail = ring_next(g_tail);  // evict oldest

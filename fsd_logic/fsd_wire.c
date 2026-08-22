@@ -26,6 +26,16 @@ static uint8_t sat8(uint32_t v) {
     return (v > 0xFFu) ? 0xFFu : (uint8_t)v;
 }
 
+bool fsd_speed_limit_fresh(bool seen, uint32_t last_ms, uint32_t now_ms) {
+    if(!seen) return false;
+    return (uint32_t)(now_ms - last_ms) < FSD_SPEED_LIMIT_MAX_AGE_MS;
+}
+
+bool fsd_tyre_fresh(bool seen, uint32_t last_ms, uint32_t now_ms) {
+    if(!seen) return false;
+    return (uint32_t)(now_ms - last_ms) < FSD_TYRE_MAX_AGE_MS;
+}
+
 void fsd_wire_pack_state(const FsdWireState* in, uint8_t* out) {
     if(!in || !out) return;
 
@@ -34,11 +44,11 @@ void fsd_wire_pack_state(const FsdWireState* in, uint8_t* out) {
     if(in->ota_in_progress) flags |= (1u << 1);
     if(in->blinker_left) flags |= (1u << 2);
     if(in->blinker_right) flags |= (1u << 3);
-    /* Bits 4 and 5 (blind spot L/R) are deliberately never set:
-     * DAS_sideCollisionWarning is not extracted on the ESP32 path, and its bit
-     * position is confirmed only for 0x39B (HW4). Left zero rather than guessed.
-     * Bit 7 (profile change in progress) belongs to the SET_PROFILE closed
-     * loop, which emits nothing while both of its gates are shut. */
+    /* Bit 5 (blind spot) is deliberately never set: DAS_sideCollisionWarning
+     * is not extracted on the ESP32 path, and its bit position is confirmed
+     * only for 0x39B (HW4). Left zero rather than guessed. Bit 7 (profile
+     * change in progress) belongs to the SET_PROFILE closed loop, which emits
+     * nothing while both of its gates are shut. */
     if(in->blackbox_recording) flags |= (1u << 4);
     if(in->brake_applied) flags |= (1u << 6);
 
@@ -76,6 +86,23 @@ void fsd_wire_pack_state(const FsdWireState* in, uint8_t* out) {
     put_le16(&out[12], in->rx_fps);
     put_le16(&out[14], sat16(in->crc_err_count));
     put_le32(&out[16], in->uptime_s);
+    /* Byte 20, added in version 3. Two 2-bit lamp-phase fields, laid out the
+     * same way the CAN frame lays them out so a reader can compare the two
+     * side by side without a table. */
+    /* bits[3:0] lamp phase, bits[5:4] where the speed limit came from.
+     * Source is zeroed when the limit itself is not being sent -- a source
+     * without a value would be a label on an empty box. */
+    out[20] = (uint8_t)((in->blinker_left_blinking & 0x03u) |
+                        ((in->blinker_right_blinking & 0x03u) << 2) |
+                        ((in->speed_limit_seen ? (in->speed_limit_source & 0x03u) : 0u) << 4));
+    /* Byte 21, added in version 4. Blind spot, 2 bits a side, laid out like
+     * the CAN frame's own byte 0 so the two can be read side by side. */
+    out[21] = (uint8_t)((in->blind_spot_left & 0x03u) |
+                        ((in->blind_spot_right & 0x03u) << 2));
+    /* Bytes 22..25, added in version 5. Straight copies -- the scale lives in
+     * the DBC and the conversion to psi on the phone, because a count is what
+     * a capture shows and keeping the two the same makes them comparable. */
+    for(size_t i = 0; i < 4; i++) out[22 + i] = in->tyre_pressure[i];
 }
 
 void fsd_wire_pack_camstat(const FsdWireCamStat* in, uint8_t* out) {
