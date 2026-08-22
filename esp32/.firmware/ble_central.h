@@ -307,6 +307,22 @@ void ble_central_set_verbose(bool on);
  *  advertise only while held. */
 bool ble_central_raw(const char* addr_str, uint8_t secs);
 
+/** Count ADVERTISEMENT PACKETS from one address, not devices.
+ *
+ * ble_central_raw() answers "did it advertise", and that is all it can answer:
+ * the result set it reads collapses packets with identical content, so a burst
+ * of twenty shows up as one. This counts every packet the radio delivers, and
+ * groups them by payload so a burst can be told from a second press.
+ *
+ * The question it exists for is how long the radio has to stay on. A remote
+ * that repeats its packet for half a second can be caught by a scanner that
+ * listens a tenth of the time; one that sends a single packet cannot be caught
+ * by anything less than a continuous scan, and continuous scan is parked-car
+ * battery drain. Guessing that wrong is expensive in both directions.
+ */
+bool ble_central_count(const char* addr_str, uint8_t secs);
+
+
 /** Ask a connected remote to encrypt the link.
  *
  *  Many peripherals withhold notifications until the link is paired. We never
@@ -362,6 +378,7 @@ static inline uint8_t ble_central_bound_count(void) { return 0; }
 static inline bool ble_central_any_connected(void) { return false; }
 static inline void ble_central_set_verbose(bool) {}
 static inline bool ble_central_raw(const char*, uint8_t) { return false; }
+static inline bool ble_central_count(const char*, uint8_t) { return false; }
 static inline bool ble_central_secure(uint8_t) { return false; }
 static inline bool ble_central_chars(uint8_t) { return false; }
 static inline bool ble_central_poke(uint8_t) { return false; }

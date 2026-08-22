@@ -415,6 +415,31 @@ static void serial_command_tick() {
                 while (*arg == ' ') arg++;
                 if (arg[0]) ble_central_add(arg);
                 else ble_central_forget_all();
+            } else if (strncmp(buf, "btncount", 8) == 0) {
+                const char *arg = buf + 8;
+                while (*arg == ' ') arg++;
+                if (arg[0]) ble_central_count(arg, 20);
+                else Serial.println("[SER] btncount <addr>");
+            } else if (serial_cmd_equals(buf, "btnlist")) {
+                /* The scan's results were reachable only from the PHONE: the
+                 * list moved into the Capability document and the serial print
+                 * went away with it. At the bench there is a USB cable and no
+                 * app, so `btnscan` reported a byte count and nothing else --
+                 * "the scan found things, and you cannot see them". Reading
+                 * g_found here, on the loop task, is safe; printing from
+                 * onScanEnd would run on the BLE host task. */
+                const uint8_t n = ble_central_found_count();
+                Serial.printf("[BTN] last scan: %u shown of %u seen\n",
+                              (unsigned)n, (unsigned)ble_central_found_total());
+                if (!n) Serial.println("[BTN]   (nothing -- run btnscan first)");
+                for (uint8_t i = 0; i < n; i++) {
+                    const char *a = nullptr, *nm = nullptr;
+                    int8_t rssi = 0;
+                    if (!ble_central_found(i, &a, &nm, &rssi)) continue;
+                    Serial.printf("  %2u %s %4d dBm  %s\n", (unsigned)i,
+                                  a ? a : "?", (int)rssi,
+                                  (nm && nm[0]) ? nm : "(no name)");
+                }
             } else if (serial_cmd_equals(buf, "btnstat")) {
                 Serial.printf("[BTN] %u/%u bound, notifies:%u short:%u double:%u long:%u\n",
                               (unsigned)ble_central_bound_count(),
@@ -432,7 +457,7 @@ static void serial_command_tick() {
                                   ble_central_slot_connected(i) ? "connected" : "-");
                 }
             } else if (serial_cmd_equals(buf, "help") || serial_cmd_equals(buf, "?")) {
-                Serial.println("[SER] Commands: ip | btnscan | btnbind <addr> | btnstat");
+                Serial.println("[SER] Commands: ip | btnscan | btnlist | btnbind <addr> | btnstat");
                 Serial.println("[SER]   bbon / bboff  — capture recorder on/off (persisted)");
                 Serial.println("[SER]   mark          — record a window around NOW");
                 Serial.println("[SER]   canstat       — 버스별 RX/TX/오류 (어느 버스가 받았나)");
