@@ -529,6 +529,121 @@ bool ble_central_raw(const char* addr_str, uint8_t secs) {
     return true;
 }
 
+
+// ── packet counter (btncount) ────────────────────────────────────────────────
+//
+// Runs on the BLE host task, so it does the least possible: match the address,
+// bump a counter, stamp a time. All printing happens on the loop task after the
+// scan returns.
+
+#define CENTRAL_BURST_MAX 12
+
+typedef struct {
+    char     name[26];    // the AD name, which is what changes between presses
+    uint32_t packets;
+    uint32_t first_ms;
+    uint32_t last_ms;
+} CentralBurst;
+
+static CentralBurst g_burst[CENTRAL_BURST_MAX];
+static uint8_t      g_burst_n = 0;
+static uint32_t     g_burst_pkts = 0;
+static uint32_t     g_burst_dropped = 0;   // bursts past the array
+
+/* Pull the Complete Local Name (AD type 0x09) out of a raw payload.
+ *
+ * This remote carries its per-press value in the NAME, not in manufacturer
+ * data -- the manufacturer field is nine zero bytes. Grouping by name is
+ * therefore grouping by press. Falls back to an empty string, which groups
+ * everything together rather than splitting a burst into singles. */
+static void adv_name(const uint8_t* p, size_t n, char* out, size_t out_sz) {
+    out[0] = 0;
+    size_t i = 0;
+    while(i + 1 < n) {
+        const uint8_t len = p[i];
+        if(len == 0 || i + 1 + len > n) return;
+        if(p[i + 1] == 0x09) {                 // Complete Local Name
+            size_t take = len - 1;
+            if(take > out_sz - 1) take = out_sz - 1;
+            memcpy(out, &p[i + 2], take);
+            out[take] = 0;
+            return;
+        }
+        i += 1 + len;
+    }
+}
+
+class CentralCountCB : public NimBLEScanCallbacks {
+public:
+    char target[18] = {0};
+    void onResult(const NimBLEAdvertisedDevice* d) override {
+        if(!d) return;
+        if(strcasecmp(d->getAddress().toString().c_str(), target) != 0) return;
+        const uint32_t now = millis();
+        g_burst_pkts++;
+
+        char nm[26];
+        const std::vector<uint8_t>& p = d->getPayload();
+        adv_name(p.data(), p.size(), nm, sizeof(nm));
+
+        /* Same name as a burst already open -> same press. Scanning the whole
+         * table rather than only the newest: the radio interleaves the three
+         * advertising channels and packets do not always arrive in order. */
+        for(uint8_t k = 0; k < g_burst_n; k++) {
+            if(strcmp(g_burst[k].name, nm) == 0) {
+                g_burst[k].packets++;
+                g_burst[k].last_ms = now;
+                return;
+            }
+        }
+        if(g_burst_n >= CENTRAL_BURST_MAX) { g_burst_dropped++; return; }
+        CentralBurst* b = &g_burst[g_burst_n++];
+        snprintf(b->name, sizeof(b->name), "%s", nm);
+        b->packets = 1;
+        b->first_ms = b->last_ms = now;
+    }
+};
+static CentralCountCB g_count_cb;
+
+bool ble_central_count(const char* addr_str, uint8_t secs) {
+    if(!addr_str || !addr_str[0]) return false;
+    if(g_scanning) return false;
+    if(secs == 0) secs = BLE_CENTRAL_SCAN_SECS;
+
+    NimBLEScan* scan = NimBLEDevice::getScan();
+    if(!scan) return false;
+
+    snprintf(g_count_cb.target, sizeof(g_count_cb.target), "%s", addr_str);
+    g_burst_n = 0; g_burst_pkts = 0; g_burst_dropped = 0;
+
+    Serial.printf("[BTN] count %s for %us -- press ONCE, then do not touch it\n",
+                  addr_str, (unsigned)secs);
+    scan->setActiveScan(true);
+    /* `true` = want duplicates. Without it the controller filters repeats and
+     * this function would count exactly what btnraw already counts, which is
+     * the thing it exists to go past. */
+    scan->setScanCallbacks(&g_count_cb, true);
+    scan->getResults(secs * 1000, false);
+    scan->setScanCallbacks(nullptr, true);
+    scan->clearResults();
+
+    Serial.printf("[BTN] %lu packet(s) in %lu burst(s)\n",
+                  (unsigned long)g_burst_pkts, (unsigned long)g_burst_n);
+    for(uint8_t k = 0; k < g_burst_n; k++) {
+        const CentralBurst* b = &g_burst[k];
+        Serial.printf("  burst %u: %lu packet(s) over %lu ms  %s\n",
+                      (unsigned)(k + 1), (unsigned long)b->packets,
+                      (unsigned long)(b->last_ms - b->first_ms),
+                      b->name[0] ? b->name : "(no name)");
+    }
+    if(g_burst_dropped)
+        Serial.printf("  (%lu more burst(s) not shown -- table is %u)\n",
+                      (unsigned long)g_burst_dropped, (unsigned)CENTRAL_BURST_MAX);
+    if(!g_burst_pkts)
+        Serial.println("[BTN] nothing heard -- this remote advertises only while pressed");
+    return true;
+}
+
 /* A bounded knock on the door.
  *
  * The remote is a transparent-serial bridge (HopeRF HPRDW01): it has write

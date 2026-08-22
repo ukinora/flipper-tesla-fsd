@@ -415,6 +415,11 @@ static void serial_command_tick() {
                 while (*arg == ' ') arg++;
                 if (arg[0]) ble_central_add(arg);
                 else ble_central_forget_all();
+            } else if (strncmp(buf, "btncount", 8) == 0) {
+                const char *arg = buf + 8;
+                while (*arg == ' ') arg++;
+                if (arg[0]) ble_central_count(arg, 20);
+                else Serial.println("[SER] btncount <addr>");
             } else if (serial_cmd_equals(buf, "btnlist")) {
                 /* The scan's results were reachable only from the PHONE: the
                  * list moved into the Capability document and the serial print
