@@ -4,7 +4,7 @@
  *
  * The recorder's RAM ring is small: 6000 frames on a no-PSRAM S3. A busy Tesla
  * full bus runs ~3300 frames/s (measured on a Legacy Model X), which fills the
- * ring in ~1.8 s — truncating the intended capture window (5 s pre / 1 s post
+ * ring in ~1.8 s — truncating the intended capture window (5 s pre / 5 s post
  * on this fork) and losing the exact steer-jerk / abort lead-up it exists for.
  *
  * Recording only the key diagnostic IDs drops the stored rate ~15x (the key set
