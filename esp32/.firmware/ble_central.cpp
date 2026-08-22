@@ -493,6 +493,22 @@ bool ble_central_raw(const char* addr_str, uint8_t secs) {
 
     Serial.printf("[BTN] raw %s for %us — press the button\n", addr_str, (unsigned)secs);
     scan->setActiveScan(true); // scan response too: the name often lives there
+
+    /* 🔴 DETACH THE SCAN CALLBACK FIRST, or this function reports "not seen"
+     * for a device that WAS there.
+     *
+     * ble_central_scan() installs CentralScanCB and never removes it, and that
+     * callback's onScanEnd() calls clearResults(). getResults() below runs a
+     * scan to completion, so onScanEnd fires and EMPTIES the result set before
+     * the loop underneath can read it. Every btnraw after the first btnscan of
+     * a boot therefore printed "not seen" -- measured 2026-08-23 against a
+     * button that btnscan was finding in the same minute.
+     *
+     * nullptr is not a crash: NimBLEScan::setScanCallbacks() substitutes its
+     * own default instance. `true` asks for duplicates, which is what a raw
+     * dump wants -- this remote advertises only while pressed, so every packet
+     * of that short burst is worth keeping. */
+    scan->setScanCallbacks(nullptr, true);
     NimBLEScanResults r = scan->getResults(secs * 1000, false);
 
     int hits = 0;
