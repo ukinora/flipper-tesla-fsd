@@ -139,9 +139,21 @@ void ble_owner_forget(void) {
 
 void ble_owner_erase_now(void) {
     ble_owner_forget();
-    // Drain the queue here rather than waiting for a loop() that is not coming.
-    ble_owner_tick(0);
+    /* Drain the queue here rather than waiting for a loop() that is not coming:
+     * the caller is a factory reset and reboots ~200 ms later.
+     *
+     * 🔴 Retry, and say so if it never lands. ble_owner_tick() now refuses to
+     * clear the pending flag on a failed write, which is right -- but with a
+     * reboot already scheduled there is no later loop() to retry in, so a single
+     * attempt would turn "erased" into a claim rather than a fact. Failing to
+     * erase is at least the safe direction (the OLD owner stays enrolled;
+     * nobody new is adopted), so this reports rather than blocks. */
+    for(int i = 0; i < 3 && ble_owner_save_pending(); i++) ble_owner_tick(0);
+    if(ble_owner_save_pending())
+        Serial.println("[OWNER] 🔴 지우지 못했다 — 이전 주인이 그대로 남는다");
 }
+
+bool ble_owner_save_pending(void) { return g_save_pending; }
 
 void ble_owner_tick(uint32_t now_ms) {
     if(g_window_active && (int32_t)(now_ms - g_window_until_ms) >= 0) {
@@ -164,15 +176,50 @@ void ble_owner_tick(uint32_t now_ms) {
         Serial.println("[OWNER] NVS 를 못 열었다 — 다음 루프에서 다시 시도한다");
         return;
     }
+    /* 🔴 And the write has to have LANDED.
+     *
+     * putBytes() and remove() both report whether they worked, and both return
+     * values were being thrown away -- so a full or worn NVS produced exactly
+     * the failure the comment above says it prevents. The flag was cleared
+     * unconditionally two lines later, the module kept running with an owner in
+     * RAM, and the next boot came up with none: trust-on-first-use, open to
+     * whoever pairs next. That gap is invisible until the reboot, which is the
+     * worst possible place for it to appear.
+     *
+     * Read the record back rather than trusting the byte count. A short write
+     * is not the only way to end up with the wrong bytes on flash, and the cost
+     * of checking is one read of seven bytes, once per enrolment. */
+    bool stored = false;
     if(o.enrolled) {
         uint8_t blob[1 + FSD_OWNER_ADDR_LEN];
         blob[0] = o.type;
         memcpy(&blob[1], o.addr, FSD_OWNER_ADDR_LEN);
-        g_nvs.putBytes(KEY, blob, sizeof(blob));
+        if(g_nvs.putBytes(KEY, blob, sizeof(blob)) == sizeof(blob)) {
+            uint8_t back[1 + FSD_OWNER_ADDR_LEN] = {};
+            stored = g_nvs.getBytes(KEY, back, sizeof(back)) == sizeof(back) &&
+                     memcmp(back, blob, sizeof(blob)) == 0;
+        }
     } else {
+        /* Absent is the goal, however we get there: remove() reports false when
+         * the key was not there to begin with, which is success for us. */
         g_nvs.remove(KEY);
+        stored = !g_nvs.isKey(KEY);
     }
     g_nvs.end();
+
+    if(!stored) {
+        /* Keep g_save_pending set: loop() comes back and tries again. Rate-limit
+         * the log so a permanently broken NVS does not bury everything else --
+         * but never go silent, because the failure has no other symptom until
+         * the module reboots without an owner. */
+        static uint32_t s_warn_ms = 0;
+        if(!s_warn_ms || (uint32_t)(now_ms - s_warn_ms) >= 5000u) {
+            s_warn_ms = now_ms ? now_ms : 1u;
+            Serial.println("[OWNER] 🔴 NVS 저장 실패 — 계속 재시도한다. "
+                           "지금 재부팅하면 주인 등록이 사라진다");
+        }
+        return;
+    }
     g_save_pending = false;
 }
 
@@ -186,6 +233,7 @@ void ble_owner_open_window(uint32_t) {}
 bool ble_owner_window_open(void) { return false; }
 void ble_owner_forget(void) {}
 void ble_owner_erase_now(void) {}
+bool ble_owner_save_pending(void) { return false; }
 void ble_owner_print(void) {}
 
 #endif  // BLE_SERVER_ENABLED

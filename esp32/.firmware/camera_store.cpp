@@ -19,6 +19,15 @@
 
 #define CAM_PATH "/camera.bin"
 #define CAM_TMP "/camera.tmp"
+/* The old database, held aside for the length of the swap.
+ *
+ * 🔴 rename() will not overwrite, so the old file has to move before the new
+ * one lands -- and it used to be REMOVED. Between that remove and the rename
+ * there was no database at all, and the accessory feed on this car is switched:
+ * power vanishes without warning. A cut in that window, or a rename that simply
+ * failed, destroyed both copies. Moving it aside instead makes the window
+ * recoverable, which is exactly what learn.bin already does one file over. */
+#define CAM_BAK "/camera.bak"
 #define LEARN_PATH "/learn.bin"
 #define LEARN_TMP "/learn.tmp"
 
@@ -40,6 +49,15 @@ static volatile bool g_saving = false;
 
 static File g_up_file;
 static bool g_up_active = false;
+/* An abort could not reopen the database and has to try again.
+ *
+ * 🔴 camera_store_upload_abort() cleared g_up_active and deleted camera.tmp
+ * BEFORE it took the lock -- and then returned early if the lock was busy. Its
+ * own first line is `if(!g_up_active && !exists(CAM_TMP)) return;`, so the next
+ * call took that early return too: the abort had erased the very predicate that
+ * would have made it try again. The database stayed closed until a reboot, and
+ * nothing said so. This flag survives that erasure. */
+static volatile bool g_reopen_pending = false;
 static uint32_t g_up_total = 0;
 static uint32_t g_up_written = 0;
 static uint16_t g_up_next_seq = 1; // seq 0 is the header frame
@@ -130,8 +148,24 @@ void camera_store_init(void) {
         Serial.println("[CAM] (see the [BB] lines above for why; nothing was erased)");
         return;
     }
-    // A leftover temp file means a previous upload died. It is not a database.
+    // A leftover temp file means a previous upload died. It is not a database:
+    // camera_store_upload_end() validates magic, version and CRC and renames it
+    // in the same breath, so a camera.tmp at rest was never accepted.
     if(LittleFS.exists(CAM_TMP)) LittleFS.remove(CAM_TMP);
+
+    /* 🔴 camera.bak IS a database -- the previous one, complete and already
+     * proven readable. It only exists while a swap is in flight, so finding one
+     * here means power went away mid-swap. If the new file made it, drop the
+     * backup; if it did not, put the backup back. Never both, never neither. */
+    if(LittleFS.exists(CAM_BAK)) {
+        if(LittleFS.exists(CAM_PATH)) {
+            LittleFS.remove(CAM_BAK);
+        } else if(LittleFS.rename(CAM_BAK, CAM_PATH)) {
+            Serial.println("[CAM] 교체 중 전원이 끊겼다 — 이전 데이터베이스를 되살렸다");
+        } else {
+            Serial.println("[CAM] 🔴 camera.bak 을 되돌리지 못했다");
+        }
+    }
 
     /* Learning gets the opposite treatment, because it is not interchangeable
      * with the database. learn.tmp is only ever a COMPLETE, CRC-covered file
@@ -161,6 +195,14 @@ bool camera_store_ready(void) {
 const FsdCamDb* camera_store_db_acquire(uint32_t wait_ms) {
     if(!g_db_lock) return nullptr;
     if(xSemaphoreTake(g_db_lock, pdMS_TO_TICKS(wait_ms)) != pdTRUE) return nullptr;
+    /* Finish an abort that could not get the lock. This runs from the loop task
+     * roughly once a second and already holds the lock, so the retry costs
+     * nothing and needs no new timer or API. */
+    if(g_reopen_pending && !g_up_active) {
+        g_reopen_pending = !open_db() && LittleFS.exists(CAM_PATH);
+        if(!g_reopen_pending)
+            Serial.println("[CAM] 데이터베이스를 다시 열었다");
+    }
     if(!camera_store_ready()) {
         xSemaphoreGive(g_db_lock); // give it straight back: nothing to borrow
         return nullptr;
@@ -297,15 +339,36 @@ uint8_t camera_store_upload_end(void) {
         return err;
     }
 
-    // Swap. Removing first is required — rename() will not overwrite.
-    LittleFS.remove(CAM_PATH);
+    /* Swap, in three steps, so no step leaves zero copies on flash:
+     *   1. old  -> .bak   (two copies: .bak and .tmp)
+     *   2. .tmp -> live   (two copies: .bak and live)
+     *   3. drop .bak      (one copy: live, and it is the new one)
+     * A power cut between any two of them leaves at least one complete file,
+     * and camera_store_init() knows how to finish the job. */
+    LittleFS.remove(CAM_BAK);                       // any stale one is not ours
+    const bool had_old = LittleFS.exists(CAM_PATH);
+    if(had_old && !LittleFS.rename(CAM_PATH, CAM_BAK)) {
+        /* Could not step aside. Refuse rather than remove: the database we
+         * already have is worth more than the one we were handed. */
+        LittleFS.remove(CAM_TMP);
+        open_db();
+        xSemaphoreGive(g_db_lock);
+        Serial.println("[CAM] 🔴 이전 데이터베이스를 옮기지 못했다 — 교체를 취소한다");
+        return CAM_UP_WRITE_FAIL;
+    }
     if(!LittleFS.rename(CAM_TMP, CAM_PATH)) {
         LittleFS.remove(CAM_TMP);
+        if(had_old) LittleFS.rename(CAM_BAK, CAM_PATH);   // put the old one back
+        open_db();
         xSemaphoreGive(g_db_lock);
-        Serial.println("[CAM] rename failed — no database now");
+        Serial.println("[CAM] rename failed — 이전 데이터베이스를 되돌렸다");
         return CAM_UP_WRITE_FAIL;
     }
     bool opened = open_db();
+    /* Only now. Until open_db() has read the new file back there are still two
+     * candidates on flash, which is the whole point of the .bak. */
+    if(opened) LittleFS.remove(CAM_BAK);
+    else if(had_old && LittleFS.rename(CAM_BAK, CAM_PATH)) opened = open_db();
     xSemaphoreGive(g_db_lock);
     if(!opened) return CAM_UP_BAD_FORMAT;
     Serial.printf("[CAM] upload OK — %u cameras\n", (unsigned)g_db.rec_count);
@@ -397,7 +460,7 @@ void camera_store_upload_abort(void) {
      * out from under a lookup running on the loop task and memsetting the
      * FsdCamDb that lookup was reading. With nothing to abort there is nothing
      * to do, and doing nothing touches no shared state at all. */
-    if(!g_up_active && !LittleFS.exists(CAM_TMP)) return;
+    if(!g_up_active && !LittleFS.exists(CAM_TMP) && !g_reopen_pending) return;
 
     if(g_up_file) g_up_file.close();
     if(g_up_active) Serial.println("[CAM] upload aborted");
@@ -405,9 +468,17 @@ void camera_store_upload_abort(void) {
     g_up_written = 0;
     LittleFS.remove(CAM_TMP);
 
-    if(!g_db_lock) return;
-    if(xSemaphoreTake(g_db_lock, pdMS_TO_TICKS(200)) != pdTRUE) return; // skip the reopen
-    open_db();
+    /* Reopening needs the lock, and the lock can be busy. Remember that we owe a
+     * reopen instead of silently skipping it -- camera_store_db_acquire() pays
+     * the debt on the loop task. */
+    if(!g_db_lock) { g_reopen_pending = true; return; }
+    if(xSemaphoreTake(g_db_lock, pdMS_TO_TICKS(200)) != pdTRUE) {
+        g_reopen_pending = true;
+        return;
+    }
+    /* Only owe a reopen when there is something to open. A board that has never
+     * been given a camera.bin would otherwise carry the debt forever. */
+    g_reopen_pending = !open_db() && LittleFS.exists(CAM_PATH);
     xSemaphoreGive(g_db_lock);
 }
 

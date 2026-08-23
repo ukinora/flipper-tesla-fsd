@@ -61,3 +61,30 @@ const char* fsd_owner_verdict_str(FsdOwnerVerdict v) {
     default: return "unknown";
     }
 }
+
+/* ── which LINK the owner is on ───────────────────────────────────────────── */
+
+bool fsd_ble_session_teardown(uint16_t served, uint16_t owner,
+                              uint16_t who, uint32_t remaining) {
+    /* Nobody left: tear down whatever we thought we had. This is the safety
+     * net for a handle that went stale -- without it the real client's
+     * disconnect could be filed as "not our link" and the module would sit
+     * there believing a phone is present, never handing Active back. */
+    if (remaining == 0u) return true;
+    if (who == FSD_BLE_CONN_NONE) return false;   /* not a real link */
+    if (served != FSD_BLE_CONN_NONE && who == served) return true;
+    /* The owner's link, even when some other peer holds the served slot. This
+     * is the case that was missing, and it is the dangerous one: everything the
+     * teardown does exists to make the owner leaving safe. */
+    if (owner != FSD_BLE_CONN_NONE && who == owner) return true;
+    return false;
+}
+
+bool fsd_ble_session_apply_ok(bool owner_present, uint16_t served,
+                              uint16_t parked_on) {
+    if (!owner_present) return false;
+    if (parked_on == FSD_BLE_CONN_NONE) return false;
+    /* Same link that asked, still the one being served. A different handle
+     * means the asking link went away and something else took the slot. */
+    return served == parked_on;
+}
