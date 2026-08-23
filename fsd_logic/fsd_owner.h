@@ -78,6 +78,60 @@ bool fsd_owner_same(const FsdOwner* stored, uint8_t type, const uint8_t* addr);
 
 const char* fsd_owner_verdict_str(FsdOwnerVerdict v);
 
+/* ── which LINK the owner is on ──────────────────────────────────────────────
+ *
+ * Identity answers "may this peer command us". It does not answer "is the
+ * session we are serving still alive", and those came apart in a way that only
+ * shows up when TWO peers are connected at once.
+ *
+ * The module serves one session at a time, remembered as a connection handle.
+ * Nothing made that handle be the OWNER's handle: whoever connected first got
+ * it. So with a stranger connected first and the owner second --
+ * ordinary when a squatter holds the slot and the phone reconnects directly to
+ * a cached address -- the owner's disconnect was filed as "some other client
+ * left, our session is untouched" and every teardown was skipped:
+ *
+ *   - owner-present stayed true, so the 30 s Active recovery NEVER started;
+ *     the car drives away with a live transmitter and nobody to take it back
+ *   - a parked SET_MODE(Active) from the phone that just left still applied,
+ *     because its guard asked "is anyone connected" and the stranger was
+ *   - an interrupted camera.bin upload was never aborted
+ *
+ * These two predicates are that decision, kept pure so the host tests can hold
+ * a two-peer sequence still. BLE_CONN_NONE (0xFFFF) means "nobody".
+ */
+#define FSD_BLE_CONN_NONE 0xFFFFu
+
+/**
+ * Does a disconnect on `who` end the session we are serving?
+ *
+ * @param served     handle of the session being served, or FSD_BLE_CONN_NONE
+ * @param owner      handle the owner authenticated on, or FSD_BLE_CONN_NONE
+ * @param who        handle that just went away
+ * @param remaining  links still up AFTER this one left
+ *
+ * True for the served link, for the owner's link even when it is not the served
+ * one, and for "nobody is left" -- the last is the safety net that keeps a
+ * handle which somehow went stale from wedging the module forever.
+ */
+bool fsd_ble_session_teardown(uint16_t served, uint16_t owner,
+                              uint16_t who, uint32_t remaining);
+
+/**
+ * May work the BLE task parked for loop() still be applied?
+ *
+ * @param owner_present  the owner is authenticated on the link right now
+ * @param served         handle currently being served
+ * @param parked_on      handle that asked for the work
+ *
+ * 🔴 "Somebody is connected" is not the question. Granting Active because a
+ * STRANGER happens to be connected hands CAN transmit to a phone that already
+ * left, and the recovery timer is armed on disconnect -- which already ran.
+ * The permission would never be taken back.
+ */
+bool fsd_ble_session_apply_ok(bool owner_present, uint16_t served,
+                              uint16_t parked_on);
+
 #ifdef __cplusplus
 }
 #endif

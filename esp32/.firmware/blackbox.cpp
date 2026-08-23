@@ -191,6 +191,29 @@ static bool bb_name_ok(const char* name) {
     return true;
 }
 
+/* 🔴 Declared OUT here, above the backend #if, on purpose: do_flush() names
+ * every capture and do_flush() is common to all backends. Inside the disk block
+ * it compiled on this board and broke the other five -- the same shape that has
+ * caught this repository before (fork PR #56). Only the disk backend has a
+ * directory to seed it from; on RAM it stays 0, which is correct because that
+ * backend holds a single slot and has no ordering to get wrong. */
+/* Added to millis() when naming a capture, so names keep increasing across a
+ * reboot.
+ *
+ * 🔴 Capture names are evt_<ms>_<trigger>, and <ms> is millis(), which restarts
+ * at 0 every boot. "Latest" picks the largest <ms> and retention evicts the
+ * smallest, so a capture taken 3 s after a reboot looks OLDER than one taken
+ * 50 s before it. The BLE download has no "list" and no "fetch by name" -- only
+ * "give me the latest" -- so the operator can complete a download, see success,
+ * and be holding the previous capture. In the one-shot session before the TSL
+ * comes out that is discovered at home, if at all.
+ *
+ * Seeded at boot from the highest name already on disk, so the very next
+ * capture outranks everything stored. No NVS needed: the directory IS the
+ * record. With nothing stored the base is 0 and there is nothing to be out of
+ * order with. */
+static uint32_t g_name_base = 0;
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  Storage backends
 // ─────────────────────────────────────────────────────────────────────────────
@@ -310,6 +333,25 @@ static void bb_enforce_retention() {
 // Live directory scan → number of .json events. Only ever called from the
 // save/delete paths (which already touch the FS) and once at init; never from
 // the status/aux poll — that reads the g_event_count cache.
+/* Highest <ms> among stored captures. See g_name_base. */
+static uint32_t bb_scan_max_seq() {
+    if (!g_fs_ok) return 0;
+    File dir = BB_FS.open(BLACKBOX_DIR);
+    if (!dir) return 0;
+    uint32_t hi = 0;
+    for (File e = dir.openNextFile(); e; e = dir.openNextFile()) {
+        if (strstr(e.name(), ".json")) {
+            char base[40];
+            bb_basename(e.name(), base, sizeof(base));
+            uint32_t s = bb_seq_from_name(base);
+            if (s > hi) hi = s;
+        }
+        e.close();
+    }
+    dir.close();
+    return hi;
+}
+
 static int bb_scan_count() {
     if (!g_fs_ok) return 0;
     File dir = BB_FS.open(BLACKBOX_DIR);
@@ -409,6 +451,9 @@ static void backend_init() {
 #endif
     if (g_fs_ok && !BB_FS.exists(BLACKBOX_DIR)) BB_FS.mkdir(BLACKBOX_DIR);
     g_event_count = g_fs_ok ? bb_scan_count() : 0;  // one boot-time scan
+    /* +1 so the next capture strictly outranks the highest stored one, even if
+     * it is taken in the same millisecond of uptime as that one was. */
+    g_name_base = g_fs_ok ? bb_scan_max_seq() + 1u : 0u;
     Serial.printf("[BB] backend=%s ok=%d events=%d\n",
                   BLACKBOX_BACKEND_NAME, g_fs_ok, g_event_count);
 }
@@ -454,10 +499,52 @@ static uint32_t bb_free_bytes() {
  * is mid-write leaves the filesystem inconsistent, and after that EVERY capture
  * fails -- observed 2026-08-17, when the allocator started dividing by zero and
  * panicked the board. Refusing early keeps what is already saved. */
+/* Delete evictable captures, oldest first, until `need` bytes are free.
+ *
+ * 🔴 Retention is a COUNT rule (keep the newest BLACKBOX_RETAIN), so it does
+ * nothing about a disk filled by three large automatic captures -- and it only
+ * ran AFTER a successful write anyway. The preflight therefore refused new
+ * captures while gigabytes of evictable diagnostic data sat there. The capture
+ * that gets refused is whichever one comes next, and in the session before the
+ * TSL comes out that is the one that cannot be retaken.
+ *
+ * Manual captures are never touched, for the reason bb_is_manual() gives. When
+ * only manual ones are left this returns false and the caller refuses, which is
+ * the same answer as before -- just for a real reason. */
+static bool bb_make_room(uint32_t need) {
+    for (;;) {
+        if (bb_free_bytes() >= need) return true;
+        File dir = BB_FS.open(BLACKBOX_DIR);
+        if (!dir) return false;
+        uint32_t oldest = 0xFFFFFFFFu;
+        char oldest_base[40] = {};
+        for (File e = dir.openNextFile(); e; e = dir.openNextFile()) {
+            const char* nm = e.name();
+            if (strstr(nm, ".json")) {
+                char base[40];
+                bb_basename(nm, base, sizeof(base));
+                uint32_t sq = bb_seq_from_name(base);
+                if (!bb_is_manual(base) && sq < oldest) {
+                    oldest = sq;
+                    strncpy(oldest_base, base, sizeof(oldest_base) - 1);
+                }
+            }
+            e.close();
+        }
+        dir.close();
+        if (oldest_base[0] == '\0') return false;   // nothing left we may delete
+        char p[64];
+        snprintf(p, sizeof(p), BLACKBOX_DIR "/%s.log", oldest_base);  BB_FS.remove(p);
+        snprintf(p, sizeof(p), BLACKBOX_DIR "/%s.json", oldest_base); BB_FS.remove(p);
+        Serial.printf("[BB] 자리를 비우려고 %s 를 지웠다 (자동 캡처)\n", oldest_base);
+    }
+}
+
 static bool bb_store_fits(uint32_t frames, size_t json_len, const char* base) {
     uint32_t need = frames * BB_BYTES_PER_LINE + (uint32_t)json_len + BB_STORE_MARGIN;
     uint32_t have = bb_free_bytes();
     if (have >= need) return true;
+    if (bb_make_room(need)) return true;   // evictable data first, refusal second
     Serial.printf("[BB] 🔴 저장 거부 %s — 약 %lu KB 필요한데 %lu KB 남았다\n",
                   base, (unsigned long)(need / 1024u), (unsigned long)(have / 1024u));
     Serial.println("[BB]    캡처를 폰/USB 로 먼저 빼낸 뒤 지우고 다시 시도한다.");
@@ -465,25 +552,76 @@ static bool bb_store_fits(uint32_t frames, size_t json_len, const char* base) {
     return false;
 }
 
-static void backend_store(const char* base, const char* json,
-                          void (*emit)(File&)) {
-    if (!g_fs_ok) return;
-    char p[64];
-    snprintf(p, sizeof(p), BLACKBOX_DIR "/%s.log", base);
-    File lf = BB_OPEN_W(p);
-    if (lf) { emit(lf); lf.flush(); lf.close(); }
-    else Serial.printf("[BB] .log open failed: %s\n", p);
+/* Size of a stored file, read back from the filesystem. Deliberately reopens:
+ * the point is to learn what LANDED, which a write() return value cannot say. */
+static bool bb_size_of(const char* path, size_t* out) {
+    File f = BB_OPEN_R(path);
+    if (!f) return false;
+    if (out) *out = f.size();
+    f.close();
+    return true;
+}
 
-    snprintf(p, sizeof(p), BLACKBOX_DIR "/%s.json", base);
-    File jf = BB_OPEN_W(p);
-    if (jf) { jf.write((const uint8_t*)json, strlen(json)); jf.flush(); jf.close(); }
-    else Serial.printf("[BB] .json open failed: %s\n", p);
+/* Returns true only when BOTH halves of the capture are on flash and the
+ * right size. `expect_frames` is how many frames the emitter was given, so
+ * an empty .log can be told apart from a lost one. */
+static bool backend_store(const char* base, const char* json,
+                          uint32_t expect_frames,
+                          void (*emit)(File&)) {
+    if (!g_fs_ok) return false;
+    char lp[64], jp[64];
+    snprintf(lp, sizeof(lp), BLACKBOX_DIR "/%s.log", base);
+    snprintf(jp, sizeof(jp), BLACKBOX_DIR "/%s.json", base);
+
+    bool log_ok = false, json_ok = false;
+    const size_t json_len = strlen(json);
+
+    File lf = BB_OPEN_W(lp);
+    if (lf) { emit(lf); lf.flush(); lf.close(); log_ok = true; }
+    else Serial.printf("[BB] .log open failed: %s\n", lp);
+
+    File jf = BB_OPEN_W(jp);
+    if (jf) {
+        json_ok = jf.write((const uint8_t*)json, json_len) == json_len;
+        jf.flush();
+        jf.close();
+    } else Serial.printf("[BB] .json open failed: %s\n", jp);
+
+    /* 🔴 Ask the FILESYSTEM what landed, not the write call.
+     *
+     * Every one of open, write and flush could fail and the capture was
+     * still counted and still logged as "flushed". That is the worst shape
+     * a failure can take here: the operator reads a success line, pulls the
+     * TSL out, and finds the truncated file at home -- and the capture
+     * cannot be retaken. Reopening for size costs one directory lookup and
+     * catches short writes and lost flushes that the return values do not.
+     *
+     * An empty .log is only a fault when there were frames to write; a
+     * capture of a silent bus is legitimately empty. */
+    size_t on_disk = 0;
+    if (json_ok) json_ok = bb_size_of(jp, &on_disk) && on_disk == json_len;
+    if (log_ok && expect_frames > 0)
+        log_ok = bb_size_of(lp, &on_disk) && on_disk > 0;
+
+    if (!json_ok) {
+        /* The .json is what "latest" and the event list key on, so a bad one
+         * does not just lose this capture -- it hides the good ones behind
+         * it. Remove the pair. Captures stored EARLIER are untouched. */
+        BB_FS.remove(lp);
+        BB_FS.remove(jp);
+        Serial.printf("[BB] 🔴 %s 저장 실패 — 이 캡처는 남지 않았다\n", base);
+    } else if (!log_ok) {
+        /* Keep it: a short .log is still worth downloading, and its .json
+         * names it. Say so loudly instead of counting it as a success. */
+        Serial.printf("[BB] 🔴 %s 의 .log 가 불완전하다 — 저장 공간을 확인하라\n", base);
+    }
 
     bb_enforce_retention();
     // A new capture was just written and retention may have dropped others, so
     // whatever is buffered describes a filesystem that no longer exists.
     BB_RC_DROP();
     g_event_count = bb_scan_count();  // reflects the new event + any retention drop
+    return log_ok && json_ok;
 }
 
 // Status/poll path: return the cache, never scan (see g_event_count).
@@ -1116,7 +1254,11 @@ static void do_flush() {
     if (!started) window_start = g_trig_ms;
 
     char base[40];
-    snprintf(base, sizeof(base), "evt_%lu_%s", (unsigned long)g_trig_ms, trig_name(g_trig));
+    /* g_name_base, not a bare millis(): see the note on g_name_base. Without it
+     * a capture taken after a reboot sorts BELOW one taken before it, and
+     * "download the latest" hands over the wrong file while reporting success. */
+    snprintf(base, sizeof(base), "evt_%lu_%s",
+             (unsigned long)(g_name_base + g_trig_ms), trig_name(g_trig));
 
     char json[640];
     build_summary(json, sizeof(json), count, window_start, bus0, bus1);
@@ -1136,7 +1278,7 @@ static void do_flush() {
 #if defined(BLACKBOX_BACKEND_LITTLEFS) || defined(BLACKBOX_BACKEND_SD)
     if (!bb_store_fits(count, strlen(json), base)) return;   // nothing written
     g_emit_lo = lo; g_emit_hi = hi;
-    backend_store(base, json, disk_emit);
+    const bool stored = backend_store(base, json, count, disk_emit);
 #else
     // RAM: freeze the windowed frames into a contiguous buffer for download.
     BBFrame* frozen = (BBFrame*)malloc((size_t)(count ? count : 1) * sizeof(BBFrame));
@@ -1153,7 +1295,15 @@ static void do_flush() {
     } else {
         Serial.println("[BB] flush alloc failed");
     }
+    const bool stored = (frozen != nullptr);
 #endif
+    /* 🔴 Count and announce a capture only when it is actually on flash.
+     * "flushed" used to print unconditionally -- including after an open that
+     * failed -- so a lost capture and a stored one produced the same line. */
+    if (!stored) {
+        Serial.printf("[BB] 🔴 %s 를 저장하지 못했다 — 다시 캡처해야 한다\n", base);
+        return;
+    }
     g_captures++;
     Serial.printf("[BB] flushed %s  frames=%lu (can0=%lu can1=%lu)\n",
                   base, (unsigned long)count, (unsigned long)bus0, (unsigned long)bus1);

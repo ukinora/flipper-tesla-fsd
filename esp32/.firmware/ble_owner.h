@@ -73,5 +73,12 @@ void ble_owner_forget(void);
  */
 void ble_owner_erase_now(void);
 
+/** True while an enrolment change has not reached NVS yet.
+ *
+ * 🔴 Exists because a failed write used to be indistinguishable from a
+ * successful one: the flag was cleared regardless, so the module ran with an
+ * owner in RAM and rebooted with none. */
+bool ble_owner_save_pending(void);
+
 /** Print the current enrolment for the serial console. */
 void ble_owner_print(void);

@@ -2931,6 +2931,63 @@ static void test_owner(void) {
     CHECK(!fsd_owner_same(&o, 1u, NULL), "a NULL address matches nobody");
 }
 
+/* RT-01: the served session was whoever connected FIRST, not the owner.
+ *
+ * Reproduced from the red-team sequence: a stranger holds the slot, the phone
+ * connects second (Android reconnects to a bonded address directly, so this is
+ * not exotic), and then the phone leaves. Every teardown was skipped because
+ * "the handle that left is not the one we serve, and someone is still here" --
+ * so Active was never handed back and a SET_MODE parked by the departed phone
+ * still applied. */
+#define H_STRANGER 1u
+#define H_OWNER    2u
+
+static void test_ble_session(void) {
+    printf("\n-- BLE session scoping (RT-01) --\n");
+
+    /* The plain case: one peer, and it is the owner. */
+    CHECK(fsd_ble_session_teardown(H_OWNER, H_OWNER, H_OWNER, 0u),
+          "the only client leaves -> tear down");
+
+    /* 🔴 The defect. Stranger served, owner on a second link, owner leaves. */
+    CHECK(fsd_ble_session_teardown(H_STRANGER, H_OWNER, H_OWNER, 1u),
+          "owner leaves while a stranger stays -> tear down anyway");
+
+    /* The behaviour that must NOT regress: a stranger leaving may not tear the
+     * owner's session down. That hole cost an aborted upload once already. */
+    CHECK(!fsd_ble_session_teardown(H_OWNER, H_OWNER, H_STRANGER, 1u),
+          "a stranger leaves -> the owner's session is untouched");
+
+    /* Safety net: a stale served handle must not wedge the module. */
+    CHECK(fsd_ble_session_teardown(H_STRANGER, FSD_BLE_CONN_NONE, H_OWNER, 0u),
+          "nobody left -> tear down even if no handle matched");
+    CHECK(fsd_ble_session_teardown(FSD_BLE_CONN_NONE, FSD_BLE_CONN_NONE,
+                                   H_OWNER, 0u),
+          "nobody left and nothing was tracked -> still tear down");
+
+    /* An unknown owner handle must not turn every disconnect into a teardown. */
+    CHECK(!fsd_ble_session_teardown(H_OWNER, FSD_BLE_CONN_NONE, H_STRANGER, 1u),
+          "no owner handle known -> a stranger leaving changes nothing");
+    CHECK(!fsd_ble_session_teardown(H_OWNER, H_OWNER, FSD_BLE_CONN_NONE, 1u),
+          "a non-handle cannot end a session");
+
+    /* Deferred work: parked by the owner, applied from loop(). */
+    CHECK(fsd_ble_session_apply_ok(true, H_OWNER, H_OWNER),
+          "owner still on the served link -> apply");
+
+    /* 🔴 The second half of the defect: the old guard asked only whether ANY
+     * peer was connected, so the stranger kept the answer true. */
+    CHECK(!fsd_ble_session_apply_ok(false, H_STRANGER, H_OWNER),
+          "owner gone, stranger still connected -> do NOT apply");
+    CHECK(!fsd_ble_session_apply_ok(true, H_STRANGER, H_OWNER),
+          "owner flag stale but the slot moved -> do NOT apply");
+    CHECK(!fsd_ble_session_apply_ok(true, H_OWNER, FSD_BLE_CONN_NONE),
+          "nothing parked the request -> do NOT apply");
+    CHECK(!fsd_ble_session_apply_ok(false, FSD_BLE_CONN_NONE,
+                                    FSD_BLE_CONN_NONE),
+          "no link at all -> do NOT apply");
+}
+
 static void test_tx_allowlist(void) {
     printf("\n-- TX gate allow-list --\n");
 
@@ -3322,6 +3379,7 @@ int main(void) {
     test_power_verdict();
     test_power_quiet_ms();
     test_owner();
+    test_ble_session();
     test_speed_observer();
     test_selftest_decide();
 

@@ -18,6 +18,7 @@
 #ifdef BLE_SERVER_ENABLED
 
 #include "../../fsd_logic/fsd_autonomy.h"
+#include "../../fsd_logic/fsd_owner.h" // fsd_ble_session_* -- see RT-01
 #include "../../fsd_logic/fsd_button.h" // FSD_BTN_MAX — the logical button range
 #include "../../fsd_logic/fsd_wire.h"
 #include "blackbox.h"
@@ -103,6 +104,8 @@ static volatile bool g_connected = false;
  *
  * 0xFFFF is BLE_HS_CONN_HANDLE_NONE: nobody. */
 #define BLE_CONN_NONE 0xFFFFu
+static_assert(BLE_CONN_NONE == FSD_BLE_CONN_NONE,
+              "session sentinel must match fsd_owner.h");
 static volatile uint16_t g_conn_handle = BLE_CONN_NONE;
 static volatile bool g_state_subscribed = false;  // client enabled State notifications
 static volatile bool g_bulk_subscribed  = false;
@@ -144,11 +147,24 @@ static volatile uint32_t g_link_down_ms  = 0;  // 0 = link up or nothing to undo
 // cleared on disconnect. Failing closed here means the timer keeps running when
 // we are unsure — which ends in Listen-Only, the direction we want to fall.
 static volatile bool     g_owner_present  = false;
+/* WHICH link the owner authenticated on.
+ *
+ * 🔴 g_conn_handle used to be "whoever connected first", and that is not
+ * necessarily the owner. With a stranger in the slot and the phone connected
+ * second, the phone's disconnect was filed as somebody else's and every
+ * teardown was skipped -- so Active was never handed back. The predicate that
+ * decides this lives in fsd_owner.c, where a host test can hold the two-peer
+ * sequence still. */
+static volatile uint16_t g_owner_handle    = BLE_CONN_NONE;
 // SET_MODE arrives on the BLE task but has to be applied from loop(), because
 // applying it means switching a CAN controller. Single word each, written by
 // the BLE task and read-and-cleared in one place, so no lock is needed.
 static volatile bool     g_mode_req_pending = false;
 static volatile uint8_t  g_mode_req         = 0;
+/* The link that asked. Revalidated in ble_apply_mode_request(): "somebody is
+ * connected" is not the same question as "the phone that asked is still here",
+ * and answering the first one granted CAN transmit to a phone that had left. */
+static volatile uint16_t g_mode_req_handle  = BLE_CONN_NONE;
 // Same deal for the recorder. blackbox_set_enabled() allocates a ~114 KB ring,
 // which must not happen on the BLE host task, and the heap guard can refuse --
 // so like SET_MODE these are applied from loop() and answered with what really
@@ -340,7 +356,20 @@ static void ble_send_result(uint8_t cmd, uint8_t res, uint16_t extra) {
     // upload burst answering while a command result is queued) would otherwise
     // both carry the later value.
     g_ch_result->setValue(b, sizeof(b));
-    g_ch_result->indicate(b, sizeof(b));  // ACKed: a lost result desyncs the app
+    /* 🔴 To the link we serve, not to every subscriber.
+     *
+     * With no handle NimBLE sends to ALL subscribed peers, so a second
+     * client that merely subscribed received the owner's command results.
+     * Identity gates who may SEND a command (ble_owner_allows) -- it never
+     * gated who hears the answer. BLE_CONN_NONE degrades to the old
+     * broadcast, which is correct when there is no session to aim at. */
+    if (!g_ch_result->indicate(b, sizeof(b), g_conn_handle)) {
+        /* Not decoration: a dropped indication looks to the phone exactly
+         * like a module that never answered, and it waits out the full
+         * timeout before saying so. Naming it here is the only way to tell
+         * "the radio refused" from "the command was never seen". */
+        Serial.printf("[BLE] result cmd=0x%02X was NOT delivered\n", cmd);
+    }
 }
 
 // ── Bulk download ────────────────────────────────────────────────────────────
@@ -381,7 +410,7 @@ static uint8_t ble_bulk_start(bool json) {
     //
     // 🔴 The payload goes to notify() directly — never setValue()+notify().
     // See the comment in ble_bulk_pump() for what that costs.
-    g_ch_bulk->notify(hdr, BLE_BULK_HDR + 4 + nlen);
+    g_ch_bulk->notify(hdr, BLE_BULK_HDR + 4 + nlen, g_conn_handle);
 
     g_bulk_json   = json;
     g_bulk_offset = 0;
@@ -452,7 +481,8 @@ static void ble_bulk_pump(uint32_t now_ms) {
         // the old call could ONLY ever return true — the backpressure check
         // below was dead code, which is why `busy` stayed 0 while frames were
         // being lost.
-        if (!g_ch_bulk->notify(frame, BLE_BULK_HDR + n)) {  // full — retry later
+        /* Owner's link only: a capture carries the VIN. */
+        if (!g_ch_bulk->notify(frame, BLE_BULK_HDR + n, g_conn_handle)) {  // full — retry later
             g_bulk_busy++;
             if (i == 0) g_bulk_stall++;
             return;
@@ -529,7 +559,15 @@ static void ble_apply_mode_request(void) {
     // g_active_by_ble is already true, and it is not true yet -- so applying
     // Active here granted CAN transmit to a phone that had left, with nothing
     // left to take it back. Permanently.
-    if (!g_connected) {
+    const uint16_t asked_on = g_mode_req_handle;
+    g_mode_req_handle = BLE_CONN_NONE;
+    /* 🔴 "is anyone connected" is the wrong question, and it was the one being
+     * asked. With a second peer in the room, a stranger's presence answered it
+     * for a phone that had already gone -- so Active was granted to nobody, and
+     * onDisconnect had already run without arming the recovery timer, so it was
+     * granted PERMANENTLY. Ask instead whether the link that asked is still the
+     * one we serve, with the owner authenticated on it. */
+    if (!fsd_ble_session_apply_ok(g_owner_present, g_conn_handle, asked_on)) {
         Serial.printf("[BLE] mode request dropped — phone left before it was applied\n");
         return;
     }
@@ -545,7 +583,7 @@ static void ble_apply_mode_request(void) {
     // over SPI and is not instant. onDisconnect would have run while
     // g_active_by_ble was still false, so arm the timer here instead of
     // leaving the grant unowned.
-    if (ok && m == OpMode_Active && !g_connected && g_link_down_ms == 0) {
+    if (ok && m == OpMode_Active && !g_owner_present && g_link_down_ms == 0) {
         uint32_t t = millis();
         g_link_down_ms = t ? t : 1u;
         Serial.println("[BLE] phone left while the mode was being applied — recovery armed");
@@ -852,6 +890,7 @@ class CommandCB : public NimBLECharacteristicCallbacks {
                 break;
             }
             g_mode_req         = arg ? OpMode_Active : OpMode_ListenOnly;
+            g_mode_req_handle  = info.getConnHandle();
             g_mode_req_pending = true;
             break;
         }
@@ -952,6 +991,7 @@ class CommandCB : public NimBLECharacteristicCallbacks {
                                    "the autonomy floor is left for the next boot");
                 } else {
                     g_mode_req         = (uint8_t)floor;
+                    g_mode_req_handle  = info.getConnHandle();
                     g_mode_req_pending = true;
                 }
             }
@@ -1051,6 +1091,28 @@ class ServerCB : public NimBLEServerCallbacks {
         if (ble_owner_allows(info.getIdAddress().getType(),
                              info.getIdAddress().getVal())) {
             g_owner_present = true;
+            g_owner_handle  = info.getConnHandle();
+            /* 🔴 The owner's link BECOMES the served session.
+             *
+             * Whoever connected first used to keep it, so a stranger squatting
+             * the slot left the phone as "some other client" -- MTU changes
+             * were ignored, and the phone's disconnect skipped every teardown
+             * including the one that hands Active back. Adopting here is what
+             * makes the rest of this file's handle checks mean "the owner". */
+            if (g_conn_handle != g_owner_handle) {
+                Serial.printf("[BLE] owner is on handle %u — serving it\n",
+                              (unsigned)g_owner_handle);
+                g_conn_handle = g_owner_handle;
+                /* The MTU we were holding belonged to the other link. Ask the
+                 * stack for THIS one rather than keeping a number negotiated by
+                 * somebody else -- bulk chunk size is derived from it, and an
+                 * oversized chunk is silently dropped by the peer. */
+                uint16_t m = NimBLEDevice::getServer()
+                                 ? NimBLEDevice::getServer()->getPeerMTU(g_owner_handle)
+                                 : 0;
+                g_mtu = (m >= 23) ? m : 23;
+                Serial.printf("[BLE] MTU for the owner link: %u\n", (unsigned)g_mtu);
+            }
             g_link_down_ms  = 0;   // owner is back in time — cancel the revoke
         }
     }
@@ -1064,7 +1126,12 @@ class ServerCB : public NimBLEServerCallbacks {
          * or when nobody is left at all. */
         const uint16_t who = info.getConnHandle();
         const size_t remaining = srv ? srv->getConnectedCount() : 0u;
-        if (who != g_conn_handle && remaining > 0u) {
+        /* 🔴 The OWNER's link ends the session too, even when it is not the
+         * served one and even when another peer stays. Everything below exists
+         * to make the owner leaving safe; skipping it because a stranger is
+         * still connected is how a departed phone kept CAN transmit open. */
+        if (!fsd_ble_session_teardown(g_conn_handle, g_owner_handle,
+                                      who, (uint32_t)remaining)) {
             Serial.printf("[BLE] another client disconnected (handle %u); "
                           "session %u is untouched\n",
                           (unsigned)who, (unsigned)g_conn_handle);
@@ -1073,11 +1140,13 @@ class ServerCB : public NimBLEServerCallbacks {
             return;
         }
         g_conn_handle = BLE_CONN_NONE;
+        g_owner_handle = BLE_CONN_NONE;
         g_connected = false;
         g_owner_present = false;  // re-established only by a resolved owner bond
         // A mode change asked for by a phone that is now gone must not be
         // applied. See ble_apply_mode_request() for the window this closes.
         g_mode_req_pending = false;
+        g_mode_req_handle  = BLE_CONN_NONE;
         g_state_subscribed = false;  // subscriptions die with the link
         g_bulk_subscribed  = false;
         g_bulk_active      = false;  // a half-sent capture is not resumable
@@ -1302,7 +1371,7 @@ void ble_server_tick(uint32_t now_ms) {
         uint8_t cs[BLE_CAMSTAT_LEN];
         ble_pack_camstat(cs, now_ms);
         g_ch_camstat->setValue(cs, sizeof(cs));
-        g_ch_camstat->notify(cs, sizeof(cs));
+        g_ch_camstat->notify(cs, sizeof(cs), g_conn_handle);
     }
 
     if (now_ms - g_last_state_ms < BLE_STATE_PERIOD_MS) return;
@@ -1318,7 +1387,7 @@ void ble_server_tick(uint32_t now_ms) {
     ble_pack_state(buf, g_fps);
 
     g_ch_state->setValue(buf, sizeof(buf));
-    g_ch_state->notify(buf, sizeof(buf));
+    g_ch_state->notify(buf, sizeof(buf), g_conn_handle);
 }
 
 bool ble_server_connected(void) { return g_connected; }
