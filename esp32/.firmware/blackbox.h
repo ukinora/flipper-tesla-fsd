@@ -149,6 +149,18 @@ size_t blackbox_read_chunk(const char* name, bool json, size_t offset,
 // Name of the most recent capture (false when there is none). Enough for the
 // common case — grab the dump that was just taken — without making the client
 // parse the listing first.
+/** True while a capture is on its way to disk.
+ *
+ * 🔴 blackbox_latest_name() answers with the newest *stored* capture, so during
+ * the post-roll and the flush it names the PREVIOUS one -- and a download then
+ * succeeds with the wrong file. blackbox_mark() returns the wait, but it only
+ * covers the post-roll: writing ~1.4 MB to LittleFS takes seconds more, and the
+ * app that waited exactly as told still landed inside the write (2026-08-31).
+ *
+ * g_armed already spans both halves (blackbox_tick() clears it AFTER do_flush()),
+ * so callers can simply refuse and retry instead of guessing a duration. */
+bool   blackbox_capture_pending();
+
 bool   blackbox_latest_name(char* out, size_t cap);
 bool   blackbox_delete(const char* name);
 void   blackbox_delete_all();
