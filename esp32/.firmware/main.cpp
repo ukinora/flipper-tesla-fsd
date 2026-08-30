@@ -840,11 +840,19 @@ static void debug_log_bus_stats() {
             Serial.printf("[CAN] %s: 꺼져 있다 (빌드 플래그 또는 격리)\n", name);
             continue;
         }
-        Serial.printf("[CAN] %s: RX=%lu TX=%lu Err=%lu %s\n",
+        // The bare Err number is not comparable between the two drivers.
+        // Reading it as if it were sent one bench session chasing a wiring
+        // fault that was really an RX-queue overflow (2026-08-31). Make each
+        // bus say what its own number counted.
+        char det[96];
+        det[0] = 0;
+        g_can[i]->errorDetail(det, sizeof(det));
+        Serial.printf("[CAN] %s: RX=%lu TX=%lu Err=%lu%s %s\n",
                       name,
                       (unsigned long)g_can[i]->rxCount(),
                       (unsigned long)g_can[i]->txCount(),
                       (unsigned long)g_can[i]->errorCount(),
+                      det,
                       g_can_ok[i] ? (g_can[i]->isListenOnly() ? "Listen-Only" : "Active")
                                   : "초기화 실패");
     }

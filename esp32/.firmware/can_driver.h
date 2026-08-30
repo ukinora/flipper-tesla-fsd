@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdint.h>
+#include <stddef.h>
 #include "fsd_handler.h"  // for CanFrame
 
 enum CanBusId : uint8_t {
@@ -33,6 +34,13 @@ public:
      *  TWAI: rx_missed + bus_errors + tx_failed.
      *  MCP2515: number of sendMessage() failures (typically ALLTXBUSY). */
     virtual uint32_t errorCount() = 0;
+
+    /** Short human-readable breakdown of what errorCount() just counted.
+     *  The two drivers count different things, and a bare number invites the
+     *  reader to compare them as if they were the same -- can1 in Listen-Only
+     *  cannot report anything but 0, which reads as "clean" next to a TWAI
+     *  number that includes RX-queue overflow. Writes a suffix (may be empty). */
+    virtual void errorDetail(char *out, size_t n) { if (n) out[0] = 0; }
 
     /** Cumulative count of frames successfully transmitted on the bus. */
     virtual uint32_t txCount() = 0;
