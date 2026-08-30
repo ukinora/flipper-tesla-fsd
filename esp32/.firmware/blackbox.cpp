@@ -1395,6 +1395,11 @@ size_t blackbox_read_chunk(const char* name, bool json, size_t offset,
     return backend_read_chunk(name, json, offset, out, cap);
 }
 
+// Spans arm -> post-roll -> flush, because blackbox_tick() clears g_armed only
+// after do_flush() returns. That is exactly the window in which "the latest
+// capture" is still the previous one.
+bool blackbox_capture_pending() { return g_armed; }
+
 bool blackbox_latest_name(char* out, size_t cap) {
     return backend_latest_name(out, cap);
 }

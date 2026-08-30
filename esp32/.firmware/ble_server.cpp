@@ -384,6 +384,17 @@ static size_t ble_bulk_payload_cap() {
 // up state — the actual pumping happens in ble_server_tick().
 static uint8_t ble_bulk_start(bool json) {
     if (g_bulk_active) return BLE_RES_BUSY;
+    /* 🔴 A capture is armed or being written -- do not serve "latest" yet.
+     *
+     * It would hand back the PREVIOUS capture and report success, which is the
+     * failure blackbox_mark()'s wait time was added to prevent. That wait only
+     * covers the post-roll though; the flush writes ~1.4 MB more, and on
+     * 2026-08-31 an app that waited exactly as told still asked mid-write.
+     * With nothing stored yet that surfaced as "no capture" on a module that
+     * had one coming; with an older capture present it would have been silent.
+     *
+     * BUSY already means "try again shortly", so the client just retries. */
+    if (blackbox_capture_pending()) return BLE_RES_BUSY;
     if (!g_bulk_subscribed) return BLE_RES_REJECTED;  // nobody would hear it
     if (!blackbox_latest_name(g_bulk_name, sizeof(g_bulk_name))) return BLE_RES_NOT_FOUND;
 
