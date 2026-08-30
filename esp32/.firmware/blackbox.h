@@ -161,6 +161,14 @@ size_t blackbox_read_chunk(const char* name, bool json, size_t offset,
  * so callers can simply refuse and retry instead of guessing a duration. */
 bool   blackbox_capture_pending();
 
+/** 마지막 **수동** mark 가 파일이 되지 못했나 (자리 부족 · 쓰기 실패).
+ *
+ * 🔴 그 상태에서 "최신 캡처" 를 내주면 **직전 캡처가 성공으로 나간다.**
+ * 2026-08-31 에 실물로 재현했다 — 앱에는 전부 성공으로 보이고, 사장님은
+ * 직전 동작의 파일을 들고 차를 떠난다. 되돌릴 수 없는 캡처에서 조용히
+ * 일어난다. 자동 캡처(EVT_*)는 세지 않는다. */
+bool   blackbox_last_mark_lost();
+
 bool   blackbox_latest_name(char* out, size_t cap);
 bool   blackbox_delete(const char* name);
 void   blackbox_delete_all();

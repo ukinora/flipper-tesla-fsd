@@ -24,7 +24,29 @@ void prefs_load(FSDState *state) {
     // so the flag we report over BLE matches what the code will actually do.)
     state->nag_killer               = FSD_NAG_KILLER_ENABLED
                                         ? g_prefs.getBool("nag", true) : false;
+    /* 🔴 켤 방법이 없는 기능은 **플래시가 기억해도 복원하지 않는다**
+     * (2026-08-31 레드팀 ⑧). 바로 위 nag_killer 와 같은 규칙이다.
+     *
+     * `contap`(0x229 기어 스토크)과 `precond`(CAN_ID_TRIP_PLANNING)를 켤 수
+     * 있었던 것은 **웹 대시보드 하나뿐**이고, 그것은 PR #28 에서 이미지에서
+     * 사라졌다. 이 빌드에는 BLE 명령도 시리얼 명령도 없다 — 전수로 확인했다.
+     *
+     * 그런데 **NVS 키는 재플래시를 넘어 살아남는다.** WiFi 빌드를 한 번이라도
+     * 돌린 보드는 이 값이 true 인 채로 부팅하고, 그러면 Active 로 올리는
+     * 순간 **아무도 요청한 적 없는 프레임이 나간다.**
+     *
+     * 🔴 2026-08-31 에 이 표면이 넓어졌다 — `FSD_DISABLED_BUS_MASK` 를 지우면서
+     * `can0` 이 살아났고, 생성 프레임의 기본 경로가 바로 그 `can0` 이다.
+     *
+     * 0x229 는 send_on_bus() 가 이미 무조건 거부한다. precondition 은 그런
+     * 그물이 없었다 — 그래서 여기서 뿌리를 끊는다. 다른 보드(WiFi 가 살아
+     * 있는)는 그대로 복원한다. */
+#if defined(FSD_NO_WIFI)
+    state->continuous_ap            = false;
+    state->precondition             = false;
+#else
     state->continuous_ap            = g_prefs.getBool("contap", false);
+#endif
     state->ap_first                 = g_prefs.getBool("apfirst",false);
     state->ap_first_edge            = g_prefs.getBool("apfe",   false);
     state->ap_first_minimal         = g_prefs.getBool("apmi",   false);
@@ -38,7 +60,9 @@ void prefs_load(FSDState *state) {
     state->force_fsd                = g_prefs.getBool("force",  false);
     state->china_mode               = g_prefs.getBool("china",  false);
     state->tlssc_restore            = g_prefs.getBool("tlssc",  false);
+#if !defined(FSD_NO_WIFI)
     state->precondition             = g_prefs.getBool("precond",false);
+#endif
     state->emergency_vehicle_detect = g_prefs.getBool("emrg",   false);
     state->summon_unlock            = g_prefs.getBool("summon", false);
     state->continue_on_green        = g_prefs.getBool("cog",    false);
