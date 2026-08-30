@@ -157,7 +157,16 @@
 #define BLE_RES_UNSUPPORTED 3u
 #define BLE_RES_SAFETY      4u  // blocked by a safety gate (e.g. moving vehicle)
 #define BLE_RES_NOT_FOUND   5u  // nothing to download
-#define BLE_RES_BUSY        6u  // a transfer is already running
+#define BLE_RES_BUSY        6u  // a transfer is already running, or a capture is being written
+
+/* DUMP_START 가 BUSY 일 때 `extra` 에 실리는 이유 (2026-08-31 레드팀 ⑥).
+ *
+ * 🔴 둘 다 "잠시 뒤 다시 물어라" 지만 **사람에게는 전혀 다른 소식**이다:
+ *   TRANSFER = 이미 받고 있다 (잘못 눌렀다)
+ *   SAVING   = 모듈이 캡처를 쓰고 있다 (정상이니 기다려라) */
+#define BLE_BUSY_NONE       0u
+#define BLE_BUSY_TRANSFER   1u
+#define BLE_BUSY_SAVING     2u
 // The link is encrypted and bonded, but this phone is not the one the module
 // was set up with. Distinct from REJECTED so the app can say so instead of
 // showing a generic failure — the fix is a button press in the car, which the

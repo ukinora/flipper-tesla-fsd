@@ -382,8 +382,14 @@ static size_t ble_bulk_payload_cap() {
 
 // Arms a transfer of the newest capture. Runs on the BLE task, so it only sets
 // up state — the actual pumping happens in ble_server_tick().
-static uint8_t ble_bulk_start(bool json) {
-    if (g_bulk_active) return BLE_RES_BUSY;
+/* why 로 BUSY 의 이유를 돌려준다 (2026-08-31 레드팀 ⑥).
+ *
+ * BUSY 하나가 두 뜻을 겸하고 있었다 — "다른 전송이 돌고 있다" 와 "캡처를
+ * 저장하는 중이다". 앱은 둘 다 재시도하지만 **사람에게는 전혀 다른 소식**이다:
+ * 앞의 것은 "잘못 눌렀다", 뒤의 것은 "정상이니 기다려라". */
+static uint8_t ble_bulk_start(bool json, uint8_t* why) {
+    if (why) *why = BLE_BUSY_NONE;
+    if (g_bulk_active) { if (why) *why = BLE_BUSY_TRANSFER; return BLE_RES_BUSY; }
     /* 🔴 A capture is armed or being written -- do not serve "latest" yet.
      *
      * It would hand back the PREVIOUS capture and report success, which is the
@@ -394,7 +400,13 @@ static uint8_t ble_bulk_start(bool json) {
      * had one coming; with an older capture present it would have been silent.
      *
      * BUSY already means "try again shortly", so the client just retries. */
-    if (blackbox_capture_pending()) return BLE_RES_BUSY;
+    if (blackbox_capture_pending()) { if (why) *why = BLE_BUSY_SAVING; return BLE_RES_BUSY; }
+    /* 🔴 방금 찍은 것이 저장되지 못했다면 **직전 캡처를 내주지 않는다.**
+     *
+     * do_flush() 는 자리가 모자라면 아무것도 안 쓰고 돌아가고, 그러면 여기
+     * 눈에는 "무장 안 됨 + 캡처 있음" 이라 옛 파일이 성공으로 나간다.
+     * 2026-08-31 실물 재현: 두 번째 mark 가 거부됐는데 latest 는 첫 캡처였다. */
+    if (blackbox_last_mark_lost()) return BLE_RES_NOT_FOUND;
     if (!g_bulk_subscribed) return BLE_RES_REJECTED;  // nobody would hear it
     if (!blackbox_latest_name(g_bulk_name, sizeof(g_bulk_name))) return BLE_RES_NOT_FOUND;
 
@@ -1030,7 +1042,11 @@ class CommandCB : public NimBLECharacteristicCallbacks {
             break;
 
         case BLE_CMD_DUMP_START:
-            ble_send_result(cmd, ble_bulk_start(arg != 0), 0);
+            {
+                uint8_t why = BLE_BUSY_NONE;
+                uint8_t res = ble_bulk_start(arg != 0, &why);
+                ble_send_result(cmd, res, why);   // extra = BUSY 의 이유
+            }
             break;
 
         case BLE_CMD_DUMP_STOP:

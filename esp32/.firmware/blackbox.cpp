@@ -132,6 +132,26 @@ static bool      g_ring_psram = false;
 static bool      g_want_psram = false;  // size decision from init; alloc is lazy
 
 static bool      g_armed = false;
+
+/* 🔴 "방금 찍은 것이 실제로 저장됐는가" 를 센다 (2026-08-31 레드팀 ①).
+ *
+ * do_flush() 는 자리가 모자라면 **아무것도 안 쓰고 return** 하고, 그 직후
+ * blackbox_tick() 이 g_armed 를 내린다. 그러면 ble_bulk_start() 의 눈에는
+ * "무장 안 됨 + 캡처 있음" 이라 **직전 캡처를 성공으로 내준다.**
+ *
+ * 실물 재현 (2026-08-31):
+ *   flushed evt_5249_manual        <- 캡처 A 저장, 남은 공간 1824 KB
+ *   저장 거부 evt_25279_manual     <- 두 번째는 거부됐는데
+ *   read test evt_5249_manual.log  <- "최신" 은 여전히 A 다
+ *
+ * 앱에는 전부 성공으로 보이고, 사장님은 **직전 동작의 파일**을 들고 차를
+ * 떠난다. 되돌릴 수 없는 캡처에서 이것이 조용히 일어난다.
+ *
+ * 두 수가 어긋나 있으면 "마지막 수동 mark 가 파일이 되지 못했다" 는 뜻이다.
+ * 🔴 **자동 캡처는 세지 않는다** — 차에서 EVT_* 가 실패했다고 사장님의 정상
+ * 다운로드를 막으면 안 된다. 사람이 요청한 그 한 건만 지킨다. */
+static uint32_t  g_manual_armed_n = 0;   // MANUAL 로 무장한 횟수
+static uint32_t  g_manual_saved_n = 0;   // 그중 실제로 파일이 된 횟수
 static BBTrigger g_trig = BB_TRIG_ABORT;
 static uint32_t  g_trig_ms = 0;
 static uint32_t  g_flush_at_ms = 0;
@@ -550,6 +570,28 @@ static bool bb_store_fits(uint32_t frames, size_t json_len, const char* base) {
     Serial.println("[BB]    캡처를 폰/USB 로 먼저 빼낸 뒤 지우고 다시 시도한다.");
     Serial.println("[BB]    (수동 캡처는 자동으로 지워지지 않는다 — 일부러 그렇게 뒀다)");
     return false;
+}
+
+/* 무장하기 **전에** 이 캡처가 들어갈 자리가 있는지 어림한다.
+ *
+ * bb_store_fits() 는 flush 때, 즉 5초 뒤에야 불린다. 그때 거부하면 앱은 이미
+ * "기록했습니다" 를 받은 뒤다 — 그 창이 위 g_manual_* 주석의 사고다. 여기서
+ * 먼저 보면 사장님이 **그 자리에서** 알고 지우고 다시 찍을 수 있다.
+ *
+ * 어림하는 법: pre-roll 창에 이미 들어와 있는 프레임 수를 세고 **두 배**로
+ * 본다(post-roll 이 같은 속도로 온다고 가정). 링 크기를 넘지 않는다.
+ *
+ * ⚠️ 어림이지 보장이 아니다. 그래서 이것만으로 끝내지 않고 g_manual_* 이
+ *    뒤를 받친다 — 어림이 빗나가 flush 가 실패해도 엉뚱한 파일은 안 나간다. */
+static uint32_t bb_estimated_need(uint32_t now_ms) {
+    uint32_t lo = (now_ms >= BLACKBOX_PRE_MS) ? now_ms - BLACKBOX_PRE_MS : 0u;
+    uint32_t pre = 0;
+    for (uint32_t i = g_tail; i != g_head; i = ring_next(i)) {
+        if (g_ring[i].ts_ms >= lo) pre++;
+    }
+    uint32_t est = (pre > (0xFFFFFFFFu / 2u)) ? g_cap : pre * 2u;
+    if (est > g_cap) est = g_cap;
+    return est * BB_BYTES_PER_LINE + BB_STORE_MARGIN + 1024u;   /* + .json */
 }
 
 /* Size of a stored file, read back from the filesystem. Deliberately reopens:
@@ -1113,6 +1155,7 @@ void blackbox_arm(BBTrigger trig, const FSDState* snap, uint32_t now_ms) {
     if (g_cap == 0 || g_state == nullptr || !g_state->blackbox_enabled) return;
     if (g_armed) return;  // already capturing; ignore until the post-roll flushes
     g_armed = true;
+    if (trig == BB_TRIG_MANUAL) g_manual_armed_n++;   // 짝은 do_flush 에서 맞춘다
     g_trig = trig;
     g_trig_ms = now_ms;
     g_flush_at_ms = now_ms + BLACKBOX_POST_MS;
@@ -1137,6 +1180,23 @@ void blackbox_busoff(uint32_t now_ms) {
 
 uint32_t blackbox_mark(uint32_t now_ms) {
     if (g_state == nullptr) return 0;
+#if defined(BLACKBOX_BACKEND_LITTLEFS) || defined(BLACKBOX_BACKEND_SD)
+    /* 🔴 자리가 없으면 **무장하지 않는다** (2026-08-31 레드팀 ①).
+     *
+     * 예전에는 그냥 무장하고 5초 뒤 flush 에서 거부했다. 그 사이 앱은
+     * "기록했습니다" 를 받고 기다렸다가 **직전 캡처**를 성공으로 받아 갔다.
+     * 여기서 거부하면 사장님이 그 자리에서 알고 지우고 다시 찍는다. */
+    if (g_cap != 0 && g_ring != nullptr) {
+        uint32_t need = bb_estimated_need(now_ms);
+        uint32_t have = bb_free_bytes();
+        if (have < need) {
+            Serial.printf("[BB] 🔴 기록하지 않았다 — 약 %lu KB 필요한데 %lu KB 남았다\n",
+                          (unsigned long)(need / 1024u), (unsigned long)(have / 1024u));
+            Serial.println("[BB]    받아낸 뒤 'bbclear yes' 로 지우고 다시 찍는다.");
+            return 0;   /* 0 = 무장되지 않았다. BLE 는 REJECTED 로 답한다 */
+        }
+    }
+#endif
     FSDState snap;
     bb_enter();
     FSDEventType e = fsd_events_inject(g_state, EVT_MANUAL, now_ms);
@@ -1305,6 +1365,9 @@ static void do_flush() {
         return;
     }
     g_captures++;
+    /* 파일이 실제로 생겼을 때만 짝을 맞춘다. 위 early return 들은
+     * 여기에 닿지 못하므로 어긋난 채로 남는다 — 그게 신호다. */
+    if (g_trig == BB_TRIG_MANUAL) g_manual_saved_n = g_manual_armed_n;
     Serial.printf("[BB] flushed %s  frames=%lu (can0=%lu can1=%lu)\n",
                   base, (unsigned long)count, (unsigned long)bus0, (unsigned long)bus1);
 #if defined(BLACKBOX_BACKEND_LITTLEFS)
@@ -1399,6 +1462,12 @@ size_t blackbox_read_chunk(const char* name, bool json, size_t offset,
 // after do_flush() returns. That is exactly the window in which "the latest
 // capture" is still the previous one.
 bool blackbox_capture_pending() { return g_armed; }
+
+/* 마지막 수동 mark 가 파일이 되지 못했나. ble_bulk_start() 가 이걸 보고
+ * **직전 캡처를 내주지 않는다** — 그것이 성공으로 보이는 것이 사고다. */
+bool blackbox_last_mark_lost() {
+    return !g_armed && (g_manual_armed_n != g_manual_saved_n);
+}
 
 bool blackbox_latest_name(char* out, size_t cap) {
     return backend_latest_name(out, cap);

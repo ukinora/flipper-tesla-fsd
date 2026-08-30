@@ -260,6 +260,13 @@ static void serial_command_tick() {
                 uint32_t f = blackbox_free_bytes();
                 Serial.printf("[BB] 남은 공간 %lu KB · 저장된 캡처 %d 개\n",
                               (unsigned long)(f / 1024u), blackbox_event_count());
+                /* 🔴 마지막 수동 mark 가 파일이 되지 못했으면 그렇게 말한다.
+                 * 앱에는 "받을 것이 없습니다" 로만 보이는데, 그 문장만으로는
+                 * 다시 찍어야 하는지 지워야 하는지 알 수 없다. */
+                if (blackbox_last_mark_lost()) {
+                    Serial.println("[BB] 🔴 마지막 기록이 저장되지 못했다 — 받기가 거부된다");
+                    Serial.println("[BB]    받아낸 뒤 'bbclear yes' 로 지우고 다시 찍는다");
+                }
             } else if (serial_cmd_equals(buf, "bbread")) {
                 // Diagnostic: time the capture READ path with no radio in it.
                 //
