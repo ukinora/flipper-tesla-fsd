@@ -116,6 +116,18 @@ public:
         return info.rx_missed_count + info.bus_error_count + info.tx_failed_count;
     }
 
+    // rx_missed is not a bus fault: it means frames arrived and the driver
+    // queue was full. Lumping it in with bus_err made a busy bench look like
+    // a wiring problem (2026-08-31, both channels replayed at once).
+    void errorDetail(char *out, size_t n) override {
+        twai_status_info_t info;
+        if (twai_get_status_info(&info) != ESP_OK) { if (n) out[0] = 0; return; }
+        snprintf(out, n, " (rx_missed=%lu bus_err=%lu tx_fail=%lu)",
+                 (unsigned long)info.rx_missed_count,
+                 (unsigned long)info.bus_error_count,
+                 (unsigned long)info.tx_failed_count);
+    }
+
     // Take the controller off the bus for good (this power cycle). The storm
     // guard calls this; uninstalling is what actually stops the interrupts.
     void shutdown() override { stop_and_uninstall(); }
@@ -354,6 +366,15 @@ public:
 
     uint32_t errorCount() override {
         return err_count_;
+    }
+
+    // Incremented only in send(), which returns at its first line while
+    // Listen-Only. So 0 here is guaranteed by construction, not measured --
+    // say so, or it reads as "this bus is clean and the other one is not".
+    void errorDetail(char *out, size_t n) override {
+        snprintf(out, n, listen_only_
+                     ? " (TX failures only -- always 0 in Listen-Only)"
+                     : " (TX failures only)");
     }
 
     uint32_t txCount() override { return tx_count_; }
