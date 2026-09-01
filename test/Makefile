@@ -40,6 +40,24 @@ BODY_SRC := test_body.c $(ROOT)/fsd_logic/fsd_body.c $(ROOT)/fsd_logic/fsd_body_
 test_body: $(BODY_SRC) $(ROOT)/fsd_logic/fsd_body.h $(ROOT)/fsd_logic/fsd_body_t1.h $(ROOT)/fsd_logic/fsd_body_t2.h $(ROOT)/fsd_logic/fsd_autonomy.h
 	$(CC) $(CFLAGS) -I$(ROOT)/fsd_logic $(BODY_SRC) -o $@
 
+# The TX chokepoint, at bit granularity. Separate binary from test_body because
+# it answers a different question: not "may this action happen" but "may this
+# frame carry this action". Links fsd_body.c only for fsd_body_action_str().
+#
+# 🔴 NOT "WIRE_SRC": that name is already taken by test_wire further down, and
+# make expands variables lazily — the later assignment wins, so this rule
+# silently built test_body_wire out of test_wire.c. It reported "141 passed",
+# which looked entirely normal, because test_wire has 141 tests.
+#
+# Only mutation testing caught it: ten deliberate holes punched in the
+# chokepoint and not one of them turned a test red. Both of this repo's
+# recurring traps at once — a plausible number that was measuring something
+# else, and silence read as success.
+BODYWIRE_SRC := test_body_wire.c $(ROOT)/fsd_logic/fsd_body_wire.c $(ROOT)/fsd_logic/fsd_body.c
+
+test_body_wire: $(BODYWIRE_SRC) $(ROOT)/fsd_logic/fsd_body_wire.h $(ROOT)/fsd_logic/fsd_body.h $(ROOT)/fsd_logic/fsd_autonomy.h
+	$(CC) $(CFLAGS) -I$(ROOT)/fsd_logic $(BODYWIRE_SRC) -o $@
+
 # Button press classification. Timing only — everything radio-specific is in
 # esp32/.firmware/ble_central.cpp and needs a button to test.
 BTN_SRC := test_button.c $(ROOT)/fsd_logic/fsd_button.c
@@ -72,18 +90,19 @@ CAPJSON_SRC := test_cap_json.c $(ROOT)/fsd_logic/fsd_cap_json.c
 test_cap_json: $(CAPJSON_SRC) $(ROOT)/fsd_logic/fsd_cap_json.h
 	$(CC) $(CFLAGS) -I$(ROOT)/fsd_logic $(CAPJSON_SRC) -o $@
 
-check: test_fsd_core test_speed_profile test_camera test_gps test_body test_button test_btn_j6 test_wire test_cap_json
+check: test_fsd_core test_speed_profile test_camera test_gps test_body test_body_wire test_button test_btn_j6 test_wire test_cap_json
 	./test_fsd_core
 	./test_speed_profile
 	./test_camera
 	./test_gps
 	./test_body
+	./test_body_wire
 	./test_button
 	./test_btn_j6
 	./test_wire
 	./test_cap_json
 
 clean:
-	rm -rf test_fsd_core test_speed_profile test_camera test_gps test_body test_button test_btn_j6 test_wire test_cap_json *.dSYM
+	rm -rf test_fsd_core test_speed_profile test_camera test_gps test_body test_body_wire test_button test_btn_j6 test_wire test_cap_json *.dSYM
 
 .PHONY: check clean
