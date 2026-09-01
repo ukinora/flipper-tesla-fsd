@@ -74,6 +74,13 @@ TRIGGER_SRC := test_trigger.c $(ROOT)/fsd_logic/fsd_trigger.c $(ROOT)/fsd_logic/
 test_trigger: $(TRIGGER_SRC) $(ROOT)/fsd_logic/fsd_trigger.h $(ROOT)/fsd_logic/fsd_signal.h $(ROOT)/fsd_logic/fsd_button.h
 	$(CC) $(CFLAGS) -I$(ROOT)/fsd_logic $(TRIGGER_SRC) -o $@
 
+# The rule engine, and the four layers together. The centrepiece is the owner's
+# own two examples from 2026-08-20, built out of real captured frames.
+RULES_SRC := test_rules.c $(ROOT)/fsd_logic/fsd_rules.c $(ROOT)/fsd_logic/fsd_trigger.c $(ROOT)/fsd_logic/fsd_signal.c $(ROOT)/fsd_logic/fsd_button.c $(ROOT)/fsd_logic/fsd_body.c
+
+test_rules: $(RULES_SRC) $(ROOT)/fsd_logic/fsd_rules.h $(ROOT)/fsd_logic/fsd_trigger.h $(ROOT)/fsd_logic/fsd_body.h
+	$(CC) $(CFLAGS) -I$(ROOT)/fsd_logic $(RULES_SRC) -o $@
+
 # Button press classification. Timing only — everything radio-specific is in
 # esp32/.firmware/ble_central.cpp and needs a button to test.
 BTN_SRC := test_button.c $(ROOT)/fsd_logic/fsd_button.c
@@ -106,7 +113,7 @@ CAPJSON_SRC := test_cap_json.c $(ROOT)/fsd_logic/fsd_cap_json.c
 test_cap_json: $(CAPJSON_SRC) $(ROOT)/fsd_logic/fsd_cap_json.h
 	$(CC) $(CFLAGS) -I$(ROOT)/fsd_logic $(CAPJSON_SRC) -o $@
 
-check: test_fsd_core test_speed_profile test_camera test_gps test_body test_body_wire test_signal test_trigger test_button test_btn_j6 test_wire test_cap_json
+check: test_fsd_core test_speed_profile test_camera test_gps test_body test_body_wire test_signal test_trigger test_rules test_button test_btn_j6 test_wire test_cap_json
 	./test_fsd_core
 	./test_speed_profile
 	./test_camera
@@ -115,12 +122,13 @@ check: test_fsd_core test_speed_profile test_camera test_gps test_body test_body
 	./test_body_wire
 	./test_signal
 	./test_trigger
+	./test_rules
 	./test_button
 	./test_btn_j6
 	./test_wire
 	./test_cap_json
 
 clean:
-	rm -rf test_fsd_core test_speed_profile test_camera test_gps test_body test_body_wire test_signal test_trigger test_button test_btn_j6 test_wire test_cap_json *.dSYM
+	rm -rf test_fsd_core test_speed_profile test_camera test_gps test_body test_body_wire test_signal test_trigger test_rules test_button test_btn_j6 test_wire test_cap_json *.dSYM
 
 .PHONY: check clean
