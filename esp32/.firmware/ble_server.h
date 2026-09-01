@@ -61,6 +61,23 @@
 // the capture taken before the TSL comes out cannot be retaken.
 #define BLE_CMD_BB_ENABLE    0x34u  // arg: 0 = off, 1 = on. Persisted.
 #define BLE_CMD_BB_MARK      0x35u  // record a window around NOW
+/* Delete every stored capture. arg MUST be 1; anything else is REJECTED.
+ *
+ * 🔴 The confirmation is the point, and it is the same one the serial command
+ * demands ("bbclear yes"). This deletes the capture taken before the TSL comes
+ * out and that capture cannot be taken again, so a stray byte must not be
+ * enough to do it.
+ *
+ * It exists because the disk holds ONE capture at a time and clearing it was
+ * only possible over USB. At the car the laptop is the thing most likely to be
+ * missing, and without this the second capture of the visit is refused with no
+ * way forward — which would mean putting the TSL back.
+ *
+ * Answered from loop(): blackbox_delete_all() walks the filesystem deleting
+ * files, and the BLE host task must not do that. `extra` carries the number of
+ * captures STILL stored afterwards, read back rather than assumed, so 0 is the
+ * only shape of success. */
+#define BLE_CMD_BB_CLEAR     0x36u  // arg: 1 = do it. Any other value refuses.
 #define BLE_CMD_CAP_RECHECK  0x40u  // re-run the capability listen window
 #define BLE_CMD_SET_AUTONOMY 0x41u  // arg: 0/1 — operator intent, persisted
 #define BLE_CMD_PING         0x50u
@@ -94,6 +111,29 @@
  *
  * Persisted: it is a mapping decision, not a session one. */
 #define BLE_CMD_BTN_ACTION   0x63u
+
+/* ── The owner's rules ───────────────────────────────────────────────────────
+ *
+ * A rule is thirteen bytes ([slot][12]) and the Command characteristic carries
+ * one argument byte, so writing a rule goes to the RULES characteristic
+ * instead. These two codes are what the RESULT is tagged with.
+ *
+ * 🔴 0x70 IS A RESULT TAG, NOT A COMMAND. Sent on the Command characteristic it
+ * falls through to UNSUPPORTED, which is correct — there is nowhere in one byte
+ * to put a rule. It exists so the answer to a RULES write is a Result like every
+ * other answer, instead of a second reply channel with its own rules.
+ *
+ * `extra` on both is (slot << 8) | FsdRuleVerdict. The slot is echoed for the
+ * reason BTN_BIND echoes its index: one parking slot means an answer can arrive
+ * after the app has moved on, and a reply that does not say what it is about can
+ * be credited to the wrong request. 0xFF in the high byte means "all".
+ *
+ * A verdict rather than a bare rejection because the refusals are things the
+ * owner has to be told: fsd_rules_set() turns away a rule that could never fire
+ * (a switch cannot ENTER a state, a state cannot be PRESSED), and a control that
+ * silently did nothing is the failure that validator exists to prevent. */
+#define BLE_CMD_RULE_SET     0x70u  // result tag for a RULES write. Never sent to us.
+#define BLE_CMD_RULE_CLEAR   0x71u  // arg: rule number, 0xFF = all
 
 // ── Camera / autonomy status (read + notify) ─────────────────────────────────
 // A separate characteristic rather than more bytes in State: State is a fixed
@@ -167,6 +207,13 @@
 #define BLE_BUSY_NONE       0u
 #define BLE_BUSY_TRANSFER   1u
 #define BLE_BUSY_SAVING     2u
+/* 🔴 A BB_CLEAR is already parked and waiting for loop() to run it. This used to
+ * answer BLE_BUSY_TRANSFER, which the phone renders as "another download is
+ * running" -- and nothing is downloading. The reasons exist precisely because
+ * the app tells the owner different things: one means "you pressed the wrong
+ * thing", the other means "this is normal, wait". Reusing one for a third
+ * meaning gives back the distinction the field was added for. */
+#define BLE_BUSY_CLEARING   3u
 // The link is encrypted and bonded, but this phone is not the one the module
 // was set up with. Distinct from REJECTED so the app can say so instead of
 // showing a generic failure — the fix is a button press in the car, which the

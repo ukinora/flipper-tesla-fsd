@@ -3,6 +3,7 @@
 #include "ble_owner.h"
 #include <NimBLEDevice.h>
 #endif
+#include "rules_store.h"   // its own namespace too — see prefs_clear()
 #include "blackbox.h"   // BLACKBOX_DEFAULT_ENABLED
 #include <Preferences.h>
 
@@ -153,6 +154,12 @@ void prefs_clear() {
     NimBLEDevice::deleteAllBonds();
     Serial.println("[NVS] BLE owner and bonds erased too");
 #endif
+    // 🔴 And the rule table, which is a third namespace ("fsdrules"). Exactly
+    // the omission the block above was written to fix: without this line, a
+    // factory reset would hand the next person the previous owner's mappings
+    // while the log below said everything was gone. Synchronous for the same
+    // reason -- the reboot is 200 ms away and there is no later loop().
+    rules_store_erase_now();
     Serial.println("[NVS] All settings erased — factory reset");
 }
 

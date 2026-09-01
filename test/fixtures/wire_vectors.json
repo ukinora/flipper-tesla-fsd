@@ -31,5 +31,16 @@
     { "name": "set_profile_unsupported", "hex": "10030000", "fields": { "cmd": 16, "result": 3, "extra": 0 } },
     { "name": "dump_not_found", "hex": "30050000", "fields": { "cmd": 48, "result": 5, "extra": 0 } },
     { "name": "ping_ok_extra", "hex": "5000ffff", "fields": { "cmd": 80, "result": 0, "extra": 65535 } }
+  ],
+  "rule_len": 12,
+  "rule_max": 24,
+  "rules": [
+    { "name": "empty", "hex": "000000000000000000000000", "fields": { "enabled": 0, "signal": 0, "kind": 0, "value": 0, "action": 0, "arg": 0 } },
+    { "name": "map_light_press", "hex": "010001000000000000000000", "fields": { "enabled": 1, "signal": 0, "kind": 1, "value": 0, "action": 0, "arg": 0 } },
+    { "name": "scroll_down", "hex": "011507ffffffff05fdffffff", "fields": { "enabled": 1, "signal": 21, "kind": 7, "value": -1, "action": 5, "arg": -3 } },
+    { "name": "door_state_enter", "hex": "011205010000000000000000", "fields": { "enabled": 1, "signal": 18, "kind": 5, "value": 1, "action": 0, "arg": 0 } },
+    { "name": "disabled_but_filled", "hex": "001405040000000201000000", "fields": { "enabled": 0, "signal": 20, "kind": 5, "value": 4, "action": 2, "arg": 1 } },
+    { "name": "big_negative_arg", "hex": "0101020000000003006cca88", "fields": { "enabled": 1, "signal": 1, "kind": 2, "value": 0, "action": 3, "arg": -2000000000 } },
+    { "name": "max_enums", "hex": "011507ffffff7f06ffffff7f", "fields": { "enabled": 1, "signal": 21, "kind": 7, "value": 2147483647, "action": 6, "arg": 2147483647 } }
   ]
 }

@@ -161,6 +161,72 @@ uint8_t fsd_rules_match(const FsdRules* r, const FsdTriggerEvent* ev, FsdRuleDec
     return n;
 }
 
+/* ── the wire form ───────────────────────────────────────────────────────── */
+
+static void put_i32le(uint8_t* p, int32_t v) {
+    /* Signed -> unsigned is modular and well defined in both directions of the
+     * value range, so this needs no special case. */
+    const uint32_t u = (uint32_t)v;
+    p[0] = (uint8_t)(u & 0xFFu);
+    p[1] = (uint8_t)((u >> 8) & 0xFFu);
+    p[2] = (uint8_t)((u >> 16) & 0xFFu);
+    p[3] = (uint8_t)((u >> 24) & 0xFFu);
+}
+
+static int32_t get_i32le(const uint8_t* p) {
+    const uint32_t u = (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) |
+                       ((uint32_t)p[3] << 24);
+    /* NOT `(int32_t)u`. Converting an unsigned value that does not fit is
+     * implementation-defined before C23 — every compiler this builds on happens
+     * to do the right thing, but "happens to" is not a thing a wire format
+     * should rest on. Subtracting inside the signed range is exact. */
+    if(u >= 0x80000000u) return (int32_t)(u - 0x80000000u) - 2147483647 - 1;
+    return (int32_t)u;
+}
+
+void fsd_rule_pack(const FsdRule* rule, uint8_t out[FSD_RULE_WIRE_LEN]) {
+    if(!out) return;
+    if(!rule) {
+        /* A missing rule is written as an empty slot rather than left alone.
+         * Leaving `out` untouched would hand the caller whatever was in its
+         * buffer, and in the one caller that matters that buffer is the table
+         * the phone is about to read. */
+        for(uint8_t i = 0; i < FSD_RULE_WIRE_LEN; i++) out[i] = 0;
+        return;
+    }
+
+    out[0] = rule->enabled ? 0x01u : 0x00u; /* bits 1..7 stay clear — reserved */
+    out[1] = (uint8_t)rule->signal;
+    out[2] = (uint8_t)rule->kind;
+    put_i32le(&out[3], rule->value);
+    out[7] = (uint8_t)rule->action;
+    put_i32le(&out[8], rule->arg);
+}
+
+bool fsd_rule_unpack(const uint8_t in[FSD_RULE_WIRE_LEN], FsdRule* out) {
+    if(!in || !out) return false;
+
+    /* Only bit 0 is read. An older module handed a record with bits 1..7 set
+     * must not act on a meaning it does not know. */
+    out->enabled = (in[0] & 0x01u) != 0u;
+    out->signal = (FsdSignal)in[1];
+    out->kind = (FsdTriggerKind)in[2];
+    out->value = get_i32le(&in[3]);
+    out->action = (FsdBodyAction)in[7];
+    out->arg = get_i32le(&in[8]);
+    return true;
+}
+
+void fsd_rules_pack_all(const FsdRules* r, uint8_t out[FSD_RULES_WIRE_LEN]) {
+    if(!out) return;
+    for(uint8_t i = 0; i < FSD_RULE_MAX; i++) {
+        /* fsd_rules_get() rather than &r->rule[i] so a NULL table renders as an
+         * empty table instead of refusing to render at all — the phone gets 24
+         * blank slots, which is the truth about what would fire. */
+        fsd_rule_pack(fsd_rules_get(r, i), &out[(size_t)i * FSD_RULE_WIRE_LEN]);
+    }
+}
+
 const char* fsd_rule_verdict_str(FsdRuleVerdict v) {
     switch(v) {
     case FSD_RULE_OK: return "ok";

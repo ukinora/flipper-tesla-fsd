@@ -30,6 +30,7 @@
 #include "config.h"
 #include "mode_switch.h"
 #include "prefs.h"
+#include "rules_store.h"
 #include <NimBLEDevice.h>
 #include <string.h>
 
@@ -55,6 +56,15 @@
  * the buttons would have taken the bus verdicts down with them, and the phone
  * would have shown every screen blank with nothing to say why. */
 #define BLE_UUID_BUTTONS "6b1a000a-4b53-4d4f-4432-43414e000001"
+/* The owner's rule table. Raw bytes, not a JSON document like the three above,
+ * and for a reason worth stating: the documents are things the module SAYS
+ * about itself and can grow a field at a time, while this is a fixed record the
+ * phone also WRITES. A fixed 12-byte record cannot overflow the attribute, it
+ * cannot need an escape rule, and both ends compute the same offsets — the
+ * packer is host-tested pure C in fsd_logic/fsd_rules.c and the app can be
+ * checked against it. The JSON documents have overflowed the 512-byte limit
+ * three times; 288 bytes cannot. */
+#define BLE_UUID_RULES   "6b1a000b-4b53-4d4f-4432-43414e000001"
 
 #define BLE_STATE_LEN  26u   // v5: +bytes 22..25, tyre pressure
 #define BLE_RESULT_LEN 4u
@@ -82,6 +92,14 @@ static NimBLECharacteristic *g_ch_upload = nullptr;
 static NimBLECharacteristic *g_ch_camstat = nullptr;
 static NimBLECharacteristic *g_ch_scan    = nullptr;
 static NimBLECharacteristic *g_ch_buttons = nullptr;
+static NimBLECharacteristic *g_ch_rules   = nullptr;
+
+/* 288 bytes has to fit an ATT attribute (512) with room to spare, and the
+ * 13-byte write has to fit the SMALLEST payload a phone can offer — a default
+ * 23-byte MTU carries 20. Both are true today; neither is obvious from the
+ * numbers alone, which is why they are asserted rather than remembered. */
+static_assert(FSD_RULES_WIRE_LEN <= CAP_ATTR_MAX, "rule table exceeds the ATT limit");
+static_assert(1u + FSD_RULE_WIRE_LEN <= 20u, "a rule write must fit a default MTU");
 
 // Whether the radio is advertising, as reported by startAdvertising() -- both
 // at init and on every re-advertise after a disconnect. Read by the OTA
@@ -188,6 +206,27 @@ static volatile uint8_t  g_dbl_req          = 0;
 static volatile bool     g_dbl_req_pending  = false;
 static volatile uint8_t  g_bb_req           = 0;
 static volatile bool     g_bb_mark_pending  = false;
+/* Delete every capture, parked for loop(). blackbox_delete_all() walks the
+ * filesystem removing files one at a time, which is not something the BLE host
+ * task may sit in. */
+static volatile bool     g_bb_clear_pending = false;
+
+/* ── The owner's rules, parked for loop() ────────────────────────────────────
+ *
+ * ONE slot for both the write and the clear, with a discriminator, the way
+ * g_btn_req carries bind and forget together. Two independent slots would let a
+ * write and a clear be parked at once and the order they were applied in would
+ * be whatever this file happened to code, not the order the phone sent them.
+ *
+ * The bytes are `volatile` alongside the flag so the compiler cannot sink the
+ * payload stores past the flag that publishes them; the flag is set LAST and
+ * cleared FIRST, so loop() only ever reads bytes that were finished being
+ * written. Same discipline as every other slot in this file. */
+static volatile bool     g_rule_req_pending  = false;
+static volatile bool     g_rule_req_is_clear = false;
+static volatile uint8_t  g_rule_req_idx      = 0;
+static volatile uint8_t  g_rule_req_bytes[FSD_RULE_WIRE_LEN] = {};
+static volatile bool     g_rules_subscribed  = false;
 // Declared size of the camera.bin currently being uploaded (0 = none).
 static volatile uint32_t g_upload_expect = 0;
 static char     g_bulk_name[40] = {};
@@ -658,6 +697,88 @@ static void ble_apply_blackbox_request(void) {
     }
 }
 
+/* Delete every capture, from loop(), and answer with the fact.
+ *
+ * 🔴 The count is READ BACK. "I asked it to delete and it did not complain" is
+ * the same class of claim as the BB_MARK reply that used to report success plus
+ * a count it had guessed, and this one is worse to get wrong: the operator's
+ * next move after "cleared" is to record the capture that cannot be retaken,
+ * onto a disk that holds exactly one. */
+static void ble_apply_bb_clear_request(void) {
+    if (!g_bb_clear_pending) return;
+    g_bb_clear_pending = false;
+
+    blackbox_delete_all();
+
+    const int left = blackbox_event_count();
+    Serial.printf("[BB] BLE 로 캡처를 전부 지웠다 — 남은 캡처 %d 개, 남은 공간 %lu KB\n",
+                  left, (unsigned long)(blackbox_free_bytes() / 1024u));
+    ble_send_result(BLE_CMD_BB_CLEAR, left == 0 ? BLE_RES_OK : BLE_RES_REJECTED,
+                    (uint16_t)(left < 0 ? 0xFFFFu : (uint16_t)left));
+}
+
+/* Apply a parked rule write or clear, and answer with the verdict the rule core
+ * actually returned.
+ *
+ * Runs from loop(), which is where rules_store.h says every one of its functions
+ * belongs -- and it has to be here for a second reason too: the answer IS the
+ * validation result, and a reply sent from the BLE callback would have to be
+ * sent before the validation ran. */
+static void ble_apply_rules_request(void) {
+    if (!g_rule_req_pending) return;
+
+    const bool clear = g_rule_req_is_clear;
+    const uint8_t idx = g_rule_req_idx;
+    uint8_t bytes[FSD_RULE_WIRE_LEN];
+    for (size_t i = 0; i < sizeof(bytes); i++) bytes[i] = g_rule_req_bytes[i];
+    g_rule_req_pending = false;   // last: the slot is free once we hold the copy
+
+    const uint8_t verdict = clear ? rules_store_clear(idx)
+                                  : rules_store_set_packed(idx, bytes);
+
+    ble_send_result(clear ? BLE_CMD_RULE_CLEAR : BLE_CMD_RULE_SET,
+                    verdict == (uint8_t)FSD_RULE_OK ? BLE_RES_OK : BLE_RES_REJECTED,
+                    (uint16_t)(((uint16_t)idx << 8) | verdict));
+}
+
+/* Publish the rule table when it changes, and notify if the link can carry it.
+ *
+ * 🔴 setValue() happens whether or not anybody is subscribed. A READ has to
+ * return the current table even when nothing is listening, and the one moment
+ * that matters is a phone reading once right after it connects.
+ *
+ * 🔴 The notify is gated on the MTU, not attempted and hoped for. A notification
+ * carries at most MTU-3 bytes, so 288 needs 291; a phone that stayed at the
+ * 23-byte default cannot receive one. What NimBLE does with an oversized notify
+ * -- truncate, refuse, or split -- is not something this project has measured,
+ * and a truncated rule table read as a whole one would blank rules that exist.
+ * So we do not find out: we skip it and say so once. The READ still works at any
+ * MTU, because ATT reads a long attribute in blobs. */
+static void ble_publish_rules(void) {
+    if (!g_ch_rules) return;
+
+    static uint32_t s_rev = 0;
+    const uint32_t rev = rules_store_revision();
+    if (rev == s_rev) return;
+    s_rev = rev;
+
+    uint8_t buf[FSD_RULES_WIRE_LEN];
+    rules_store_render(buf);
+    g_ch_rules->setValue(buf, sizeof(buf));
+
+    if (!g_connected || !g_rules_subscribed) return;
+    if (g_mtu >= FSD_RULES_WIRE_LEN + 3u) {
+        g_ch_rules->notify(buf, sizeof(buf), g_conn_handle);
+        return;
+    }
+    static uint16_t s_said_mtu = 0;
+    if (s_said_mtu != g_mtu) {
+        s_said_mtu = g_mtu;
+        Serial.printf("[RULES] MTU %u — 288바이트 알림을 보낼 수 없다. 폰이 읽어 가야 한다\n",
+                      (unsigned)g_mtu);
+    }
+}
+
 // Keep the Capability characteristic current. It used to be written once, in
 // ble_server_init(), before any frame had arrived -- so the probe's answer to
 // "which bus is which" never reached anybody, and CAP_RECHECK re-ran a probe
@@ -972,6 +1093,47 @@ class CommandCB : public NimBLECharacteristicCallbacks {
             g_bb_mark_pending = true;
             break;
 
+        case BLE_CMD_BB_CLEAR:
+            /* 🔴 The confirmation byte first, before anything else is checked.
+             * This is the same gate as `bbclear yes` on the console, and it
+             * exists because the thing being deleted cannot be recorded twice. */
+            if (arg != 1u) {
+                ble_send_result(cmd, BLE_RES_REJECTED, 0);
+                break;
+            }
+            /* 🔴 Never underneath a running download. blackbox_read_chunk()
+             * reopens the file for every chunk, so deleting it mid-transfer
+             * returns 0 bytes -- which the pump reads as EOF and reports as a
+             * COMPLETED download. The phone would write out a truncated capture
+             * and say it succeeded. */
+            if (g_bulk_active) {
+                ble_send_result(cmd, BLE_RES_BUSY, BLE_BUSY_TRANSFER);
+                break;
+            }
+            /* And not while one is being written either: do_flush() would land a
+             * new file straight after the delete, so the count we answer with
+             * would be a lie by the time the phone read it. */
+            if (blackbox_capture_pending()) {
+                ble_send_result(cmd, BLE_RES_BUSY, BLE_BUSY_SAVING);
+                break;
+            }
+            if (g_bb_clear_pending) { ble_send_result(cmd, BLE_RES_BUSY, BLE_BUSY_CLEARING); break; }
+            g_bb_clear_pending = true;   // answered from loop(), with the count
+            break;
+
+        case BLE_CMD_RULE_CLEAR:
+            /* One parking slot, shared with the RULES write. Refuse rather than
+             * replace: two waiters would both match the single answer, and the
+             * answer carries a slot number that would then be the wrong one. */
+            if (g_rule_req_pending) {
+                ble_send_result(cmd, BLE_RES_BUSY, (uint16_t)((uint16_t)arg << 8));
+                break;
+            }
+            g_rule_req_idx      = arg;
+            g_rule_req_is_clear = true;
+            g_rule_req_pending  = true;  // last
+            break;
+
         case BLE_CMD_SET_AUTONOMY: {
             bool on = (arg != 0);
             portENTER_CRITICAL(g_mux);
@@ -1077,6 +1239,66 @@ class StateCB : public NimBLECharacteristicCallbacks {
     }
 };
 
+/* The RULES characteristic: read the table, write one rule.
+ *
+ * A write is exactly [slot:1][rule:12]. Exactly, not "at least" -- a short write
+ * would be padded with whatever the stack left behind, and the fields that would
+ * be filled from it are the signal and the action. */
+class RulesCB : public NimBLECharacteristicCallbacks {
+    /* `extra` is (slot << 8) | verdict, and these refusals happen BEFORE any
+     * slot number can be trusted. 0xFF is not a slot -- rules run 0..23 -- so it
+     * reads as "we could not tell you which", where a 0 high byte would read as
+     * "rule 0" and blame a rule the phone may not have touched. */
+    static constexpr uint16_t SLOT_UNKNOWN = 0xFF00u;
+
+    void onWrite(NimBLECharacteristic *ch, NimBLEConnInfo &info) override {
+        std::string v = ch->getValue();
+
+        /* The same two gates the Command characteristic applies, and re-checked
+         * here for the same reason: WRITE_ENC should already have stopped an
+         * unencrypted write, but the declaration and the check have disagreed
+         * before (PR #23), and the disagreement was invisible. Encryption says
+         * nobody is listening in; it does not say this is the owner's phone. */
+        if (!info.isEncrypted()) {
+            ble_send_result(BLE_CMD_RULE_SET, BLE_RES_REJECTED, SLOT_UNKNOWN);
+            return;
+        }
+        if (!ble_owner_allows(info.getIdAddress().getType(),
+                              info.getIdAddress().getVal())) {
+            ble_send_result(BLE_CMD_RULE_SET, BLE_RES_NOT_OWNER, SLOT_UNKNOWN);
+            return;
+        }
+
+        if (v.size() != 1u + FSD_RULE_WIRE_LEN) {
+            Serial.printf("[RULES] %u바이트 쓰기를 거부했다 — %u여야 한다\n",
+                          (unsigned)v.size(), (unsigned)(1u + FSD_RULE_WIRE_LEN));
+            ble_send_result(BLE_CMD_RULE_SET, BLE_RES_REJECTED,
+                            SLOT_UNKNOWN | (uint16_t)FSD_RULE_BAD_ARGS);
+            return;
+        }
+
+        const uint8_t idx = (uint8_t)v[0];
+        if (g_rule_req_pending) {
+            ble_send_result(BLE_CMD_RULE_SET, BLE_RES_BUSY,
+                            (uint16_t)((uint16_t)idx << 8));
+            return;
+        }
+
+        /* Copied out here rather than parsed here. Validation needs the rule
+         * core and the answer needs the verdict, and both belong to loop(). */
+        for (size_t i = 0; i < FSD_RULE_WIRE_LEN; i++)
+            g_rule_req_bytes[i] = (uint8_t)v[1 + i];
+        g_rule_req_idx      = idx;
+        g_rule_req_is_clear = false;
+        g_rule_req_pending  = true;  // last: publishes the bytes above
+    }
+
+    void onSubscribe(NimBLECharacteristic *, NimBLEConnInfo &, uint16_t sub) override {
+        g_rules_subscribed = (sub != 0);
+        Serial.printf("[RULES] notify %s\n", sub ? "subscribed" : "unsubscribed");
+    }
+};
+
 class BulkCB : public NimBLECharacteristicCallbacks {
     void onSubscribe(NimBLECharacteristic *, NimBLEConnInfo &, uint16_t sub) override {
         g_bulk_subscribed = (sub != 0);
@@ -1176,6 +1398,12 @@ class ServerCB : public NimBLEServerCallbacks {
         g_mode_req_handle  = BLE_CONN_NONE;
         g_state_subscribed = false;  // subscriptions die with the link
         g_bulk_subscribed  = false;
+        g_rules_subscribed = false;
+        /* 🔴 A parked rule write is dropped too, and unlike the mode request it
+         * is dropped because nobody is left to be told the verdict. Applying it
+         * would store a rule whose refusal -- or acceptance -- the owner never
+         * saw, and the app would come back showing a table it did not write. */
+        g_rule_req_pending = false;
         g_bulk_active      = false;  // a half-sent capture is not resumable
         camera_store_upload_abort(); // half-written database is worse than none
         g_upload_expect    = 0;
@@ -1300,6 +1528,22 @@ void ble_server_init(FSDState *state, portMUX_TYPE *state_mux) {
         publish_doc(g_ch_buttons, btn, "initial buttons", &said);
     }
 
+    /* The rule table. WRITE_ENC for the same reason the Command characteristic
+     * has it: this is the phone changing what the module is configured to do,
+     * and Just Works bonding is the only identity we have. READ is left open,
+     * matching Capability and CamStat -- a rule table is a configuration read,
+     * not a capture with a VIN in it, and tightening the read side is tracked
+     * as one decision for all of them rather than done piecemeal here. */
+    g_ch_rules = svc->createCharacteristic(
+        BLE_UUID_RULES, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY |
+                        NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_ENC);
+    g_ch_rules->setCallbacks(new RulesCB());
+    /* Seed it, like Capability and CamStat. A phone that reads before the first
+     * tick would otherwise get an empty attribute, which it cannot tell apart
+     * from a module that is not answering -- and here it would look exactly like
+     * "all your rules are gone". */
+    ble_publish_rules();
+
     // Bulk: notify-only. Unencrypted like the rest — a capture is diagnostic
     // data, and the pairing requirement already gates the link.
     g_ch_bulk = svc->createCharacteristic(BLE_UUID_BULK, NIMBLE_PROPERTY::NOTIFY);
@@ -1376,6 +1620,9 @@ void ble_server_tick(uint32_t now_ms) {
     ble_apply_btn_request();       // NVS write belongs on this task, not the BLE one
     ble_apply_action_request();    // 〃
     ble_apply_blackbox_request();
+    ble_apply_bb_clear_request();  // walks the filesystem — never on the BLE task
+    ble_apply_rules_request();     // NVS write + the verdict that IS the answer
+    ble_publish_rules();           // after the apply, so a write is visible now
     ble_refresh_capability(now_ms);
     ble_revoke_active_if_stale(now_ms);
 
