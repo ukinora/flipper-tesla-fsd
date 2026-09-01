@@ -118,7 +118,7 @@ bool fsd_t2_observe_switch(FsdT2* t, uint32_t can_id, const uint8_t* data, uint8
         t->gesture_count++;
         t->last_gesture_ms = now_ms;
         /* PUBLISHED, NOT ACTED ON. There is no emitter, and
-         * FSD_BODY_CAPS[FSD_BODY_T2_DOOR].armable_at_runtime is false. */
+         * FSD_BODY_CAPS[FSD_ACT_DOOR_OPEN].armable_at_runtime is false. */
         return true;
     }
     return false;

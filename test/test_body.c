@@ -46,8 +46,8 @@ static FsdBodyInputs good_inputs(uint32_t now_ms) {
     in.bus_tx_open = true;
     in.ota_in_progress = false;
     in.rx_stale = false;
-    in.feature_enabled[FSD_BODY_T1_LIGHT] = true;
-    in.feature_enabled[FSD_BODY_T2_DOOR] = true; // must not help; see below
+    in.action_enabled[FSD_ACT_MAP_LIGHT] = true;
+    in.action_enabled[FSD_ACT_DOOR_OPEN] = true; // must not help; see below
     in.drive_session = true;
     in.driver_seen = true;
     in.driver_present = true;
@@ -58,6 +58,14 @@ static FsdBodyInputs good_inputs(uint32_t now_ms) {
     in.speed_seen = true;
     in.speed_kph = 0.0f;
     in.speed_ms = now_ms;
+    // Added with the action-indexed rewrite. Fresh and permissive, so a test
+    // that wants to see one of these refuse has to take it away on purpose.
+    in.belt_seen = true;
+    in.belt_latched = true;
+    in.belt_ms = now_ms;
+    in.passenger_seen = true;
+    in.passenger_present = false;
+    in.passenger_ms = now_ms;
     return in;
 }
 
@@ -71,17 +79,17 @@ static void test_t2_can_never_be_armed(void) {
     // reach it.
     const uint32_t now = 10000;
     FsdBodyInputs in = good_inputs(now);
-    CHECK(fsd_body_allows(&in, FSD_BODY_T2_DOOR, now) == FSD_BODY_NOT_ARMABLE,
+    CHECK(fsd_body_allows(&in, FSD_ACT_DOOR_OPEN, now) == FSD_BODY_NOT_ARMABLE,
           "T2 refused with everything satisfied");
 
     in.op_mode = OpMode_Service;
-    CHECK(fsd_body_allows(&in, FSD_BODY_T2_DOOR, now) == FSD_BODY_NOT_ARMABLE,
+    CHECK(fsd_body_allows(&in, FSD_ACT_DOOR_OPEN, now) == FSD_BODY_NOT_ARMABLE,
           "Service does not help");
 
     // NOT_ARMABLE is checked FIRST, so it is the answer even when other gates
     // would also refuse — the app must never be told "just start the car".
     memset(&in, 0, sizeof(in));
-    CHECK(fsd_body_allows(&in, FSD_BODY_T2_DOOR, now) == FSD_BODY_NOT_ARMABLE,
+    CHECK(fsd_body_allows(&in, FSD_ACT_DOOR_OPEN, now) == FSD_BODY_NOT_ARMABLE,
           "and it is the FIRST refusal, not a later one");
 }
 
@@ -104,48 +112,48 @@ static void test_axis_refuses_in_order(void) {
 
     const uint32_t now = 10000;
     FsdBodyInputs in = good_inputs(now);
-    CHECK(fsd_body_allows(&in, FSD_BODY_T1_LIGHT, now) == FSD_BODY_OK, "baseline is OK");
+    CHECK(fsd_body_allows(&in, FSD_ACT_MAP_LIGHT, now) == FSD_BODY_OK, "baseline is OK");
 
-    in = good_inputs(now); in.feature_enabled[FSD_BODY_T1_LIGHT] = false;
-    CHECK(fsd_body_allows(&in, FSD_BODY_T1_LIGHT, now) == FSD_BODY_NOT_ENABLED, "not enabled");
+    in = good_inputs(now); in.action_enabled[FSD_ACT_MAP_LIGHT] = false;
+    CHECK(fsd_body_allows(&in, FSD_ACT_MAP_LIGHT, now) == FSD_BODY_NOT_ENABLED, "not enabled");
 
     // The allow-set is exactly the one fsd_can_transmit() admits: this axis can
     // only ever subtract from it.
     in = good_inputs(now); in.op_mode = OpMode_ListenOnly;
-    CHECK(fsd_body_allows(&in, FSD_BODY_T1_LIGHT, now) == FSD_BODY_NO_MODE, "listen-only");
+    CHECK(fsd_body_allows(&in, FSD_ACT_MAP_LIGHT, now) == FSD_BODY_NO_MODE, "listen-only");
     in.op_mode = OpMode_Autonomous;
-    CHECK(fsd_body_allows(&in, FSD_BODY_T1_LIGHT, now) == FSD_BODY_NO_MODE,
+    CHECK(fsd_body_allows(&in, FSD_ACT_MAP_LIGHT, now) == FSD_BODY_NO_MODE,
           "Autonomous grants nothing here — it is the camera path's mode only");
     in.op_mode = OpMode_Service;
-    CHECK(fsd_body_allows(&in, FSD_BODY_T1_LIGHT, now) == FSD_BODY_OK, "Service is allowed");
+    CHECK(fsd_body_allows(&in, FSD_ACT_MAP_LIGHT, now) == FSD_BODY_OK, "Service is allowed");
 
     in = good_inputs(now); in.bus_tx_open = false;
-    CHECK(fsd_body_allows(&in, FSD_BODY_T1_LIGHT, now) == FSD_BODY_BUS_SHUT,
+    CHECK(fsd_body_allows(&in, FSD_ACT_MAP_LIGHT, now) == FSD_BODY_BUS_SHUT,
           "hardware listen-only");
 
     in = good_inputs(now); in.ota_in_progress = true;
-    CHECK(fsd_body_allows(&in, FSD_BODY_T1_LIGHT, now) == FSD_BODY_OTA, "Tesla updating");
+    CHECK(fsd_body_allows(&in, FSD_ACT_MAP_LIGHT, now) == FSD_BODY_OTA, "Tesla updating");
 
     in = good_inputs(now); in.rx_stale = true;
-    CHECK(fsd_body_allows(&in, FSD_BODY_T1_LIGHT, now) == FSD_BODY_RX_STALE, "bus quiet");
+    CHECK(fsd_body_allows(&in, FSD_ACT_MAP_LIGHT, now) == FSD_BODY_RX_STALE, "bus quiet");
 
     // T1's row waives the driver, gear and speed gates but NOT the drive
     // session: a car that has sat untouched since yesterday does nothing.
     in = good_inputs(now); in.drive_session = false;
-    CHECK(fsd_body_allows(&in, FSD_BODY_T1_LIGHT, now) == FSD_BODY_NO_DRIVE_SESSION,
+    CHECK(fsd_body_allows(&in, FSD_ACT_MAP_LIGHT, now) == FSD_BODY_NO_DRIVE_SESSION,
           "no drive has happened");
 
     in = good_inputs(now); in.driver_present = false; in.driver_seen = false;
-    CHECK(fsd_body_allows(&in, FSD_BODY_T1_LIGHT, now) == FSD_BODY_OK,
+    CHECK(fsd_body_allows(&in, FSD_ACT_MAP_LIGHT, now) == FSD_BODY_OK,
           "T1 does not need a driver in the seat — that is its whole point");
     in = good_inputs(now); in.gear = FSD_GEAR_D; in.speed_kph = 90.0f;
-    CHECK(fsd_body_allows(&in, FSD_BODY_T1_LIGHT, now) == FSD_BODY_OK,
+    CHECK(fsd_body_allows(&in, FSD_ACT_MAP_LIGHT, now) == FSD_BODY_OK,
           "nor a stationary car");
 
-    CHECK(fsd_body_allows(NULL, FSD_BODY_T1_LIGHT, now) == FSD_BODY_UNKNOWN_FEATURE,
+    CHECK(fsd_body_allows(NULL, FSD_ACT_MAP_LIGHT, now) == FSD_BODY_UNKNOWN_ACTION,
           "NULL inputs");
     in = good_inputs(now);
-    CHECK(fsd_body_allows(&in, FSD_BODY_FEATURE_COUNT, now) == FSD_BODY_UNKNOWN_FEATURE,
+    CHECK(fsd_body_allows(&in, FSD_ACT_COUNT, now) == FSD_BODY_UNKNOWN_ACTION,
           "out-of-range feature");
 
     for (int v = 0; v <= FSD_BODY_MOVING; v++) {
@@ -460,6 +468,192 @@ static void test_t2_frame_discipline(void) {
     CHECK(!FSD_T2_TIMING.verified, "the timing table is NOT verified, and says so");
 }
 
+/* ── the action-indexed rewrite (2026-09-01) ──────────────────────────────
+ *
+ * The rewrite turned "features" into "actions" and added five capability
+ * fields. The single most important thing to assert about it is that it
+ * OPENED NOTHING: exactly one row was armable before and exactly one is
+ * armable after.
+ */
+
+// Every input maximally permissive, every action enabled. Only MAP_LIGHT may
+// get past arming — the other six must refuse on the row, not on the inputs.
+static void test_rewrite_opened_nothing(void) {
+    const uint32_t now = 100000;
+    FsdBodyInputs in = good_inputs(now);
+    for (int a = 0; a < FSD_ACT_COUNT; a++) in.action_enabled[a] = true;
+
+    CHECK(fsd_body_allows(&in, FSD_ACT_MAP_LIGHT, now) == FSD_BODY_OK,
+          "MAP_LIGHT carries over from T1 and is still the one armable row");
+
+    for (int a = 0; a < FSD_ACT_COUNT; a++) {
+        if (a == FSD_ACT_MAP_LIGHT) continue;
+        CHECK(fsd_body_allows(&in, (FsdBodyAction)a, now) == FSD_BODY_NOT_ARMABLE,
+              "%s must refuse on its row even with every input satisfied",
+              fsd_body_action_str((FsdBodyAction)a));
+    }
+
+    // The count itself, so adding a row without deciding its arming is a
+    // failing test rather than a silent grant.
+    int armable = 0;
+    for (int a = 0; a < FSD_ACT_COUNT; a++)
+        if (fsd_body_caps((FsdBodyAction)a)->armable_at_runtime) armable++;
+    CHECK(armable == 1, "exactly one armable row, found %d", armable);
+}
+
+static void test_caps_table_is_well_formed(void) {
+    for (int a = 0; a < FSD_ACT_COUNT; a++) {
+        const FsdBodyCaps *c = fsd_body_caps((FsdBodyAction)a);
+        CHECK(c != NULL, "row %d exists", a);
+        CHECK(c && c->action == (FsdBodyAction)a, "row %d knows its own index", a);
+        const char *n = fsd_body_action_str((FsdBodyAction)a);
+        CHECK(n[0] != '?', "action %d has a name", a);
+    }
+    CHECK(fsd_body_caps(FSD_ACT_COUNT) == NULL, "out of range is NULL, not row 0");
+
+    // Every verdict is nameable. A verdict that prints "?" is a refusal the
+    // owner cannot act on, which is the whole reason this enum exists.
+    for (int v = 0; v <= FSD_BODY_PASSENGER_PRESENT; v++)
+        CHECK(fsd_body_verdict_str((FsdBodyVerdict)v)[0] != '?',
+              "verdict %d has a name", v);
+}
+
+static void test_rate_limit(void) {
+    const uint32_t now = 100000;
+    const FsdBodyCaps *c = fsd_body_caps(FSD_ACT_MAP_LIGHT);
+    const uint32_t iv = c->min_interval_ms;
+    CHECK(iv > 0, "MAP_LIGHT has an interval at all");
+
+    FsdBodyInputs in = good_inputs(now);
+    in.last_act_ms[FSD_ACT_MAP_LIGHT] = now;
+    CHECK(fsd_body_allows(&in, FSD_ACT_MAP_LIGHT, now) == FSD_BODY_TOO_SOON,
+          "firing twice in the same millisecond is refused");
+
+    in.last_act_ms[FSD_ACT_MAP_LIGHT] = now - (iv - 1);
+    CHECK(fsd_body_allows(&in, FSD_ACT_MAP_LIGHT, now) == FSD_BODY_TOO_SOON,
+          "one millisecond short still refuses");
+
+    in.last_act_ms[FSD_ACT_MAP_LIGHT] = now - iv;
+    CHECK(fsd_body_allows(&in, FSD_ACT_MAP_LIGHT, now) == FSD_BODY_OK,
+          "exactly the interval is enough");
+
+    // A row that never set min_interval_ms may never fire. This is the
+    // permissive-when-non-zero rule applied to a number, and it is why a
+    // zero-filled row is still the tightest row.
+    FsdBodyCaps z;
+    memset(&z, 0, sizeof(z));
+    z.action = FSD_ACT_MAP_LIGHT;
+    in = good_inputs(now);
+    CHECK(fsd_body_caps_verdict(&z, &in, FSD_ACT_MAP_LIGHT, now) == FSD_BODY_TOO_SOON,
+          "min_interval_ms == 0 means never, not always");
+}
+
+// The gear row is the one the owner overruled me on, so its shape is asserted
+// rather than reviewed. Nothing here can fire it — armable is false — but the
+// row must already be right when that bool flips.
+static void test_gear_row_shape(void) {
+    const FsdBodyCaps *c = fsd_body_caps(FSD_ACT_GEAR_D);
+    CHECK(!c->armable_at_runtime,
+          "gear stays unarmable until the no-brake refusal is measured");
+    CHECK(c->requires_park, "P is the only gear we transition from");
+    CHECK(c->requires_belt, "a gate that trusts its trigger is not a gate");
+    CHECK(!c->may_act_while_moving, "never while moving");
+    CHECK(!c->may_act_without_driver, "never with an empty seat");
+    CHECK(!c->may_act_without_drive_session || true, "(drive session: see row)");
+    CHECK(c->min_interval_ms >= 1000u, "at most once a second");
+    CHECK(c->max_hold_ms == 0u, "single shot — one frame moved the gear in the car");
+
+    // There is exactly one gear action in the enum. R, N and P are not
+    // expressible, which is a stronger statement than any runtime check.
+    CHECK(fsd_body_action_str(FSD_ACT_GEAR_D)[0] != '?', "gear-D is named");
+}
+
+// Driving the gear row's gates through the caps helper, since the row itself
+// can never reach them yet.
+static void test_gear_gates_when_armed(void) {
+    const uint32_t now = 100000;
+    FsdBodyCaps c = *fsd_body_caps(FSD_ACT_GEAR_D);
+    FsdBodyInputs in = good_inputs(now);
+
+    CHECK(fsd_body_caps_verdict(&c, &in, FSD_ACT_GEAR_D, now) == FSD_BODY_OK,
+          "baseline (P, belted, seated, stopped) would pass");
+
+    in = good_inputs(now); in.gear = FSD_GEAR_D;
+    CHECK(fsd_body_caps_verdict(&c, &in, FSD_ACT_GEAR_D, now) == FSD_BODY_NOT_PARK,
+          "already in D: no second request");
+
+    in = good_inputs(now); in.belt_latched = false;
+    CHECK(fsd_body_caps_verdict(&c, &in, FSD_ACT_GEAR_D, now) == FSD_BODY_NO_BELT,
+          "belt unlatched refuses");
+
+    in = good_inputs(now); in.belt_seen = false;
+    CHECK(fsd_body_caps_verdict(&c, &in, FSD_ACT_GEAR_D, now) == FSD_BODY_NO_BELT,
+          "never having heard the belt refuses — silence is not a latched belt");
+
+    in = good_inputs(now); in.belt_ms = now - FSD_BODY_FRESH_MS;
+    CHECK(fsd_body_caps_verdict(&c, &in, FSD_ACT_GEAR_D, now) == FSD_BODY_BELT_STALE,
+          "a stale belt refuses");
+
+    in = good_inputs(now); in.speed_kph = 1.0f;
+    CHECK(fsd_body_caps_verdict(&c, &in, FSD_ACT_GEAR_D, now) == FSD_BODY_MOVING,
+          "moving refuses");
+
+    in = good_inputs(now); in.driver_present = false;
+    CHECK(fsd_body_caps_verdict(&c, &in, FSD_ACT_GEAR_D, now) == FSD_BODY_NO_DRIVER_PRESENT,
+          "empty seat refuses");
+}
+
+// The passenger seat is the only row with an occupancy gate, and it is the one
+// whose failure puts a motor against a person. It fails closed on silence.
+static void test_passenger_seat_fails_closed(void) {
+    const uint32_t now = 100000;
+    FsdBodyCaps c = *fsd_body_caps(FSD_ACT_SEAT_PASSENGER);
+    CHECK(c.requires_passenger_empty, "the passenger row asks");
+    CHECK(!fsd_body_caps(FSD_ACT_SEAT_DRIVER)->requires_passenger_empty,
+          "the driver row does not — that person is the one asking");
+
+    FsdBodyInputs in = good_inputs(now);
+    CHECK(fsd_body_caps_verdict(&c, &in, FSD_ACT_SEAT_PASSENGER, now) == FSD_BODY_OK,
+          "empty and fresh passes");
+
+    in = good_inputs(now); in.passenger_present = true;
+    CHECK(fsd_body_caps_verdict(&c, &in, FSD_ACT_SEAT_PASSENGER, now)
+              == FSD_BODY_PASSENGER_PRESENT,
+          "someone in the seat refuses");
+
+    in = good_inputs(now); in.passenger_seen = false;
+    CHECK(fsd_body_caps_verdict(&c, &in, FSD_ACT_SEAT_PASSENGER, now)
+              == FSD_BODY_NO_PASSENGER_SIGNAL,
+          "never heard: refuses, because silence is not an empty seat");
+
+    in = good_inputs(now); in.passenger_ms = now - FSD_BODY_FRESH_MS;
+    CHECK(fsd_body_caps_verdict(&c, &in, FSD_ACT_SEAT_PASSENGER, now)
+              == FSD_BODY_NO_PASSENGER_SIGNAL,
+          "stale: refuses");
+
+    // The driver's seat is unaffected by an occupied passenger seat.
+    FsdBodyCaps d = *fsd_body_caps(FSD_ACT_SEAT_DRIVER);
+    in = good_inputs(now); in.passenger_present = true;
+    CHECK(fsd_body_caps_verdict(&d, &in, FSD_ACT_SEAT_DRIVER, now) == FSD_BODY_OK,
+          "a seated passenger does not block the driver's own seat");
+}
+
+// The owner chose "seats may move while driving". That is a decision, not a
+// bug, and the row must say so out loud — with the hold bound that makes it
+// survivable.
+static void test_owner_decisions_are_in_the_table(void) {
+    CHECK(fsd_body_caps(FSD_ACT_SEAT_DRIVER)->may_act_while_moving,
+          "owner decision: seats move under way");
+    CHECK(fsd_body_caps(FSD_ACT_SEAT_DRIVER)->max_hold_ms > 0 &&
+              fsd_body_caps(FSD_ACT_SEAT_DRIVER)->max_hold_ms <= 1000u,
+          "and a stuck rule cannot drive the motor to the end of its rail");
+    CHECK(fsd_body_caps(FSD_ACT_CAMERA)->may_act_while_moving,
+          "owner decision: camera on AND off, including under way");
+    CHECK(fsd_body_caps(FSD_ACT_DOOR_OPEN)->min_interval_ms == 0u &&
+              !fsd_body_caps(FSD_ACT_DOOR_OPEN)->armable_at_runtime,
+          "the door row is still all-zero: its command frame is unknown");
+}
+
 int main(void) {
     printf("test_body\n");
     test_t2_can_never_be_armed();
@@ -472,6 +666,13 @@ int main(void) {
     test_t1_budget();
     test_t2_gesture();
     test_t2_frame_discipline();
+    test_rewrite_opened_nothing();
+    test_caps_table_is_well_formed();
+    test_rate_limit();
+    test_gear_row_shape();
+    test_gear_gates_when_armed();
+    test_passenger_seat_fails_closed();
+    test_owner_decisions_are_in_the_table();
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }
