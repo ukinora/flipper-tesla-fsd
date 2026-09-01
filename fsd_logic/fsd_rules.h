@@ -148,6 +148,68 @@ uint8_t fsd_rule_affects(FsdBodyAction a, FsdSignal* out, uint8_t max_out);
 /** Human-readable verdict, for the app. */
 const char* fsd_rule_verdict_str(FsdRuleVerdict v);
 
+/* ── THE WIRE FORM ───────────────────────────────────────────────────────────
+ *
+ * Twelve bytes, little-endian. FsdRule itself is 24 bytes on the two compilers
+ * that build it today and would be something else under -fshort-enums: three of
+ * its fields are enums and one is a bool, none of which has a fixed width. NVS
+ * and BLE both need a shape that does not depend on how the file was compiled,
+ * so neither of them ever sees FsdRule.
+ *
+ *   [0]      flags   bit0 = enabled. Bits 1..7 RESERVED — written as zero and
+ *                    IGNORED on receipt, so a flag added later cannot be
+ *                    honoured by accident by a build that predates it.
+ *   [1]      signal  FsdSignal
+ *   [2]      kind    FsdTriggerKind
+ *   [3..6]   value   int32
+ *   [7]      action  FsdBodyAction
+ *   [8..11]  arg     int32
+ *
+ * 🔴 UNPACK DOES NOT VALIDATE, DELIBERATELY.
+ * It fills the struct and reports whether the ARGUMENTS were usable, nothing
+ * more. fsd_rule_valid() is the one authority on whether a rule can ever fire,
+ * and a second validator here would be a second thing to keep in step — this
+ * file already re-validates at match time for exactly that reason. So an
+ * out-of-range signal survives unpack and is then refused by fsd_rules_set() or
+ * skipped by fsd_rules_match(); both of those bounds-check their own lookups.
+ */
+#define FSD_RULE_WIRE_LEN 12u
+
+/* The whole table, as the BLE characteristic carries it. THE POSITION IS THE
+ * RULE NUMBER — there is no index byte inside a record, so a short read cannot
+ * silently renumber whatever did arrive. */
+#define FSD_RULES_WIRE_LEN (FSD_RULE_WIRE_LEN * FSD_RULE_MAX)
+
+/* 🔴 The spelling has to be switched. This header is compiled three ways — C11
+ * on the host, pre-C11 C in the ESP32 build (where <assert.h> does not declare
+ * `static_assert`), and C++ in ble_server.cpp (where `_Static_assert` is not a
+ * keyword). fsd_btn_j6.h paid two broken builds to learn that, and neither
+ * failure is visible from here: the host tests are C and pass either way. */
+#ifdef __cplusplus
+#define FSD_RULE_STATIC_ASSERT(c, m) static_assert(c, m)
+#else
+#define FSD_RULE_STATIC_ASSERT(c, m) _Static_assert(c, m)
+#endif
+
+/* One byte each on the wire. A table that grew past this would be truncated
+ * SILENTLY, and 256 lands as 0 — which is a perfectly valid signal, so the rule
+ * would come back pointing somewhere else rather than being refused. */
+FSD_RULE_STATIC_ASSERT(FSD_SIG_COUNT <= 255, "signal id must fit one wire byte");
+FSD_RULE_STATIC_ASSERT(FSD_ACT_COUNT <= 255, "action id must fit one wire byte");
+FSD_RULE_STATIC_ASSERT(FSD_TRIG_DELTA <= 255, "trigger kind must fit one wire byte");
+
+/** One rule -> twelve bytes. `out` is fully written; nothing is read back. */
+void fsd_rule_pack(const FsdRule* rule, uint8_t out[FSD_RULE_WIRE_LEN]);
+
+/** Twelve bytes -> one rule. False only for a NULL argument.
+ *
+ *  See the note above: `true` means the bytes were decoded, NOT that the rule
+ *  is one that could ever fire. Ask fsd_rule_valid() for that. */
+bool fsd_rule_unpack(const uint8_t in[FSD_RULE_WIRE_LEN], FsdRule* out);
+
+/** The whole table, in slot order. What the RULES characteristic returns. */
+void fsd_rules_pack_all(const FsdRules* r, uint8_t out[FSD_RULES_WIRE_LEN]);
+
 #ifdef __cplusplus
 }
 #endif

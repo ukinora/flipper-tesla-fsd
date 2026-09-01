@@ -27,6 +27,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include "../fsd_logic/fsd_rules.h"
 
 #include "fsd_wire.h"
 
@@ -672,10 +673,74 @@ static void emit_fixture(FILE* f) {
                 (unsigned)res[i].cmd, (unsigned)res[i].res, (unsigned)res[i].extra,
                 (i + 1 < nr) ? "," : "");
     }
+    /* -- rules ---------------------------------------------------------------
+     *
+     * 🔴 These did not exist, and three comments said they *could* not -- the
+     * stated reason was that the firmware had no rule packer. It has one
+     * (`fsd_rule_pack`), and without vectors the 12-byte layout is written
+     * twice from the same prose: once in `fsd_rules.c`, once in `Rules.kt`.
+     * That is exactly the pair this fixture exists to hold together.
+     *
+     * The cases are picked for what a hand-written codec gets wrong: a
+     * negative `value` (scroll down) and a large negative `arg` prove the
+     * int32 is little-endian two-s-complement in both languages; `enabled`
+     * false with every other field set proves byte 0 is a flag and not a
+     * length; a filled disabled row proves nothing is zeroed on the way out. */
+    fprintf(f, "  ],\n  \"rule_len\": %u,\n  \"rule_max\": %u,\n  \"rules\": [\n",
+            (unsigned)FSD_RULE_WIRE_LEN, (unsigned)FSD_RULE_MAX);
+    static const struct {
+        const char* name;
+        FsdRule r;
+    } rules[] = {
+        /* What `fsd_rules_init` writes. Not all-zero: signal 0 and action 0 are
+         * real values, so "untouched" is a shape, not a blank. The app has to
+         * agree on it byte for byte or half-built rules vanish from its list. */
+        {"empty", {false, FSD_SIG_MAP_SW_FL, FSD_TRIG_NONE, 0, FSD_ACT_MAP_LIGHT, 0}},
+        {"map_light_press",
+         {true, FSD_SIG_MAP_SW_FL, FSD_TRIG_PRESS, 0, FSD_ACT_MAP_LIGHT, 0}},
+        /* Negative value AND negative arg: the two int32s are packed by the
+         * same helper, so a sign bug that only shows on one of them would mean
+         * the helper is being called differently in the two places. */
+        {"scroll_down",
+         {true, FSD_SIG_SCROLL_TICKS, FSD_TRIG_DELTA, -1, FSD_ACT_SCROLL, -3}},
+        {"door_state_enter",
+         {true, FSD_SIG_DOOR_FL_LATCH, FSD_TRIG_STATE_ENTER, 1, FSD_ACT_MAP_LIGHT, 0}},
+        /* Every field set while `enabled` is false. Byte 0 is a flag field;
+         * anything that treats it as a length or that clears a disabled row on
+         * the way out fails here rather than in the car. */
+        {"disabled_but_filled",
+         {false, FSD_SIG_GEAR, FSD_TRIG_STATE_ENTER, 4, FSD_ACT_CAMERA, 1}},
+        {"big_negative_arg",
+         {true, FSD_SIG_MAP_SW_FR, FSD_TRIG_LONG, 0, FSD_ACT_SEAT_DRIVER, -2000000000}},
+        /* The largest values each enum can carry today. A byte that silently
+         * truncates would still look right for the small cases above. */
+        {"max_enums",
+         {true, (FsdSignal)(FSD_SIG_COUNT - 1), FSD_TRIG_DELTA, 2147483647,
+          (FsdBodyAction)(FSD_ACT_COUNT - 1), 2147483647}},
+    };
+    const size_t nu = sizeof(rules) / sizeof(rules[0]);
+    for(size_t i = 0; i < nu; i++) {
+        uint8_t b[FSD_RULE_WIRE_LEN];
+        fsd_rule_pack(&rules[i].r, b);
+        fprintf(f, "    { \"name\": \"%s\", \"hex\": ", rules[i].name);
+        emit_hex(f, b, sizeof(b));
+        fprintf(f,
+                /* 0/1, not true/false: every other vector's `fields` is a map
+                 * of integers and the app's loader refuses anything else. A
+                 * bool here would make the loader throw on a good fixture. */
+                ", \"fields\": { \"enabled\": %u, \"signal\": %u, \"kind\": %u, "
+                "\"value\": %ld, \"action\": %u, \"arg\": %ld } }%s\n",
+                rules[i].r.enabled ? 1u : 0u, (unsigned)rules[i].r.signal,
+                (unsigned)rules[i].r.kind, (long)rules[i].r.value,
+                (unsigned)rules[i].r.action, (long)rules[i].r.arg,
+                (i + 1 < nu) ? "," : "");
+    }
+
     fprintf(f, "  ]\n}\n");
     (void)ns;
     (void)nc;
     (void)nr;
+    (void)nu;
 }
 
 static void write_fixture(void) {

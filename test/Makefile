@@ -99,9 +99,14 @@ test_btn_j6: $(J6_SRC) $(ROOT)/fsd_logic/fsd_btn_j6.h $(ROOT)/fsd_logic/fsd_butt
 # BLE payload packing. Also GENERATES fixtures/wire_vectors.json, which the
 # Android app's JVM tests parse — so the two implementations check each other
 # instead of both checking the prose in BLE-GATT-프로토콜.md.
-WIRE_SRC := test_wire.c $(ROOT)/fsd_logic/fsd_wire.c
+#
+# 🔴 fsd_rules.c is linked in for the RULE vectors, and it drags its own
+# dependencies (trigger -> button, signal, body). The app hand-writes the same
+# 12-byte layout in Rules.kt; without vectors the two copies only ever agreed
+# because someone read the same paragraph twice.
+WIRE_SRC := test_wire.c $(ROOT)/fsd_logic/fsd_wire.c $(ROOT)/fsd_logic/fsd_rules.c             $(ROOT)/fsd_logic/fsd_trigger.c $(ROOT)/fsd_logic/fsd_signal.c             $(ROOT)/fsd_logic/fsd_button.c $(ROOT)/fsd_logic/fsd_body.c
 
-test_wire: $(WIRE_SRC) $(ROOT)/fsd_logic/fsd_wire.h
+test_wire: $(WIRE_SRC) $(ROOT)/fsd_logic/fsd_wire.h $(ROOT)/fsd_logic/fsd_rules.h
 	$(CC) $(CFLAGS) -I$(ROOT)/fsd_logic $(WIRE_SRC) -o $@
 
 # The Capability document's renderer. Pure C on purpose: this document has

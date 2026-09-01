@@ -45,6 +45,7 @@
 #include "ble_server.h"
 #include "ble_owner.h"
 #include "ble_central.h"
+#include "rules_store.h"   // 🔴 조건부 블록 밖 — 모든 보드가 부르고, 없는 보드는 그렇게 답한다
 #include "capability.h"
 #include "profile_match.h"
 #include "../../fsd_logic/fsd_events.h"
@@ -376,6 +377,14 @@ static void serial_command_tick() {
                     Serial.println("[BB]    먼저 폰이나 USB 로 받아 두었는지 확인한다.");
                     Serial.println("[BB]    정말 지우려면: bbclear yes");
                 }
+            } else if (serial_cmd_equals(buf, "rules")) {
+                // 🔴 The rule table's only window that is not the phone app.
+                //
+                // There is no PC in the car, and the app is where a wrong rule
+                // would be believed. This repo has been caught six times by a
+                // feature with no reachable caller; a table that can only be
+                // read by the thing that wrote it is the same shape.
+                rules_store_print();
             } else if (serial_cmd_equals(buf, "pwr")) {
                 // 🔴 The verdict used to exist only in the boot banner, and on
                 // this board that banner cannot be read after a physical power
@@ -546,6 +555,7 @@ static void serial_command_tick() {
                 Serial.println("[SER]   bbfree        — capture space left");
                 Serial.println("[SER]   bbread        — time the capture read path (no BLE)");
                 Serial.println("[SER]   bbclear yes   — delete ALL captures (irreversible)");
+                Serial.println("[SER]   rules         — 저장된 규칙 (저장만 한다, 아직 실행 안 함)");
                 Serial.println("[SER]   pwr           — 12V verdict: switched or always-on");
                 Serial.println("[SER]   hw [hw3|hw4|legacy|auto] — 오토파일럿 세대 고정 (persisted)");
                 Serial.println("[SER]   owner / ownerpair / ownerclear");
@@ -2194,6 +2204,10 @@ void setup() {
     // 없다 — 서로 다른 네임스페이스다. 부팅 배너 근처에 나오게 하려는 것뿐이다.
     power_log_init();
     ble_owner_init();
+    // The owner's rule table. Loads only; nothing in this build acts on a rule
+    // — see rules_store.h. Before ble_server_init(), which seeds the RULES
+    // characteristic from it.
+    rules_store_init();
     // Now that autonomy_enabled is known, settle where the module sits with
     // nothing else raising it. op_mode itself is still never read from NVS
     // (PERSIST_OP_MODE); this is derived from the operator's intent, and
@@ -2720,6 +2734,10 @@ void loop() {
     // future panic, and must not be quarantined for one.
     can_quar_prove(now);
     ble_server_tick(now);  // push State notifications to the phone app
+    // 🔴 ble_server_tick() 바로 뒤다. 거기서 규칙 쓰기가 적용되므로, 여기서
+    // 이어 받아야 같은 루프 안에서 플래시까지 간다. 앞에 두면 커밋이 한 바퀴
+    // 늦고, 그 한 바퀴 안에 전원이 끊기면 "저장됐다" 고 답한 규칙이 사라진다.
+    rules_store_tick(now); // owns the NVS write; see rules_store.h
     ble_central_tick(now); // button link + press classification — no TX
 
 #if defined(BOARD_LILYGO)
