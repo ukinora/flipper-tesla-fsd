@@ -69,7 +69,7 @@ static void test_masks_never_overlap(void) {
             if (x->mux_byte != FSD_BODY_WIRE_NO_MUX && x->mux_byte == y->mux_byte &&
                 x->mux_value != y->mux_value)
                 continue;
-            for (int i = 0; i < FSD_BODY_WIRE_MAX_DLC; i++)
+            for (int i = 0; i < (int)FSD_BODY_WIRE_MAX_DLC; i++)
                 CHECK((x->payload[i] & y->payload[i]) == 0,
                       "%s and %s both claim byte %d (0x%02X & 0x%02X)",
                       fsd_body_action_str((FsdBodyAction)a),
@@ -105,7 +105,7 @@ static void test_unknown_frames_have_no_row(void) {
     // its bits are not. It may change nothing.
     const FsdBodyWire *p = fsd_body_wire(FSD_ACT_SEAT_PASSENGER);
     CHECK(p != NULL, "passenger row exists");
-    for (int i = 0; p && i < FSD_BODY_WIRE_MAX_DLC; i++)
+    for (int i = 0; p && i < (int)FSD_BODY_WIRE_MAX_DLC; i++)
         CHECK(p->payload[i] == 0, "passenger payload byte %d is empty (rules 2/11 uncaptured)", i);
 
     uint8_t out[8];
@@ -300,7 +300,7 @@ static void test_masks_are_pinned(void) {
         CHECK(w->can_id == expect[k].id, "%s frame is 0x%03X",
               fsd_body_action_str(expect[k].a), (unsigned)expect[k].id);
         CHECK(w->dlc == expect[k].dlc, "%s length", fsd_body_action_str(expect[k].a));
-        for (int i = 0; i < FSD_BODY_WIRE_MAX_DLC; i++)
+        for (int i = 0; i < (int)FSD_BODY_WIRE_MAX_DLC; i++)
             CHECK(w->payload[i] == expect[k].payload[i],
                   "%s byte %d mask: row 0x%02X, pinned 0x%02X",
                   fsd_body_action_str(expect[k].a), i, w->payload[i], expect[k].payload[i]);
