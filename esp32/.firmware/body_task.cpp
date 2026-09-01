@@ -130,8 +130,8 @@ static FsdBodyInputs body_inputs(uint32_t now_ms) {
      * needs it armed — the detector measures either way, and the verdict it
      * records (NOT_ENABLED) is the honest one. T2 could not be armed even if
      * this were true: its capability row forbids it. */
-    in.feature_enabled[FSD_BODY_T1_LIGHT] = false;
-    in.feature_enabled[FSD_BODY_T2_DOOR] = false;
+    in.action_enabled[FSD_ACT_MAP_LIGHT] = false;
+    in.action_enabled[FSD_ACT_DOOR_OPEN] = false;
 
     (void)now_ms;
     return in;

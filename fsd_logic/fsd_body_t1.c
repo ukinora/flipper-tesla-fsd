@@ -137,7 +137,7 @@ FsdT1Action fsd_t1_tick(FsdT1* t, const FsdBodyInputs* in, uint32_t now_ms) {
         return FSD_T1_ACT_NONE;
     }
 
-    const FsdBodyVerdict v = fsd_body_allows(in, FSD_BODY_T1_LIGHT, now_ms);
+    const FsdBodyVerdict v = fsd_body_allows(in, FSD_ACT_MAP_LIGHT, now_ms);
     t->last_verdict = v;
     if(v != FSD_BODY_OK) return FSD_T1_ACT_NONE;
 
