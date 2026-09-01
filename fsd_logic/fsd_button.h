@@ -67,8 +67,18 @@ extern "C" {
  *   FSD_BTN_MAX (here)       = logical buttons. Costs one FsdBtnState each, a
  *                              couple of dozen bytes, and nothing else.
  *
- * 10 is FSD_J6_COUNT. fsd_btn_j6.h asserts the relationship at compile time
- * rather than trusting these two numbers to be edited together. */
+ * 🔴 10 IS A CEILING, NOT A PREFERENCE — AND THE LINE ABOVE USED TO BE WRONG.
+ *
+ * It said a slot "costs one FsdBtnState, a couple of dozen bytes, and nothing
+ * else". It costs one more thing: a row in ble_central.cpp's 32-bit action
+ * mask, FSD_BTN_MAX * FSD_BTN_EVENTS. At 12 that is 36 and the board stops
+ * compiling — which is how this was found, by a static_assert someone had the
+ * sense to write instead of letting the top rows go quietly unmapped.
+ *
+ * So a second user cannot simply raise this. fsd_trigger.h needs twelve slots
+ * for the car's switches and holds TWO FsdButtons of its own rather than
+ * widening this number. Same type, same code, separate state — which is what
+ * this comment has said all along, now with the reason it is not optional. */
 #ifndef FSD_BTN_MAX
 #define FSD_BTN_MAX 10
 #endif
