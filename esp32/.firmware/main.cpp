@@ -202,6 +202,22 @@ static bool serial_cmd_equals(const char *cmd, const char *expected) {
     return *cmd == '\0' && *expected == '\0';
 }
 
+// "hw3" / "hw4" / "legacy" / "auto" -> enum.  "auto" maps to Unknown, which is
+// how hw_override spells "stop pinning, let detection guess again".
+static bool hw_name_to_version(const char *s, TeslaHWVersion *out) {
+    if (strcmp(s, "hw3") == 0)    { *out = TeslaHW_HW3;     return true; }
+    if (strcmp(s, "hw4") == 0)    { *out = TeslaHW_HW4;     return true; }
+    if (strcmp(s, "legacy") == 0) { *out = TeslaHW_Legacy;  return true; }
+    if (strcmp(s, "auto") == 0)   { *out = TeslaHW_Unknown; return true; }
+    return false;
+}
+
+static const char *hw_version_name(TeslaHWVersion hw) {
+    return (hw == TeslaHW_HW4)    ? "HW4"    :
+           (hw == TeslaHW_HW3)    ? "HW3"    :
+           (hw == TeslaHW_Legacy) ? "Legacy" : "Unknown";
+}
+
 static void serial_command_tick() {
     // 24 was too small the moment a command took an argument: "btnbind" plus a
     // 17-character BLE address is 25, and the terminator needs one more.
@@ -372,6 +388,63 @@ static void serial_command_tick() {
                 // the first line" -- a ONE-HOUR test in the car with nothing
                 // readable at the end of it. This is that missing line.
                 power_log_print();
+            } else if (serial_cmd_equals(buf, "hw") || strncmp(buf, "hw ", 3) == 0) {
+                // 🔴 hw_override beats auto-detection and survives reboot, but
+                // the ONLY code that set it was web_dashboard.cpp, removed in
+                // PR #28. A designed handle with no handle on it -- the same
+                // shape this repo has now hit six times (recorder on/off,
+                // blackbox_mark, bus stats, self-test, durationText).
+                //
+                // Why it is needed, measured in the car 2026-09-01: our HW3
+                // car was labelled HW4. The tap carries no 0x398, so detection
+                // falls through to guesses, and guess #2 is "0x39B with DLC 8
+                // => HW4" -- which this car sends at 2 Hz. Guess #3 (0x399 =>
+                // HW3) demands DLC 8 and our 0x399 is DLC 3, so it can never
+                // fire. fsd_handler.h already calls 0x39B "HW4 + Highland HW3",
+                // i.e. not exclusive; the guess contradicts its own header.
+                //
+                // Pinning the fact is safer than inventing a new guess: we do
+                // not know that a reliable discriminator exists on this bus.
+                const char *arg = buf + 2;
+                while (*arg == ' ') arg++;
+                if (*arg == '\0') {
+                    FSDState s = state_snapshot();
+                    Serial.printf("[HW] 지금: %s (%s)\n",
+                                  hw_version_name(s.hw_version),
+                                  s.hw_override == TeslaHW_Unknown
+                                      ? "자동 판정" : "수동 고정");
+                    Serial.println("[HW] 바꾸기: hw hw3 | hw hw4 | hw legacy | hw auto");
+                } else {
+                    TeslaHWVersion want;
+                    if (!hw_name_to_version(arg, &want)) {
+                        Serial.printf("[HW] '%s' 는 모르는 값 — hw3 | hw4 | legacy | auto\n",
+                                      arg);
+                    } else {
+                        state_enter();
+                        g_state.hw_override = want;
+                        if (want == TeslaHW_Unknown) {
+                            // Un-pin. Reset hw_version directly rather than via
+                            // fsd_apply_hw_version(), which would also rewrite
+                            // speed_profile -- un-pinning must not move that.
+                            g_state.hw_version = TeslaHW_Unknown;
+                        } else {
+                            fsd_apply_hw_version(&g_state, want);
+                        }
+                        state_exit();
+                        FSDState saved = state_snapshot();
+                        prefs_save(&saved);
+                        if (want == TeslaHW_Unknown) {
+                            Serial.println("[HW] 고정 해제 — 다시 자동 판정한다");
+                        } else {
+                            Serial.printf("[HW] %s 로 고정했다 (재부팅해도 유지)\n",
+                                          hw_version_name(want));
+                        }
+                        if (want == TeslaHW_HW4) {
+                            Serial.println("[HW] ⚠️ HW4 는 HW4 전용 경로를 연다"
+                                           " (0x399 chime 등). 이 차는 HW3 이다.");
+                        }
+                    }
+                }
             } else if (serial_cmd_equals(buf, "owner")) {
                 ble_owner_print();
             } else if (serial_cmd_equals(buf, "ownerclear")) {
@@ -474,6 +547,7 @@ static void serial_command_tick() {
                 Serial.println("[SER]   bbread        — time the capture read path (no BLE)");
                 Serial.println("[SER]   bbclear yes   — delete ALL captures (irreversible)");
                 Serial.println("[SER]   pwr           — 12V verdict: switched or always-on");
+                Serial.println("[SER]   hw [hw3|hw4|legacy|auto] — 오토파일럿 세대 고정 (persisted)");
                 Serial.println("[SER]   owner / ownerpair / ownerclear");
             } else {
                 Serial.println("[SER] Unknown command. Type: help");
