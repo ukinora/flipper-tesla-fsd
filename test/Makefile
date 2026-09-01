@@ -58,6 +58,14 @@ BODYWIRE_SRC := test_body_wire.c $(ROOT)/fsd_logic/fsd_body_wire.c $(ROOT)/fsd_l
 test_body_wire: $(BODYWIRE_SRC) $(ROOT)/fsd_logic/fsd_body_wire.h $(ROOT)/fsd_logic/fsd_body.h $(ROOT)/fsd_logic/fsd_autonomy.h
 	$(CC) $(CFLAGS) -I$(ROOT)/fsd_logic $(BODYWIRE_SRC) -o $@
 
+# Named signals pulled out of CAN frames. The test frames are real ones, copied
+# out of the 2026-09-01 capture — a test built from the table could only prove
+# the table agrees with itself.
+SIGNAL_SRC := test_signal.c $(ROOT)/fsd_logic/fsd_signal.c
+
+test_signal: $(SIGNAL_SRC) $(ROOT)/fsd_logic/fsd_signal.h
+	$(CC) $(CFLAGS) -I$(ROOT)/fsd_logic $(SIGNAL_SRC) -o $@
+
 # Button press classification. Timing only — everything radio-specific is in
 # esp32/.firmware/ble_central.cpp and needs a button to test.
 BTN_SRC := test_button.c $(ROOT)/fsd_logic/fsd_button.c
@@ -90,19 +98,20 @@ CAPJSON_SRC := test_cap_json.c $(ROOT)/fsd_logic/fsd_cap_json.c
 test_cap_json: $(CAPJSON_SRC) $(ROOT)/fsd_logic/fsd_cap_json.h
 	$(CC) $(CFLAGS) -I$(ROOT)/fsd_logic $(CAPJSON_SRC) -o $@
 
-check: test_fsd_core test_speed_profile test_camera test_gps test_body test_body_wire test_button test_btn_j6 test_wire test_cap_json
+check: test_fsd_core test_speed_profile test_camera test_gps test_body test_body_wire test_signal test_button test_btn_j6 test_wire test_cap_json
 	./test_fsd_core
 	./test_speed_profile
 	./test_camera
 	./test_gps
 	./test_body
 	./test_body_wire
+	./test_signal
 	./test_button
 	./test_btn_j6
 	./test_wire
 	./test_cap_json
 
 clean:
-	rm -rf test_fsd_core test_speed_profile test_camera test_gps test_body test_body_wire test_button test_btn_j6 test_wire test_cap_json *.dSYM
+	rm -rf test_fsd_core test_speed_profile test_camera test_gps test_body test_body_wire test_signal test_button test_btn_j6 test_wire test_cap_json *.dSYM
 
 .PHONY: check clean
