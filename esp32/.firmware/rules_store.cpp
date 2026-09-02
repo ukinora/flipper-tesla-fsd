@@ -74,7 +74,7 @@ void rules_store_init(void) {
         g_nvs.end();
     }
     if(!have) {
-        Serial.println("[RULES] 저장된 규칙이 없다 — 24칸 전부 비어 있다");
+        Serial.println("[RULES] 저장된 매핑이 없다 — 24칸 전부 비어 있다");
         return;
     }
 
@@ -108,7 +108,7 @@ void rules_store_init(void) {
         off.enabled = false;
         fsd_rules_set(&g_rules, i, &off);
         disabled++;
-        Serial.printf("[RULES] 🔴 %u번 규칙은 이 펌웨어에서 성립하지 않는다 (%s) — 꺼 둔 채로 둔다\n",
+        Serial.printf("[RULES] 🔴 %u번 매핑은 이 펌웨어에서 성립하지 않는다 (%s) — 꺼 둔 채로 둔다\n",
                       (unsigned)i, fsd_rule_verdict_str(v));
     }
 
@@ -159,7 +159,7 @@ void rules_store_tick(uint32_t now_ms) {
     if(!s_warn_ms || (uint32_t)(now_ms - s_warn_ms) >= 5000u) {
         s_warn_ms = now_ms ? now_ms : 1u;
         Serial.println("[RULES] 🔴 NVS 저장 실패 — 계속 재시도한다. "
-                       "지금 재부팅하면 방금 만든 규칙이 사라진다");
+                       "지금 재부팅하면 방금 만든 매핑이 사라진다");
     }
 }
 
@@ -175,7 +175,7 @@ void rules_store_erase_now(void) {
         g_nvs.end();
         if(gone) {
             g_save_pending = false;
-            Serial.println("[RULES] 규칙을 전부 지웠다");
+            Serial.println("[RULES] 매핑을 전부 지웠다");
             return;
         }
     }
@@ -183,7 +183,7 @@ void rules_store_erase_now(void) {
      * later loop() to retry in. Report rather than block. Failing to erase is at
      * least the direction that does nothing new — the old rules stay, and none
      * of them can act while there is no emitter. */
-    Serial.println("[RULES] 🔴 지우지 못했다 — 이전 규칙이 그대로 남는다");
+    Serial.println("[RULES] 🔴 지우지 못했다 — 이전 매핑이 그대로 남는다");
 }
 
 void rules_store_render(uint8_t out[FSD_RULES_WIRE_LEN]) {
@@ -215,7 +215,7 @@ uint8_t rules_store_clear(uint8_t idx) {
     if(idx == 0xFFu) {
         fsd_rules_init(&g_rules);
         bump();
-        Serial.println("[RULES] 규칙을 전부 지웠다");
+        Serial.println("[RULES] 매핑을 전부 지웠다");
         return (uint8_t)FSD_RULE_OK;
     }
     if(idx >= FSD_RULE_MAX) return (uint8_t)FSD_RULE_BAD_INDEX;
@@ -234,7 +234,7 @@ uint32_t rules_store_revision(void) { return g_rev; }
 
 void rules_store_print(void) {
     uint8_t shown = 0;
-    Serial.printf("[RULES] 저장된 규칙 (%u칸)\n", (unsigned)FSD_RULE_MAX);
+    Serial.printf("[RULES] 저장된 매핑 (%u칸)\n", (unsigned)FSD_RULE_MAX);
 
     for(uint8_t i = 0; i < FSD_RULE_MAX; i++) {
         const FsdRule* r = fsd_rules_get(&g_rules, i);
@@ -274,7 +274,7 @@ void rules_store_print(void) {
      * cheap way to stop somebody concluding the car is broken because a rule
      * they can see stored did nothing. Delete this line the day an emitter
      * exists, and not before. */
-    Serial.println("[RULES] ⚠️ 저장만 한다 — 아직 어떤 규칙도 차를 움직이지 않는다");
+    Serial.println("[RULES] ⚠️ 저장만 한다 — 아직 어떤 매핑도 차를 움직이지 않는다");
     if(g_save_pending) Serial.println("[RULES] 🔴 아직 플래시에 저장되지 않았다");
 }
 
@@ -287,7 +287,7 @@ void rules_store_erase_now(void) {}
 /* Answer rather than ignore, the way the `wifi` command does on this build:
  * silence on a serial console reads as a hung port, not as a decision. */
 void rules_store_print(void) {
-    Serial.println("[RULES] 이 보드에는 규칙 엔진이 없다");
+    Serial.println("[RULES] 이 보드에는 매핑 엔진이 없다");
 }
 
 #endif // BLE_SERVER_ENABLED
