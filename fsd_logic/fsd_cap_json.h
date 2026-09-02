@@ -121,6 +121,27 @@ typedef struct {
     uint8_t  hw;
     uint8_t  bus_count;
     FsdCapJsonBus bus[FSD_CAP_JSON_MAX_BUSES];
+
+    /* ── the capture disk ────────────────────────────────────────────────────
+     *
+     * 🔴 The phone could not see ANY of this, and the serial console is the only
+     * other place it exists. That is a problem in the car: `bbclear` can now be
+     * pressed from the phone (2026-09-02), so somebody can delete captures
+     * WITHOUT KNOWING HOW MUCH ROOM THEY HAD -- or whether they needed to.
+     *
+     * 🔴 `mark_lost` is the heavy one. When a manual capture fails to become a
+     * file, the phone sees only "받을 것이 없습니다", and that sentence cannot
+     * tell the owner whether to shoot again or to clear the disk. main.cpp has
+     * said exactly this in a comment since the flag was added; it just had no
+     * way out of the board. Before TSL comes out, guessing wrong costs a capture
+     * that cannot be retaken.
+     *
+     * Carried here rather than in a new command because the app already re-reads
+     * this document, and rather than in State because free space changes about
+     * once a minute while State goes out five times a second. */
+    uint32_t bb_free_kb;  /* room left, KB */
+    uint16_t bb_count;    /* captures stored */
+    uint8_t  bb_lost;     /* 1 = the last manual mark never became a file */
 } FsdCapJsonStatus;
 
 typedef struct {
