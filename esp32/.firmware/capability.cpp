@@ -7,6 +7,7 @@
  */
 
 #include "ble_central.h"
+#include "blackbox.h"
 #include "capability.h"
 #include "config.h"
 #include "../../fsd_logic/fsd_btn_j6.h"      // FSD_J6_COUNT — the logical button count
@@ -154,6 +155,27 @@ static void fill_status(FsdCapJsonStatus* out) {
         portEXIT_CRITICAL(g_state_mux);
     }
     out->hw = (uint8_t)hw;
+
+    /* 🔴 The capture disk, which the phone had no way to see. `bbclear` can be
+     * pressed from the phone since 2026-09-02, so without these three someone
+     * deletes captures without knowing how much room they had — or, worse, sees
+     * "받을 것이 없습니다" after a failed mark and cannot tell whether to shoot
+     * again or to clear. Before TSL comes out, guessing wrong costs a capture
+     * that cannot be retaken.
+     *
+     * ⚠️ `blackbox_event_count()` returns int and can be negative when the
+     * backend cannot be read. Clamp rather than wrap — a count of 65,535 on the
+     * phone would be read as a real number. */
+    /* 🔴 `blackbox_free_bytes()` answers 0xFFFFFFFF on the RAM backend — "there
+     * is no filesystem to run out of". Divided by 1024 that becomes 4,194,303,
+     * and the phone would print it as a real number of kilobytes. Pass the
+     * sentinel through UNCHANGED and let the app name it; inventing a number
+     * here is how a screen starts quietly lying. */
+    const uint32_t bb_free = blackbox_free_bytes();
+    const int bb_n = blackbox_event_count();
+    out->bb_free_kb = (bb_free == 0xFFFFFFFFu) ? 0xFFFFFFFFu : (bb_free / 1024u);
+    out->bb_count   = (bb_n > 0) ? (uint16_t)((bb_n > 0xFFFF) ? 0xFFFF : bb_n) : 0u;
+    out->bb_lost    = blackbox_last_mark_lost() ? 1u : 0u;
 
     uint8_t n = 0;
     for (uint8_t b = 0; b < CAN_BUS_COUNT && n < FSD_CAP_JSON_MAX_BUSES; b++) {

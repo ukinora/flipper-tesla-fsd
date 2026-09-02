@@ -89,6 +89,13 @@ size_t fsd_cap_json_status(char* out, size_t cap, const FsdCapJsonStatus* s) {
     put(&k, ",\"ms_left\":");   put_u(&k, s->ms_left);
     put(&k, ",\"window_ms\":"); put_u(&k, s->window_ms);
     put(&k, ",\"hw\":");        put_u(&k, s->hw);
+    /* One object rather than three top-level keys: it keeps the disk together
+     * when someone reads the raw document, and costs the same bytes. */
+    put(&k, ",\"bb\":{\"free_kb\":"); put_u(&k, s->bb_free_kb);
+    put(&k, ",\"n\":");               put_u(&k, s->bb_count);
+    put(&k, ",\"lost\":");            put_bool(&k, s->bb_lost != 0u);
+    put(&k, "}");
+
     put(&k, ",\"buses\":[");
 
     uint8_t n = s->bus_count;
@@ -177,6 +184,12 @@ void fsd_cap_json_worst_status(FsdCapJsonStatus* s) {
     s->window_ms = 0xFFFFFFFFu;
     s->hw        = 0xFFu;
     s->bus_count = (uint8_t)FSD_CAP_JSON_MAX_BUSES;
+
+    /* Widened in the same commit as the fields, as the header demands. `lost`
+     * renders as `true`, which is the longer of the two spellings. */
+    s->bb_free_kb = 0xFFFFFFFFu;
+    s->bb_count   = 0xFFFFu;
+    s->bb_lost    = 1u;
 
     for (uint8_t i = 0; i < FSD_CAP_JSON_MAX_BUSES; i++) {
         FsdCapJsonBus* b = &s->bus[i];
