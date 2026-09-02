@@ -142,6 +142,9 @@ typedef struct {
     uint32_t bb_free_kb;  /* room left, KB */
     uint16_t bb_count;    /* captures stored */
     uint8_t  bb_lost;     /* 1 = the last manual mark never became a file */
+    /* 1 = recording EVERY id, not the 27-id filter. The phone has to show this:
+     * it persists, it costs ~18x the frames, and two captures fill the disk. */
+    uint8_t  bb_all;
 } FsdCapJsonStatus;
 
 typedef struct {

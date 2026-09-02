@@ -385,6 +385,28 @@ typedef struct FSDState {
     // Auto-records full-rate CAN around aborts / bus-off / manual marks.
     bool blackbox_enabled;
 
+    /* Record EVERY id instead of the 27 in fsd_blackbox_filter.h.
+     *
+     * 🔴 This was BLACKBOX_CAPTURE_ALL, a compile-time flag, and that made the
+     * one capture it exists for impossible to take. The map-light and door
+     * commands TSL sends are OUTSIDE the 27 (2026-09-01), so finding them needs
+     * an unfiltered capture -- and switching mode meant rebuilding the firmware
+     * AT THE CAR, on a laptop that has never built this repo. Worse, a board
+     * flashed unfiltered cannot take a filtered capture on the same trip, so the
+     * control run and the real run could not be taken together.
+     *
+     * ⚠️ IT PERSISTS, and that is the deliberate direction. Not persisting looks
+     * safer -- a reboot returns to the cheap mode -- but the failure is silent:
+     * opening the serial port reboots this board, and the next capture would be
+     * filtered while the operator believes it is not. A capture taken before TSL
+     * comes out cannot be retaken. Loud and wrong beats quiet and wrong, so the
+     * mode is announced at boot, on `bbfree`, and in the Capability document.
+     *
+     * ⚠️ The cost is real: ~4,000 f/s unfiltered against ~227 filtered. One
+     * capture is about 1.5 MB, so TWO fill the disk, and the 40,000-frame ring
+     * covers the 10 s window with nothing to spare. */
+    bool blackbox_capture_all;
+
     // DAS_status fields parsed by the ESP32 handler
     uint8_t das_speed_limit_1;
     uint8_t das_speed_limit_2;

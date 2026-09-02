@@ -176,6 +176,7 @@ static void fill_status(FsdCapJsonStatus* out) {
     out->bb_free_kb = (bb_free == 0xFFFFFFFFu) ? 0xFFFFFFFFu : (bb_free / 1024u);
     out->bb_count   = (bb_n > 0) ? (uint16_t)((bb_n > 0xFFFF) ? 0xFFFF : bb_n) : 0u;
     out->bb_lost    = blackbox_last_mark_lost() ? 1u : 0u;
+    out->bb_all     = blackbox_capture_all() ? 1u : 0u;
 
     uint8_t n = 0;
     for (uint8_t b = 0; b < CAN_BUS_COUNT && n < FSD_CAP_JSON_MAX_BUSES; b++) {
