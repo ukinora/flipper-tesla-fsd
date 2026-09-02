@@ -73,6 +73,8 @@ void prefs_load(FSDState *state) {
     state->bms_output               = g_prefs.getBool("bms",    false);
     state->firmware_14x_warning     = g_prefs.getBool("14x",    true);
     state->blackbox_enabled         = g_prefs.getBool("bbx",    BLACKBOX_DEFAULT_ENABLED);
+    // 🔴 Defaults OFF. The expensive mode is never what you get by accident.
+    state->blackbox_capture_all     = g_prefs.getBool("bball",  false);
     // Operator intent for unattended camera response. Persisted BECAUSE it
     // grants nothing by itself: without a gear of D and a latched belt it
     // produces no transmission at all. op_mode remains unrestored — see the
@@ -191,6 +193,7 @@ void prefs_save(const FSDState *state) {
     g_prefs.putBool("bms",    state->bms_output);
     g_prefs.putBool("14x",    state->firmware_14x_warning);
     g_prefs.putBool("bbx",    state->blackbox_enabled);
+    g_prefs.putBool("bball",  state->blackbox_capture_all);
     g_prefs.putBool("auton",  state->autonomy_enabled);
 #if defined(BOARD_TTGO_DISPLAY)
     g_prefs.putBool("disp",   state->display_enabled);

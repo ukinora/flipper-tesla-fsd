@@ -78,6 +78,10 @@
  * captures STILL stored afterwards, read back rather than assumed, so 0 is the
  * only shape of success. */
 #define BLE_CMD_BB_CLEAR     0x36u  // arg: 1 = do it. Any other value refuses.
+/* arg: 1 = record every id, 0 = the 27-id filter. PERSISTS -- see
+ * FSDState::blackbox_capture_all. The phone must show which mode is on, because
+ * an unfiltered capture is ~18x the frames and fills the disk in two. */
+#define BLE_CMD_BB_ALL       0x37u
 #define BLE_CMD_CAP_RECHECK  0x40u  // re-run the capability listen window
 #define BLE_CMD_SET_AUTONOMY 0x41u  // arg: 0/1 — operator intent, persisted
 #define BLE_CMD_PING         0x50u

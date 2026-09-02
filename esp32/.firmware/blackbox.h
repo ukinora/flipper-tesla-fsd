@@ -112,6 +112,12 @@ void blackbox_tick(uint32_t now_ms);
 void blackbox_set_enabled(bool enabled);
 bool blackbox_is_enabled();
 
+/* Record every id, not just the 27 in fsd_blackbox_filter.h. See
+ * FSDState::blackbox_capture_all for why this is a RUNTIME switch and why it
+ * persists. Costs ~18x the frames: about 1.5 MB per capture, two per disk. */
+void blackbox_set_capture_all(bool all);
+bool blackbox_capture_all();
+
 /** Captures written since boot. The honest answer to "did my MARK take?" --
  *  blackbox_mark() can be swallowed by the event cooldown, and at the one
  *  moment that matters the operator must not be told it worked when it did

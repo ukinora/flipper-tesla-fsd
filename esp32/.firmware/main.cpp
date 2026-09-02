@@ -254,6 +254,18 @@ static void serial_command_tick() {
                 Serial.printf("[BB] serial: %s (actually: %s)\n",
                               on ? "on" : "off",
                               blackbox_is_enabled() ? "recording" : "off");
+            } else if (serial_cmd_equals(buf, "bball on") ||
+                       serial_cmd_equals(buf, "bball off")) {
+                /* The 27-id filter, on or off. See FSDState::blackbox_capture_all
+                 * -- this used to be a build flag, which put an unfiltered
+                 * capture out of reach anywhere but a rebuild. */
+                blackbox_set_capture_all(serial_cmd_equals(buf, "bball on"));
+                FSDState saved = state_snapshot();
+                prefs_save(&saved);
+            } else if (serial_cmd_equals(buf, "bball")) {
+                Serial.printf("[BB] 지금 %s - 'bball on' / 'bball off'\n",
+                              blackbox_capture_all() ? "무필터 (한 건 약 1.5 MB)"
+                                                     : "필터 27개 (한 건 약 86 KB)");
             } else if (serial_cmd_equals(buf, "mark")) {
                 if (!blackbox_is_enabled()) {
                     Serial.println("[BB] not recording — run 'bbon' first");
@@ -555,6 +567,7 @@ static void serial_command_tick() {
                 Serial.println("[SER]   bbfree        — capture space left");
                 Serial.println("[SER]   bbread        — time the capture read path (no BLE)");
                 Serial.println("[SER]   bbclear yes   — delete ALL captures (irreversible)");
+                Serial.println("[SER]   bball [on|off]— 무필터 캡처 (한 건 1.5 MB, 디스크 2건)");
                 Serial.println("[SER]   rules         — 저장된 규칙 (저장만 한다, 아직 실행 안 함)");
                 Serial.println("[SER]   pwr           — 12V verdict: switched or always-on");
                 Serial.println("[SER]   hw [hw3|hw4|legacy|auto] — 오토파일럿 세대 고정 (persisted)");

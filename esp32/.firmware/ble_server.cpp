@@ -188,6 +188,8 @@ static volatile uint16_t g_mode_req_handle  = BLE_CONN_NONE;
 // so like SET_MODE these are applied from loop() and answered with what really
 // happened rather than with what was asked for.
 static volatile bool     g_bb_req_pending   = false;
+static volatile uint8_t  g_bb_all_req         = 0;
+static volatile bool     g_bb_all_req_pending = false;
 
 /* Button bind, parked for loop().
  *
@@ -661,6 +663,19 @@ static void ble_apply_mode_request(void) {
 // Apply a recorder request parked by the BLE task. Runs from loop(), which is
 // where a 114 KB allocation belongs.
 static void ble_apply_blackbox_request(void) {
+    if (g_bb_all_req_pending) {
+        g_bb_all_req_pending = false;
+        const bool want = (g_bb_all_req != 0);
+        blackbox_set_capture_all(want);
+
+        // What IS, not what was asked -- the build flag can pin it on.
+        const bool now_all = blackbox_capture_all();
+        g_prefs_dirty = true;   // survive the reboot; loop() persists it
+        ble_send_result(BLE_CMD_BB_ALL,
+                        now_all == want ? BLE_RES_OK : BLE_RES_REJECTED,
+                        now_all ? 1u : 0u);
+    }
+
     if (g_bb_req_pending) {
         g_bb_req_pending = false;
         bool want = (g_bb_req != 0);
@@ -1091,6 +1106,17 @@ class CommandCB : public NimBLECharacteristicCallbacks {
                 break;
             }
             g_bb_mark_pending = true;
+            break;
+
+        case BLE_CMD_BB_ALL:
+            /* 🔴 Parked like the others: this writes NVS, and NVS writes do not
+             * belong in a BLE callback. The answer says which mode is ACTUALLY
+             * on afterwards -- a build with BLACKBOX_CAPTURE_ALL cannot turn it
+             * off, and a phone told "OK" would then believe the wrong thing
+             * before a capture that cannot be retaken. */
+            if (g_bb_all_req_pending) { ble_send_result(cmd, BLE_RES_BUSY, 0); break; }
+            g_bb_all_req         = arg ? 1u : 0u;
+            g_bb_all_req_pending = true;   // last
             break;
 
         case BLE_CMD_BB_CLEAR:

@@ -1068,6 +1068,13 @@ static bool bb_try_alloc(bool psram, uint32_t frames) {
     g_cap = frames;
     g_ring_psram = psram;
     g_head = g_tail = 0;
+    /* The filter mode goes in the boot banner because it PERSISTS. Somebody who
+     * left it unfiltered yesterday has to see that BEFORE taking a capture that
+     * cannot be retaken -- the banner is the first thing read when a board looks
+     * odd, and a silent expensive mode is exactly what it is for. */
+    if (blackbox_capture_all()) {
+        Serial.println("[BB] 무필터 - 모든 프레임을 담는다 (한 건 약 1.5 MB, 디스크 2건)");
+    }
     Serial.printf("[BB] ring=%lu frames (%lu KB) %s  window=%us pre/%us post\n",
                   (unsigned long)g_cap, (unsigned long)(bytes / 1024u),
                   g_ring_psram ? "PSRAM" : "internal-RAM",
@@ -1121,7 +1128,11 @@ static void bb_record(CanBusId bus, const CanFrame& frame, uint32_t now_ms, uint
     // bus (~3300 f/s) recording everything fills the ring in ~1.8 s, truncating
     // the 5 s pre / 5 s post window; the filter drops the stored rate ~15x so
     // the whole window survives. Define BLACKBOX_CAPTURE_ALL to keep every frame.
-    if (!fsd_blackbox_should_record(frame.id)) return;
+    /* 🔴 The runtime gate is HERE, not in the header. `fsd_blackbox_should_record`
+     * stays a pure id -> bool so the host tests keep testing the list itself;
+     * reaching into a global from a shared header would make that untestable.
+     * The compile-time BLACKBOX_CAPTURE_ALL still works and still wins. */
+    if (!blackbox_capture_all() && !fsd_blackbox_should_record(frame.id)) return;
     if (ring_next(g_head) == g_tail) g_tail = ring_next(g_tail);  // evict oldest
     BBFrame& s = g_ring[g_head];
     s.ts_ms = now_ms;
@@ -1389,6 +1400,34 @@ void blackbox_tick(uint32_t now_ms) {
     if ((int32_t)(now_ms - g_flush_at_ms) < 0) return;  // post-roll still running
     do_flush();
     g_armed = false;
+}
+
+bool blackbox_capture_all() {
+#ifdef BLACKBOX_CAPTURE_ALL
+    return true;   // the build flag still wins, and cannot be turned off
+#else
+    if (g_state == nullptr) return false;
+    bb_enter();
+    const bool all = g_state->blackbox_capture_all;
+    bb_exit();
+    return all;
+#endif
+}
+
+void blackbox_set_capture_all(bool all) {
+    if (g_state == nullptr) return;
+    bb_enter();
+    g_state->blackbox_capture_all = all;
+    bb_exit();
+
+    /* 🔴 Say the cost every time, not once in a manual. Somebody flips this at
+     * the car, in the dark, before a capture that cannot be retaken. */
+    if (all) {
+        Serial.println("[BB] 🔴 무필터 — 버스의 모든 프레임을 담는다");
+        Serial.println("[BB]    한 건 약 1.5 MB · 디스크에 2건 · 링에 여유가 없다");
+    } else {
+        Serial.println("[BB] 필터 27개 — 한 건 약 86 KB");
+    }
 }
 
 void blackbox_set_enabled(bool enabled) {

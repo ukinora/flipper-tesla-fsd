@@ -94,6 +94,7 @@ size_t fsd_cap_json_status(char* out, size_t cap, const FsdCapJsonStatus* s) {
     put(&k, ",\"bb\":{\"free_kb\":"); put_u(&k, s->bb_free_kb);
     put(&k, ",\"n\":");               put_u(&k, s->bb_count);
     put(&k, ",\"lost\":");            put_bool(&k, s->bb_lost != 0u);
+    put(&k, ",\"all\":");             put_bool(&k, s->bb_all != 0u);
     put(&k, "}");
 
     put(&k, ",\"buses\":[");
@@ -190,6 +191,7 @@ void fsd_cap_json_worst_status(FsdCapJsonStatus* s) {
     s->bb_free_kb = 0xFFFFFFFFu;
     s->bb_count   = 0xFFFFu;
     s->bb_lost    = 1u;
+    s->bb_all     = 1u;
 
     for (uint8_t i = 0; i < FSD_CAP_JSON_MAX_BUSES; i++) {
         FsdCapJsonBus* b = &s->bus[i];
