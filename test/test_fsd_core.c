@@ -2750,6 +2750,120 @@ static void test_selftest_decide(void) {
           "one ms before the deadline still waits");
 }
 
+/* 0x219 -- the bytes below are COPIED FROM THE CAR, not made up.
+ * captures/2026-09-03/유휴 and captures/2026-09-01/유휴-A.
+ * A table-built frame only proves the table agrees with itself. */
+/* 0x39B byte0 -- bytes copied from captures/2026-09-03. */
+static void test_das_state_alt(void) {
+    printf("\n-- 0x39B byte0: AP state on a HW3 car --\n");
+    uint8_t st;
+
+    /* Parked, FSD off -- identical in four separate captures. */
+    const uint8_t parked[8] = {0x01, 0x02, 0xDF, 0x81, 0xB0, 0x44, 0xB1, 0xA7};
+    CHECK(fsd_decode_das_state_b0(parked, 8, &st) && st == 1u,
+          "parked reads 1 (unavailable), got %u", st);
+
+    /* The one drive: FSD engaged the whole time. */
+    const uint8_t ready[8]   = {0x02, 0x02, 0xDF, 0x81, 0xB0, 0x44, 0xB1, 0xA7};
+    const uint8_t engaged[8] = {0x06, 0x02, 0xDF, 0x80, 0xB0, 0x44, 0x01, 0xFA};
+    CHECK(fsd_decode_das_state_b0(ready, 8, &st) && st == 2u, "2 = ready");
+    CHECK(fsd_decode_das_state_b0(engaged, 8, &st) && st == 6u, "6 = engaged");
+
+    /* The standard HW4 read would answer 0 for all three -- byte1 is 0x02 in
+     * every capture, so bits[7:4] are zero. Pinned so nobody "simplifies" this
+     * back into the HW4 parser. */
+    CHECK(((ready[1] >> 4) & 0x0Fu) == 0u, "HW4 nibble is 0 on this car");
+    CHECK(((engaged[1] >> 4) & 0x0Fu) == 0u, "HW4 nibble is 0 while engaged");
+
+    CHECK(!fsd_decode_das_state_b0(NULL, 8, &st), "null rejected");
+    CHECK(!fsd_decode_das_state_b0(parked, 0, &st), "empty frame rejected");
+}
+
+/* 0x3FD byte7 -- bytes copied from captures/2026-09-03/속도프로파일4단계,
+ * where the owner drove the wheel up through all four and wrote the order down. */
+static void test_profile_observed(void) {
+    printf("\\n-- 0x3FD mux 2 byte7: the profile the car is ON --\\n");
+    uint8_t v;
+
+    /* mux byte is 0x82; the mux is its low two bits. */
+    uint8_t f[8] = {0x82, 0x00, 0x5A, 0x20, 0x00, 0x00, 0x00, 0x00};
+
+    f[7] = 0xC0; CHECK(fsd_decode_profile_obs(f, 8, &v) && v == 4u,
+                       "나무늘보 = 4, got %u", v);
+    f[7] = 0x80; CHECK(fsd_decode_profile_obs(f, 8, &v) && v == 0u,
+                       "컴포트 = 0, got %u", v);
+    f[7] = 0x90; CHECK(fsd_decode_profile_obs(f, 8, &v) && v == 1u,
+                       "스탠더드 = 1, got %u", v);
+    f[7] = 0xA0; CHECK(fsd_decode_profile_obs(f, 8, &v) && v == 2u,
+                       "신속 = 2, got %u", v);
+
+    /* 🔴 The documented HW4 layout (byte7 bits[7:5]) collapses two of the four
+     * into the same number on this car. Pinned so the fix cannot be "simplified"
+     * back into it. */
+    CHECK(((0x80u >> 5) & 0x07u) == ((0x90u >> 5) & 0x07u),
+          "bits[7:5] cannot tell 컴포트 from 스탠더드");
+
+    /* The other two muxes on this frame carry other things. */
+    f[0] = 0x00; f[7] = 0xA0;
+    CHECK(!fsd_decode_profile_obs(f, 8, &v), "mux 0 rejected");
+    f[0] = 0x01;
+    CHECK(!fsd_decode_profile_obs(f, 8, &v), "mux 1 rejected");
+
+    f[0] = 0x82;
+    CHECK(!fsd_decode_profile_obs(f, 7, &v), "short frame rejected");
+    CHECK(!fsd_decode_profile_obs(NULL, 8, &v), "null rejected");
+
+    /* 🟢 0 is a real profile (컴포트 here), so the wire needs a separate
+     * "never seen" value -- see FSD_WIRE_PROFILE_NONE in fsd_wire.h, asserted
+     * against this mask in test_wire.c where both headers are in scope. */
+}
+
+static void test_tpms_decode(void) {
+    printf("\n-- 0x219: mux 5 carries the pressures --\n");
+
+    uint8_t out[4];
+
+    /* 2026-09-03, owner measured 42 psi with a gauge.
+     * 0x75=117 0x76=118 0x74=116 0x75=117, x0.025 bar = 42.4/42.8/42.1/42.4 psi */
+    const uint8_t mux5[7] = {0x05, 0x00, 0x75, 0x76, 0x74, 0x75, 0x00};
+    CHECK(fsd_decode_tpms(mux5, 7, out), "mux 5 accepted");
+    CHECK(out[0] == 0x75 && out[1] == 0x76 && out[2] == 0x74 && out[3] == 0x75,
+          "four pressures, got %u %u %u %u", out[0], out[1], out[2], out[3]);
+
+    /* Two days earlier the same mux read 44.3 psi on all four. The value MOVED,
+     * which is what says it is a live measurement and not a constant. */
+    const uint8_t mux5_older[7] = {0x05, 0x00, 0x7A, 0x7A, 0x7A, 0x7A, 0x00};
+    CHECK(fsd_decode_tpms(mux5_older, 7, out) && out[0] == 0x7A && out[3] == 0x7A,
+          "2026-09-01 frame reads 0x7A x4");
+
+    /* 🔴 The four muxes that used to be read as wheels 0..3. Each carries
+     * 0x80 in byte 1 -- 46.4 psi, the number the dashboard was stuck on. */
+    const uint8_t mux0[7] = {0x00, 0x80, 0xFF, 0xFF, 0xFF, 0xF8, 0x0F};
+    const uint8_t mux1[7] = {0x01, 0x80, 0xFF, 0xFF, 0xFF, 0xF9, 0x0F};
+    const uint8_t mux2[7] = {0x02, 0x80, 0xFF, 0xFF, 0xFF, 0xFB, 0x0F};
+    const uint8_t mux3[7] = {0x03, 0x80, 0xFF, 0xFF, 0xFF, 0xFA, 0x0F};
+    CHECK(!fsd_decode_tpms(mux0, 7, out), "mux 0 rejected");
+    CHECK(!fsd_decode_tpms(mux1, 7, out), "mux 1 rejected");
+    CHECK(!fsd_decode_tpms(mux2, 7, out), "mux 2 rejected");
+    CHECK(!fsd_decode_tpms(mux3, 7, out), "mux 3 rejected");
+
+    /* 🔴 mux 4 is the one that made the front-left flicker: masked with 3 it
+     * became wheel 0, and 0x74 = 42.1 psi looks entirely plausible next to
+     * mux 0's 46.4. Identical on both capture days -- a placard value, not a
+     * measurement. */
+    const uint8_t mux4[7] = {0x04, 0x74, 0x74, 0x00, 0x00, 0x00, 0x00};
+    CHECK(!fsd_decode_tpms(mux4, 7, out), "mux 4 rejected (placard, not live)");
+
+    /* A frame too short to hold four pressures must not be half-read. */
+    CHECK(!fsd_decode_tpms(mux5, 5, out), "dlc 5 rejected");
+    CHECK(!fsd_decode_tpms(NULL, 7, out), "null frame rejected");
+
+    /* The handler itself (fsd_handler.cpp) is a six-line wrapper around this
+     * decoder and lives in the ESP32-only translation unit, so it is not
+     * linked here. What it must do -- leave state untouched when the decoder
+     * says no -- is exactly the rejections above. */
+}
+
 static void test_speed_observer(void) {
     printf("\n-- 0x257: two speeds in one frame --\n");
 
@@ -3381,6 +3495,9 @@ int main(void) {
     test_owner();
     test_ble_session();
     test_speed_observer();
+    test_tpms_decode();
+    test_das_state_alt();
+    test_profile_observed();
     test_selftest_decide();
 
     test_tx_allowlist();

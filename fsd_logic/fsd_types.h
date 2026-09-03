@@ -181,6 +181,131 @@ static inline bool fsd_decode_ui_speed(const uint8_t* d, uint8_t dlc, uint8_t* o
     return true;
 }
 
+/* 0x3FD DAS_autopilotControl -- the speed profile the car is ACTUALLY on.
+ *
+ * 🔴 MEASURED ON THIS CAR, and it is not where either documented layout says
+ * (2026-09-03, captures/2026-09-03/속도프로파일4단계).
+ *
+ * fsd_sp_decode_profile() knows two layouts:
+ *     HW3   mux 0, byte 6 bits[2:1]   -- fixed at 0 through the whole drive here
+ *     HW4   mux 2, byte 7 bits[7:5]   -- collides: 0x80 and 0x90 both read 4
+ *
+ * This car uses mux 2, byte 7 bits[6:4]. One bit lower than the HW4 layout,
+ * which is the difference between four distinct values and two.
+ *
+ * How it was pinned: the right scroll wheel (0x3C2 mux 0x29 byte3, 6-bit
+ * signed) ticked +1 three times, and this field changed 220-300 ms after each
+ * tick, in step, in the order the owner wrote down.
+ *
+ *     wheel +1 @ 6.401  ->  6.699  byte7 = 0x80
+ *     wheel +1 @ 7.501  ->  7.722  byte7 = 0x90
+ *     wheel +1 @ 8.901  ->  9.198  byte7 = 0xA0
+ *
+ * With the earlier down-ticks landing on 0xC0, the ladder the owner drove is:
+ *
+ *     나무늘보 0xC0 -> 4     컴포트 0x80 -> 0
+ *     스탠더드 0x90 -> 1     신속   0xA0 -> 2
+ *
+ * 🟢 Chill/Standard/Hurry come out consecutive (0,1,2) and Sloth sits apart
+ * at 4 -- which is what a level added later to an existing enum looks like.
+ * That is an OBSERVATION about the numbers, not an assumption feeding code.
+ *
+ * 🔴 This is the OBSERVED profile. Do not merge it with
+ * FSDState.speed_profile, which is what we intend to WRITE -- PR #17 already
+ * paid for that confusion once, when the policy clamp read an intent as a
+ * measurement.
+ */
+#define FSD_PROFILE_MUX_MASK   0x03u
+#define FSD_PROFILE_MUX        2u
+#define FSD_PROFILE_BYTE       7u
+#define FSD_PROFILE_SHIFT      4u
+#define FSD_PROFILE_MASK       0x07u
+
+static inline bool fsd_decode_profile_obs(const uint8_t* d, uint8_t dlc, uint8_t* out) {
+    if(!d || !out || dlc < 8u) return false;
+    if((d[0] & FSD_PROFILE_MUX_MASK) != FSD_PROFILE_MUX) return false;
+    *out = (uint8_t)((d[FSD_PROFILE_BYTE] >> FSD_PROFILE_SHIFT) & FSD_PROFILE_MASK);
+    return true;
+}
+
+/* 0x39B DAS_status byte0 low nibble -- DAS_autopilotState, HW3 positions.
+ *
+ * 🔴 THIS CAR PUBLISHES AP STATE ON THE "HW4" FRAME (2026-09-03).
+ *
+ * 2021 Model 3, HW3 hardware, Korean firmware 2026.20.7.5:
+ *
+ *     0x399  THREE bytes, 000000, never moves -- even with FSD engaged
+ *     0x39B  EIGHT bytes, and byte0 tracks the car:
+ *
+ *         parked, FSD off   byte0 = 0x01     (4 captures)
+ *         driving, FSD on   byte0 = 0x02 then 0x06
+ *
+ * fsd_handle_das_status_hw3() requires dlc == 8, so on 0x399 it returns on
+ * every single frame: das_ap_state stayed 0 and the dashboard read
+ * "쓸 수 없음" for an entire drive with FSD engaged.
+ *
+ * 🔴 The standard HW4 parser does NOT help here. It reads byte1 bits[7:4],
+ * and on this car byte1 is 0x02 in every capture -- that nibble is 0. It
+ * would report "unavailable" just as wrongly, from a different byte.
+ *
+ * 🟢 The values land exactly on the HW3 table the app already names:
+ * 1 = unavailable, 2 = ready, 6 = engaged. Nothing had to be invented.
+ *
+ * Evidence: captures/2026-09-03/{유휴,맵등 켜기,우측앞문열기,조수석시트앞뒤}
+ * versus captures/2026-09-03/속도프로파일4단계 (the one drive).
+ */
+static inline bool fsd_decode_das_state_b0(const uint8_t* d, uint8_t dlc, uint8_t* out) {
+    if(!d || !out || dlc < 1u) return false;
+    *out = d[0] & 0x0Fu;
+    return true;
+}
+
+/* 0x219 VCSEC_TPMSData -- the four live tyre pressures.
+ *
+ * 🔴 THE OLD READ WAS WRONG AND THE CAR SAID SO (2026-09-03).
+ *
+ * It took `data[0] & 3` as "which wheel" and `data[1]` as that wheel's
+ * pressure. But byte 0 is a MUX, not a wheel index, and this car sends at
+ * least six of them:
+ *
+ *     00 80 FF FF FF F8 0F     mux 0..3 -- byte1 = 0x80 on all four, never
+ *     01 80 FF FF FF F9 0F                 moves. NOT a pressure.
+ *     02 80 FF FF FF FB 0F
+ *     03 80 FF FF FF FA 0F
+ *     04 74 74 00 00 00 00     mux 4  -- 0x74 twice, identical on two days
+ *                                        two days apart. A placard value.
+ *     05 00 75 76 74 75 00     mux 5  -- FOUR values, and they MOVED between
+ *                                        2026-09-01 (7A x4 = 44.3 psi) and
+ *                                        2026-09-03 (42.4/42.8/42.1/42.4).
+ *
+ * The owner measured 42 psi with a gauge on 2026-09-03. Only mux 5 agrees.
+ *
+ * Masking the mux with 3 made mux 4 overwrite wheel 0 and mux 5 overwrite
+ * wheel 1 with byte1 = 0x00, which is exactly what the dashboard showed:
+ * front-left flickering between 42 and 46, front-right blinking empty, the
+ * two rear wheels stuck at 46. The symptom named the bug.
+ *
+ * 🟢 Every other mux is REJECTED rather than stored. A pressure that is not
+ * a pressure is worse than no reading -- the app already draws "no value"
+ * for 0, and a plausible wrong number is the one nobody questions.
+ *
+ * 🔴 WHICH BYTE IS WHICH WHEEL IS NOT KNOWN. On the day this was decoded the
+ * four readings were 42.1..42.8 psi, too close to tell apart. Set one tyre
+ * to a clearly different pressure and take one capture; that settles it.
+ * Until then the app lays them out by index, as it already did.
+ */
+#define FSD_TPMS_MUX_BYTE      0u
+#define FSD_TPMS_PRESSURE_MUX  5u   /* the only mux that carries pressures */
+#define FSD_TPMS_FIRST_BYTE    2u   /* d[2]..d[5] = four wheels */
+#define FSD_TPMS_MIN_DLC       6u
+
+static inline bool fsd_decode_tpms(const uint8_t* d, uint8_t dlc, uint8_t* out4) {
+    if(!d || !out4 || dlc < FSD_TPMS_MIN_DLC) return false;
+    if(d[FSD_TPMS_MUX_BYTE] != FSD_TPMS_PRESSURE_MUX) return false;
+    for(unsigned i = 0; i < 4u; i++) out4[i] = d[FSD_TPMS_FIRST_BYTE + i];
+    return true;
+}
+
 // Abort Guard (#108): DAS_autopilotState values that mean the car is aborting an
 // engage — the moment linked to the steer-jerk in dunckencn's logs.
 //

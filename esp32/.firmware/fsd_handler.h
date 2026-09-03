@@ -205,6 +205,7 @@ void fsd_handle_das_status_hw3(FSDState *state, const CanFrame *frame, uint32_t 
 void fsd_handle_tpms(FSDState *state, const CanFrame *frame, uint32_t now_ms);
 
 /** Parse DAS_status from HW4 0x39B — updates AP/speed/hands-on state. */
+void fsd_handle_das_state_alt(FSDState *state, const CanFrame *frame, uint32_t now_ms);
 void fsd_handle_das_status_hw4(FSDState *state, const CanFrame *frame, uint32_t now_ms);
 
 /** HW4 hands-on fallback: read only DAS_handsOnState (byte5[5:2]) from 0x399,

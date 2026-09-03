@@ -66,7 +66,7 @@
  * three times; 288 bytes cannot. */
 #define BLE_UUID_RULES   "6b1a000b-4b53-4d4f-4432-43414e000001"
 
-#define BLE_STATE_LEN  26u   // v5: +bytes 22..25, tyre pressure
+#define BLE_STATE_LEN  27u   // v6: +byte 26, observed speed profile
 #define BLE_RESULT_LEN 4u
 #define BLE_BULK_HDR   2u   // seq prefix on every bulk frame
 
@@ -280,6 +280,9 @@ static void ble_pack_state(uint8_t *out, uint16_t rx_fps) {
     w.hw_version       = (uint8_t)s.hw_version;
     w.speed_profile    = s.speed_profile;
     w.ap_state         = s.das_ap_state;
+    /* The profile the car is on, kept apart from speed_profile (our intent). */
+    w.observed_profile      = s.observed_profile;
+    w.observed_profile_seen = s.observed_profile_seen;
     w.speed_kph        = s.vehicle_speed_kph;
     w.soc_percent      = s.soc_percent;
     w.gear             = s.di_gear;

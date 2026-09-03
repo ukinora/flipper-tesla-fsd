@@ -103,6 +103,15 @@ void fsd_wire_pack_state(const FsdWireState* in, uint8_t* out) {
      * the DBC and the conversion to psi on the phone, because a count is what
      * a capture shows and keeping the two the same makes them comparable. */
     for(size_t i = 0; i < 4; i++) out[22 + i] = in->tyre_pressure[i];
+    /* Byte 26, added in version 6. The OBSERVED speed profile from 0x3FD.
+     *
+     * 🔴 0x0F means "never decoded", not "profile 15". 0 is a real profile
+     * (컴포트 on this car), so a zero cannot carry the absence -- the phone
+     * would draw a confident wrong name for a car we never heard from. The
+     * field is 3 bits wide, so 0x0F cannot collide with a real value. */
+    out[26] = in->observed_profile_seen
+                  ? (uint8_t)(in->observed_profile & 0x07u)
+                  : FSD_WIRE_PROFILE_NONE;
 }
 
 void fsd_wire_pack_camstat(const FsdWireCamStat* in, uint8_t* out) {

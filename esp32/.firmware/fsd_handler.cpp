@@ -913,16 +913,21 @@ static void fsd_handle_das_status_common(FSDState *state, const CanFrame *frame,
 
 // ── DAS status — nag killer gating / AP active status ────────────────────────
 
+/* All four wheels arrive in ONE frame (mux 5), so all four timestamps are
+ * stamped together -- the per-wheel freshness array is kept because
+ * fsd_tyre_fresh() takes one wheel at a time and a future layout may split
+ * them again. See fsd_decode_tpms() for why the old per-wheel read was wrong.
+ *
+ * 🔴 Frames that are not mux 5 are dropped WITHOUT touching state. The old
+ * code stored something for every frame, and "something" from the wrong mux
+ * is what put a wrong number on the dashboard. */
 void fsd_handle_tpms(FSDState *state, const CanFrame *frame, uint32_t now_ms) {
-    if (frame->dlc < SIG_TPMS_MIN_DLC) return;
-    const uint8_t idx = frame->data[SIG_TPMS_INDEX_BYTE] & SIG_TPMS_INDEX_MASK;
-    /* The mask makes idx 0..3 by construction; the array is 4 wide. Said out
-     * loud because the same shape has bitten this project when the bound came
-     * from somewhere other than the index itself. */
-    state->tpms_pressure[idx] = frame->data[SIG_TPMS_PRESSURE_BYTE];
-    state->tpms_location[idx] =
-        frame->data[SIG_TPMS_LOCATION_BYTE] & SIG_TPMS_LOCATION_MASK;
-    state->tpms_seen_ms[idx] = now_ms;
+    uint8_t psi[4];
+    if (!fsd_decode_tpms(frame->data, frame->dlc, psi)) return;
+    for (size_t i = 0; i < 4u; i++) {
+        state->tpms_pressure[i] = psi[i];
+        state->tpms_seen_ms[i] = now_ms;
+    }
     state->tpms_seen = true;
 }
 
@@ -935,6 +940,27 @@ void fsd_handle_das_status_hw3(FSDState *state, const CanFrame *frame, uint32_t 
         frame->data[SIG_DAS_HW3_AP_STATE_BYTE] & SIG_DAS_HW3_AP_STATE_MASK;
     state->ap_active = state->das_ap_state == SIG_DAS_HW3_AP_ACTIVE_STATE;
     fsd_handle_das_status_common(state, frame, now_ms);
+}
+
+/* AP state from 0x39B on a car configured as HW3 -- see fsd_decode_das_state_b0().
+ *
+ * Deliberately narrow: it writes das_ap_state and NOTHING else. The full HW3
+ * parser would also pull speed limit, hands-on, counter and checksum from this
+ * frame, and those byte positions are NOT confirmed here -- only byte0 is.
+ * Reading five fields on the strength of evidence for one is how a display
+ * starts showing numbers nobody checked.
+ *
+ * 🔴 ap_active is left alone on purpose. It gates the nag killer and the
+ * supervised-drive checks, and the HW3 rule (engaged == 3) does not fit a car
+ * that reports 6. Leaving it false keeps those gates CLOSED, which is the
+ * safe direction; the dashboard reads das_ap_state and is unaffected. Widening
+ * it is a separate decision with a capture that pins what 6 means.
+ */
+void fsd_handle_das_state_alt(FSDState *state, const CanFrame *frame, uint32_t now_ms) {
+    uint8_t st;
+    if (!fsd_decode_das_state_b0(frame->data, frame->dlc, &st)) return;
+    state->das_ap_state = st;
+    state->das_ctx_seen_ms = now_ms;
 }
 
 void fsd_handle_das_status_hw4(FSDState *state, const CanFrame *frame, uint32_t now_ms) {

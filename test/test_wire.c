@@ -54,6 +54,18 @@ static uint32_t le32(const uint8_t* p) {
 
 // ── State ────────────────────────────────────────────────────────────────────
 
+static void test_profile_sentinel(void) {
+    /* 🔴 0 is a real speed profile on this car (컴포트), so "never decoded"
+     * cannot be carried by a zero -- the phone would draw a confident wrong
+     * name for a car it never heard from. The sentinel must sit outside the
+     * 3-bit field the decoder produces. */
+    CHECK(FSD_WIRE_PROFILE_NONE > FSD_PROFILE_MASK,
+          "sentinel 0x%02X must not be a real profile (mask 0x%02X)",
+          FSD_WIRE_PROFILE_NONE, FSD_PROFILE_MASK);
+    CHECK(FSD_WIRE_STATE_LEN == 27u, "State is 27 bytes in v6");
+    CHECK(FSD_WIRE_STATE_VERSION == 6u, "version bumped with the length");
+}
+
 static void test_state_layout(void) {
     printf("\n-- State: every byte, from the spec not the code --\n");
 
@@ -93,7 +105,10 @@ static void test_state_layout(void) {
     uint8_t b[FSD_WIRE_STATE_LEN];
     fsd_wire_pack_state(&w, b);
 
-    CHECK(b[0] == 5, "ver 5, got %u", b[0]);
+    /* 🔴 숫자를 손으로 적지 않는다. v5 -> v6 때 이 줄만 5 로 남아
+     * CI 에서 터졌다 — 로컬은 헤더가 바뀌어도 test_wire 를 다시 안 굽는다. */
+    CHECK(b[0] == FSD_WIRE_STATE_VERSION,
+          "ver %u, got %u", FSD_WIRE_STATE_VERSION, b[0]);
     // bit0 rx, bit3 right blinker, bit4 recording, bit6 brake = 0x59
     CHECK(b[1] == 0x59u, "flags 0x59, got 0x%02X", b[1]);
     CHECK(b[2] == 1, "op_mode");
@@ -769,6 +784,7 @@ int main(void) {
     test_state_blink_nibble();
     test_state_blind_spot();
     test_state_tyre_pressure();
+    test_profile_sentinel();
     test_tyre_freshness();
     test_state_speed_limit_source();
     test_speed_limit_freshness();
