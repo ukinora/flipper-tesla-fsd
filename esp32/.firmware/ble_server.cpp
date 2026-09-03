@@ -239,7 +239,7 @@ static uint32_t g_bulk_busy   = 0;     // notify() refusals (radio queue full)
 static uint32_t g_bulk_stall  = 0;     // ticks that got nothing out at all
 static uint32_t g_bulk_next_ms = 0;    // pacing gate — earliest next burst
 
-// ── State serialisation (26 B, little-endian) ────────────────────────────────
+// ── State serialisation (27 B, little-endian) ────────────────────────────────
 // Layout is fixed; the app parses by offset. Bump BLE_PROTO_VERSION on change.
 // GATHERS ONLY. Every clamp, scale and byte position lives in
 // fsd_logic/fsd_wire.c, which is pure C and host-tested — this file cannot be
