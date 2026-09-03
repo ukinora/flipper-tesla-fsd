@@ -1598,6 +1598,76 @@ static void test_gps_feeds_the_tracker(void) {
     CHECK(t.dirty, "the pass reached the learning store");
 }
 
+/* The policy's profile scale is NOT the car's raw CAN value, and nothing
+ * converts between them. Measured 2026-09-03, four profiles walked in order:
+ *
+ *      slowest -> fastest        Sloth  Chill  Standard  Hurry
+ *      policy  (fsd_cam_policy.h)    0      1         2      3
+ *      car     (0x3FD mux2 b7[6:4])  4      0         1      2
+ *
+ * Today this is latent: on this car fsd_sp_decode_profile() takes the HW3
+ * branch, which reads 0x3FD mux 0 byte 6 -- a field that sat at 0 for a whole
+ * drive -- so the policy never receives a real reading at all.
+ *
+ * 🔴 The point of this test is the NEXT change, not this one. Correcting that
+ * decoder alone would be WORSE than leaving it broken: raw values would start
+ * arriving on a scale lower_only() does not understand, and the failure is
+ * silent and in the dangerous direction.
+ *
+ * Sloth is raw 4 and Chill is raw 0, so a numeric "never raise" comparison
+ * decides Sloth is the FASTEST of the four. At a speed camera, with the car in
+ * Sloth, the clamp would pass a request for Standard straight through -- the
+ * function's own comment calls that "a defect, not a trade-off".
+ *
+ * Pinned here so that whoever fixes the decoder is told about the mapping by a
+ * red test instead of finding out in the car. */
+static void test_policy_scale_is_not_the_raw_can_value(void) {
+    printf("\n-- policy scale is not the raw CAN value --\n");
+
+    /* Slowest to fastest, as driven. */
+    const uint8_t raw[4]    = {4u, 0u, 1u, 2u};
+    const uint8_t policy[4] = {FSD_POL_PROFILE_SLOTH, FSD_POL_PROFILE_CHILL,
+                               FSD_POL_PROFILE_STANDARD, FSD_POL_PROFILE_HURRY};
+
+    /* The policy scale is monotonic in speed. That is what lower_only() and
+     * steps_from() assume, and it is true. */
+    for(unsigned i = 1; i < 4; i++) {
+        CHECK(policy[i] > policy[i - 1], "policy scale rises with speed at %u", i);
+    }
+
+    /* The raw scale is not. This is the whole finding in one line. */
+    int raw_monotonic = 1;
+    for(unsigned i = 1; i < 4; i++) {
+        if(raw[i] <= raw[i - 1]) raw_monotonic = 0;
+    }
+    CHECK(!raw_monotonic, "raw CAN values are NOT ordered by speed");
+
+    /* And the concrete harm, spelled out: Sloth outranks everything. */
+    CHECK(raw[0] > raw[3],
+          "raw Sloth (%u) sorts above raw Hurry (%u) -- a numeric clamp inverts",
+          (unsigned)raw[0], (unsigned)raw[3]);
+
+    /* fsd_pol_tick() with a real POLICY value clamps as intended... */
+    FsdPolicy p;
+    fsd_pol_init(&p);
+    FsdPolTarget tg;
+    memset(&tg, 0, sizeof(tg));
+    tg.valid = true;
+    tg.key = 1u;
+    tg.limit_kph = 60u;
+    tg.distance_m = 100.0f;
+    FsdPolDecision d = fsd_pol_tick(&p, &tg, FSD_POL_PROFILE_SLOTH, 60.0f, 20.0f, 1.0f);
+    CHECK(d.target_profile <= FSD_POL_PROFILE_SLOTH,
+          "on Sloth the clamp cannot ask for more, got %u",
+          (unsigned)d.target_profile);
+
+    /* ...and the RAW value for that same physical state is 4, which the policy
+     * rejects as out of range (fsd_pol_observe_profile drops > HURRY). So the
+     * mistake would not even look like a mistake -- it looks like no reading. */
+    CHECK(raw[0] > FSD_POL_PROFILE_HURRY,
+          "raw Sloth is out of the policy's range, so it reads as silence");
+}
+
 int main(void) {
     printf("test_camera\n");
     test_open();
@@ -1628,6 +1698,7 @@ int main(void) {
     test_entry_does_not_survive_a_drive();
     test_end_to_end();
     test_gps_feeds_the_tracker();
+    test_policy_scale_is_not_the_raw_can_value();
     test_abandon_is_cheap_to_repeat();
     test_policy_out_of_range_readback();
     test_losing_a_target_does_not_latch();
