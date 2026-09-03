@@ -214,10 +214,20 @@ FsdBodyVerdict fsd_body_caps_verdict(const FsdBodyCaps* c, const FsdBodyInputs* 
 
 bool fsd_body_tx_id_refused(uint32_t can_id) {
     /* Hardcoded, not derived from the capability table, and true regardless of
-     * any flag: this firmware constructs no body frame, so there is no state in
-     * which putting one of these on the wire is intended. 0x3F5 is the lighting
-     * frame, 0x102/0x103 the door status frames — the candidates a future
-     * emitter would reach for, and the ones a mistake would reach for first. */
+     * any flag. 0x3F5 is the lighting frame, 0x102/0x103 the door status frames.
+     *
+     * 🔴 0x3F5 WAS OUR MAP-LIGHT CANDIDATE AND IT WAS WRONG (2026-09-03).
+     * TSL turns the map lights on with 0x273, not 0x3F5 — six captures agree.
+     * The refusal stays anyway: nothing constructs 0x3F5, so refusing it costs
+     * nothing and it remains exactly what a mistake would reach for first.
+     *
+     * 🔴 0x273 IS DELIBERATELY NOT ON THIS LIST. It is the frame the map
+     * light emitter builds, so refusing it here would refuse the one thing this
+     * axis exists to allow. Its protection is the other three layers — the rule
+     * has to match, the axis has to allow, and today nothing calls the emitter
+     * at all. If that ever feels thin, the answer is a narrower gate on 0x273
+     * (bit 59 only, as fsd_body_wire.c already does for 0x3C2), not a blanket
+     * refusal that would make the feature impossible. */
     return can_id == 0x3F5u || can_id == 0x102u || can_id == 0x103u;
 }
 

@@ -36,6 +36,17 @@ test_gps: $(GPS_SRC) $(ROOT)/fsd_logic/fsd_gps.h $(ROOT)/fsd_logic/fsd_camera.h
 # Body control: the authority axis plus the T1/T2 detectors. Standalone — none
 # of these files constructs a CAN frame, so there is nothing to link but them.
 BODY_SRC := test_body.c $(ROOT)/fsd_logic/fsd_body.c $(ROOT)/fsd_logic/fsd_body_t1.c $(ROOT)/fsd_logic/fsd_body_t2.c
+# The emitter — the one thing that actually builds a body frame. Its vectors are
+# the bytes TSL put on the wire on 2026-09-03, so this checks the builder
+# against the CAR rather than against my reading of the capture.
+#
+# Links fsd_body.c for the caps table: one test asserts that armable_at_runtime
+# and "has an emitter" agree for all seven actions, so opening a row without an
+# encoding (or the reverse) turns red here.
+EMIT_SRC := test_body_emit.c $(ROOT)/fsd_logic/fsd_body_emit.c $(ROOT)/fsd_logic/fsd_body.c
+
+test_body_emit: $(EMIT_SRC) $(ROOT)/fsd_logic/fsd_body_emit.h $(ROOT)/fsd_logic/fsd_body.h
+	$(CC) $(CFLAGS) -I$(ROOT)/fsd_logic $(EMIT_SRC) -o $@
 
 test_body: $(BODY_SRC) $(ROOT)/fsd_logic/fsd_body.h $(ROOT)/fsd_logic/fsd_body_t1.h $(ROOT)/fsd_logic/fsd_body_t2.h $(ROOT)/fsd_logic/fsd_autonomy.h
 	$(CC) $(CFLAGS) -I$(ROOT)/fsd_logic $(BODY_SRC) -o $@
@@ -118,12 +129,13 @@ CAPJSON_SRC := test_cap_json.c $(ROOT)/fsd_logic/fsd_cap_json.c
 test_cap_json: $(CAPJSON_SRC) $(ROOT)/fsd_logic/fsd_cap_json.h
 	$(CC) $(CFLAGS) -I$(ROOT)/fsd_logic $(CAPJSON_SRC) -o $@
 
-check: test_fsd_core test_speed_profile test_camera test_gps test_body test_body_wire test_signal test_trigger test_rules test_button test_btn_j6 test_wire test_cap_json
+check: test_fsd_core test_speed_profile test_camera test_gps test_body test_body_emit test_body_wire test_signal test_trigger test_rules test_button test_btn_j6 test_wire test_cap_json
 	./test_fsd_core
 	./test_speed_profile
 	./test_camera
 	./test_gps
 	./test_body
+	./test_body_emit
 	./test_body_wire
 	./test_signal
 	./test_trigger
@@ -134,6 +146,6 @@ check: test_fsd_core test_speed_profile test_camera test_gps test_body test_body
 	./test_cap_json
 
 clean:
-	rm -rf test_fsd_core test_speed_profile test_camera test_gps test_body test_body_wire test_signal test_trigger test_rules test_button test_btn_j6 test_wire test_cap_json *.dSYM
+	rm -rf test_fsd_core test_speed_profile test_camera test_gps test_body test_body_emit test_body_wire test_signal test_trigger test_rules test_button test_btn_j6 test_wire test_cap_json *.dSYM
 
 .PHONY: check clean
