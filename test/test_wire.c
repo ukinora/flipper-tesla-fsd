@@ -54,6 +54,18 @@ static uint32_t le32(const uint8_t* p) {
 
 // ── State ────────────────────────────────────────────────────────────────────
 
+static void test_profile_sentinel(void) {
+    /* 🔴 0 is a real speed profile on this car (컴포트), so "never decoded"
+     * cannot be carried by a zero -- the phone would draw a confident wrong
+     * name for a car it never heard from. The sentinel must sit outside the
+     * 3-bit field the decoder produces. */
+    CHECK(FSD_WIRE_PROFILE_NONE > FSD_PROFILE_MASK,
+          "sentinel 0x%02X must not be a real profile (mask 0x%02X)",
+          FSD_WIRE_PROFILE_NONE, FSD_PROFILE_MASK);
+    CHECK(FSD_WIRE_STATE_LEN == 27u, "State is 27 bytes in v6");
+    CHECK(FSD_WIRE_STATE_VERSION == 6u, "version bumped with the length");
+}
+
 static void test_state_layout(void) {
     printf("\n-- State: every byte, from the spec not the code --\n");
 
@@ -769,6 +781,7 @@ int main(void) {
     test_state_blink_nibble();
     test_state_blind_spot();
     test_state_tyre_pressure();
+    test_profile_sentinel();
     test_tyre_freshness();
     test_state_speed_limit_source();
     test_speed_limit_freshness();

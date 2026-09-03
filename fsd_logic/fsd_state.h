@@ -78,6 +78,11 @@ typedef struct FSDState {
     uint8_t traction_ctrl_mode;  // 0..7 (from 0x118)
     uint8_t rear_defrost_state;  // 0=sna 1=on 2=off (from 0x343)
     float vehicle_speed_kph;     // from 0x257 DI_vehicleSpeed (12-bit, 0.08 factor, -40 offset)
+    /* The profile the car is ON, decoded from 0x3FD -- NOT speed_profile,
+     * which is the value we intend to write. Kept apart on purpose. */
+    uint8_t observed_profile;
+    bool observed_profile_seen;
+
     uint8_t ui_speed;            // from 0x257 DI_uiSpeed (8-bit, display value)
     bool ui_speed_seen;          // 0 is a legal speed (stopped), so "never parsed"
                                  // needs its own answer — the display must not
@@ -289,7 +294,6 @@ typedef struct FSDState {
      * pressure so it doubles as "no reading yet". Indexed by the frame's own
      * sensor index, NOT by corner -- see can_signals.h. */
     uint8_t tpms_pressure[4];
-    uint8_t tpms_location[4];
     uint32_t tpms_seen_ms[4];
     bool tpms_seen;
     bool ui_any_door_open;

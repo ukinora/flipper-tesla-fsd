@@ -39,17 +39,19 @@ extern "C" {
 
 /* Both payloads are 20 bytes because that is the most a default 23-byte ATT MTU
  * carries. Not a coincidence and not adjustable without a version bump. */
-#define FSD_WIRE_STATE_LEN 26u
+#define FSD_WIRE_STATE_LEN 27u
 #define FSD_WIRE_CAMSTAT_LEN 20u
 #define FSD_WIRE_RESULT_LEN 4u
 
 /* Wire versions. Each payload carries its own — sharing one meant that bumping
  * State also announced a CamStat change that had not happened. */
-#define FSD_WIRE_STATE_VERSION 5u
+#define FSD_WIRE_STATE_VERSION 6u
 #define FSD_WIRE_CAMSTAT_VERSION 2u
 
 /* FSD v14 Lite exposes four speed profiles. */
 #define FSD_WIRE_PROFILE_MAX 3
+/* Byte 26 sentinel: the module has not decoded a profile yet. */
+#define FSD_WIRE_PROFILE_NONE 0x0Fu
 
 /* Everything State is built from. Filled by the caller from FSDState.
  *
@@ -117,6 +119,10 @@ typedef struct {
     uint8_t hw_version; // 0=Unknown 1=Legacy 2=HW3 3=HW4
     int32_t speed_profile; // clamped into 0..3 by the packer
     uint8_t ap_state;      // DAS_autopilotState, raw
+    /* v6. The profile the car reports, 0..7, and whether we ever saw it.
+     * 0 is a legal profile, so "never decoded" needs its own bit. */
+    uint8_t observed_profile;
+    bool observed_profile_seen;
 
     float speed_kph;   // negatives clamped to 0, sent x10, saturating
     float soc_percent; // clamped 0..100

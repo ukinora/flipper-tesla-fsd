@@ -1792,6 +1792,31 @@ static void process_frame(CanBusId bus, const CanFrame &frame) {
         profile_match_record(frame, ap, ho, now);
         return;
     }
+    /* 🔴 The mirror of the fallback below, and THIS CAR NEEDS IT (2026-09-03).
+     *
+     * Configured HW3, but 0x399 is three bytes of zeros while 0x39B is eight
+     * bytes that track the car. The HW3 parser above therefore never runs and
+     * the dashboard read "쓸 수 없음" through a whole drive with FSD engaged.
+     *
+     * Gated on !das_seen, so it is self-healing in both directions: the moment
+     * a real 8-byte 0x399 ever parses, das_seen latches true and this path
+     * stops. A car that behaves as documented never enters it.
+     *
+     * Non-returning -- 0x39B is not otherwise handled on an HW3 car, and the
+     * blackbox/capability taps upstream have already seen the frame.
+     */
+    if (!das_cfg && hw_uses_hw3_das_status(das_state.hw_version) &&
+        frame.id == CAN_ID_DAS_STATUS_HW4 &&
+        frame.dlc == CAN_FRAME_MAX_DATA_LEN && !das_state.das_seen) {
+        state_enter();
+        fsd_handle_das_state_alt(&g_state, &frame, millis());
+        state_exit();
+        static bool s_said = false;
+        if (!s_said) {
+            s_said = true;
+            Serial.println("[DAS] 0x399 가 비어 있어 0x39B 에서 오토파일럿 상태를 읽는다");
+        }
+    }
     // HW4 trims that never broadcast 0x39B carry the hands-on field on 0x399
     // (same byte5[5:2]); read it as a fallback so the nag gate isn't starved (#100).
     // Read-only and non-returning — the ISA chime-suppress path still handles 0x399.
@@ -1945,6 +1970,25 @@ static void process_frame(CanBusId bus, const CanFrame &frame) {
     if (frame.id == CAN_ID_AP_CONTROL) {
         camera_task_observe_profile(hw_uses_hw4_das_status(das_state.hw_version),
                                     frame.data, frame.dlc, millis());
+        /* 🔴 Same frame, different reader, and it has to be a different reader.
+         *
+         * The call above feeds the camera policy through fsd_sp_decode_profile(),
+         * which knows two layouts and neither fits this car: the HW3 one reads
+         * a field that sat at 0 for a whole drive, the HW4 one collides two of
+         * the four profiles into the same number. Measured 2026-09-03.
+         *
+         * This one is for the DASHBOARD, and it is deliberately not wired into
+         * the policy. The policy's clamp is a safety behaviour with its own
+         * evidence bar; a display is not. Mixing them is how one gets changed
+         * for the other's reasons.
+         */
+        uint8_t prof;
+        if (fsd_decode_profile_obs(frame.data, frame.dlc, &prof)) {
+            state_enter();
+            g_state.observed_profile = prof;
+            g_state.observed_profile_seen = true;
+            state_exit();
+        }
     }
 
     // ── Beyond here only run when TX is allowed ───────────────────────────────
