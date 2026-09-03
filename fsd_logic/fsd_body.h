@@ -35,12 +35,24 @@
  * subtract. No OpMode value is added, and neither copy of fsd_can_transmit()
  * changes.
  *
- * THERE IS STILL NO EMITTER ANYWHERE
- * ----------------------------------
- * No frame is constructed and no encoding table exists. Only one row is armable
- * (MAP_LIGHT, carried over unchanged from T1); every other row has
- * armable_at_runtime = false, so this rewrite opens NOTHING. Each row says in
- * its comment what evidence flips its bool.
+ * THE EMITTER EXISTS FOR EXACTLY ONE ACTION (2026-09-03)
+ * ------------------------------------------------------
+ * 🔴 This section said "THERE IS STILL NO EMITTER ANYWHERE" until the map
+ * light command was measured. One now exists, in fsd_body_emit.c, and it builds
+ * a frame for MAP_LIGHT and refuses every other action.
+ *
+ * 🟢 NOTHING TRANSMITS. The emitter returns bytes; no caller puts them on a
+ * bus. The first real write is a decision to be made in the car, with something
+ * reversible, and it is not made in code.
+ *
+ * Only one row is armable (MAP_LIGHT, carried over unchanged from T1); every
+ * other row has armable_at_runtime = false. Each row says in its comment what
+ * evidence flips its bool.
+ *
+ * 🔴 The two statements must move together. armable_at_runtime and "has an
+ * emitter" describe the same fact from two sides, and test_body_emit.c asserts
+ * they agree for all seven actions — so opening a row without an encoding, or
+ * writing an encoding without opening the row, turns a test red.
  *
  * See 권한축-재설계.md and 페일세이프-정책.md.
  */
@@ -68,7 +80,12 @@ typedef enum {
     FSD_ACT_DOOR_OPEN,      // was the old T2 row
     FSD_ACT_CAMERA,         // 0x3C2 byte6 bit3 (toggle) -- measured 2026-09-01
     FSD_ACT_SEAT_DRIVER,    // 0x3C2 byte1 bits 2-3 / 0-1
-    FSD_ACT_SEAT_PASSENGER, // same frame, other occupant
+    FSD_ACT_SEAT_PASSENGER, // 🔴 NOT the same frame: 0x3C3 byte0
+                            //   (앞 bits 4-5 / 뒤 bits 2-3), measured
+                            //   2026-09-03. Left/right is a different
+                            //   FRAME, not different bits — VCLEFT vs
+                            //   VCRIGHT. The old comment would have
+                            //   sent an emitter to 0x3C2.
     FSD_ACT_SCROLL,         // 0x3C2 byte3, 6-bit signed detents
     FSD_ACT_GEAR_D,         // 0x229 -- P -> D only. See caps row.
     FSD_ACT_COUNT,
