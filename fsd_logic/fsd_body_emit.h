@@ -75,9 +75,10 @@
 extern "C" {
 #endif
 
-/* How old the template may be. The car sends 0x273 every 500 ms, so this is
- * three periods: enough to ride out one or two dropped frames, short enough
- * that the fields we copy still describe the car as it is now.
+/* How old the template may be. One bound for all three ids, because all three
+ * arrive at about the same rate -- 0x273 every 500 ms, 0x3E9 every 495 ms --
+ * so this is three periods: enough to ride out one or two dropped frames, short
+ * enough that the fields we copy still describe the car as it is now.
  *
  * 🔴 Staleness is not a transmission problem, it is a TRUTH problem. An old
  * template is an old statement about the mirrors and the horn. */
@@ -150,13 +151,13 @@ extern "C" {
 
 typedef enum {
     FSD_EMIT_OK = 0,
-    /** No 0x273 has been received, so there is nothing to copy. */
+    /** No frame for this action's id has been received; nothing to copy. */
     FSD_EMIT_NO_TEMPLATE,
     /** One was received but it is too old to still describe the car. */
     FSD_EMIT_STALE_TEMPLATE,
     /** The template is the wrong id or too short to hold the field. */
     FSD_EMIT_BAD_TEMPLATE,
-    /** This action has no emitter yet. Six of the seven are here. */
+    /** This action has no emitter yet. Four of the seven are here. */
     FSD_EMIT_NO_ENCODING,
 } FsdEmitResult;
 
@@ -185,10 +186,11 @@ typedef struct {
  * a builder nobody can test in isolation, and this one has to be testable
  * against bytes copied out of a real capture.
  *
- * Returns FSD_EMIT_NO_ENCODING for every action but FSD_ACT_MAP_LIGHT. That
- * mirrors fsd_body.c, where map light is the only row with
- * armable_at_runtime = true -- two independent statements of the same fact, so
- * widening one without the other does nothing.
+ * Returns FSD_EMIT_NO_ENCODING for every action but FSD_ACT_MAP_LIGHT,
+ * FSD_ACT_DOOR_OPEN and FSD_ACT_HAZARDS. That mirrors fsd_body.c, where those
+ * three are the rows with armable_at_runtime = true -- two independent
+ * statements of the same fact, so widening one without the other does nothing,
+ * and a host test asserts they agree for every action.
  */
 FsdEmitResult fsd_emit_build(FsdBodyAction action, const FsdEmitTemplate* t,
                              uint32_t now_ms, FsdEmitFrame* out);

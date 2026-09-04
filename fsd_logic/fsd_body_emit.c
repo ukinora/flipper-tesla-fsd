@@ -3,7 +3,7 @@
 #include <string.h>
 
 bool fsd_emit_supported(FsdBodyAction action) {
-    /* Two actions, and they match the two armable rows in fsd_body.c. Written
+    /* Three actions, and they match the three armable rows in fsd_body.c. Written
      * as a switch rather than a comparison so that adding an action to the enum
      * without deciding about it here is a compiler warning, not a silent "no".
      *
@@ -79,20 +79,44 @@ FsdEmitResult fsd_emit_build(FsdBodyAction action, const FsdEmitTemplate* t,
     if(!t || !out) return FSD_EMIT_BAD_TEMPLATE;
     if(!fsd_emit_supported(action)) return FSD_EMIT_NO_ENCODING;
 
-    /* Both commands have the same shape -- copy the car's frame, set one field,
-     * put it back on the same id -- so the id, length and bit live in three
-     * variables and the checks below are written once. When a third command
-     * does NOT fit this shape it gets its own branch rather than a fourth
-     * variable; 0x3E9 (hazards) is already known to be that case, because it
-     * carries a counter and a check field and cannot be copied at all. */
-    /* Hazards take their own branch, exactly as the comment above the copy
-     * shape predicted they would: a counter and a check mean the frame is not
-     * a copy with a bit set, it is a copy REWRITTEN. Kept separate so nobody
-     * has to read the shared path wondering which of its steps apply. */
+    /* Two of the three commands have the same shape -- copy the car's frame,
+     * set one field, put it back on the same id -- so the id, length and bit
+     * live in four variables and the checks below are written once.
+     *
+     * Hazards do NOT fit that shape and take their own branch: 0x3E9 carries a
+     * counter and a check field, so the frame is not a copy with a bit set, it
+     * is a copy REWRITTEN. Kept separate so nobody has to read the shared path
+     * wondering which of its steps apply. */
     if(action == FSD_ACT_HAZARDS) return emit_hazards(t, now_ms, out);
 
-    uint32_t want_id;
-    uint8_t want_dlc, byte_ix, bits;
+    /* 🔴 NO `default:` HERE, AND THAT IS THE WHOLE POINT.
+     *
+     * fsd_emit_supported() above is written as a bare switch precisely so that
+     * adding an action to the enum without deciding about it is a compiler
+     * warning rather than a silent "no". This switch used to end in
+     *
+     *      default:   // fsd_emit_supported() already refused everything else
+     *          want_id = FSD_EMIT_MAP_LIGHT_ID; ...
+     *
+     * which left the safety net one-sided: the day somebody builds the camera
+     * emitter, adds FSD_ACT_CAMERA to fsd_emit_supported() and forgets this
+     * switch, `default:` hands them the MAP LIGHT encoding and nothing
+     * complains. With a per-action template that fails closed on the id check.
+     * With the call shape this file actually recommends -- driven by reception,
+     * "copy the frame that just arrived" -- a 0x273 arrives, the rule for the
+     * new action fires, and we put a MAP LIGHT COMMAND on the bus and report
+     * FSD_EMIT_OK. A wrong command that reports success is the failure this
+     * whole file is written to avoid.
+     *
+     * That is not hypothetical: it is exactly the door today's hazard action
+     * would have walked through, had its own branch above not been written by
+     * hand first.
+     *
+     * The unreachable cases are listed rather than collapsed so the warning
+     * fires. Initialised at the declaration only to keep -Wmaybe-uninitialized
+     * quiet; the guard below is what actually stands there. */
+    uint32_t want_id = 0;
+    uint8_t want_dlc = 0, byte_ix = 0, bits = 0;
     switch(action) {
     case FSD_ACT_DOOR_OPEN:
         want_id = FSD_EMIT_DOOR_ID;
@@ -100,13 +124,26 @@ FsdEmitResult fsd_emit_build(FsdBodyAction action, const FsdEmitTemplate* t,
         byte_ix = FSD_EMIT_DOOR_BYTE;
         bits = FSD_EMIT_DOOR_MASK;
         break;
-    default: /* fsd_emit_supported() already refused everything else */
+    case FSD_ACT_MAP_LIGHT:
         want_id = FSD_EMIT_MAP_LIGHT_ID;
         want_dlc = FSD_EMIT_MAP_LIGHT_DLC;
         byte_ix = FSD_EMIT_MAP_LIGHT_BYTE;
         bits = FSD_EMIT_MAP_LIGHT_MASK;
         break;
+    case FSD_ACT_HAZARDS: /* returned above; listed so the switch is complete */
+    case FSD_ACT_CAMERA:
+    case FSD_ACT_SEAT_DRIVER:
+    case FSD_ACT_SEAT_PASSENGER:
+    case FSD_ACT_SCROLL:
+    case FSD_ACT_GEAR_D:
+    case FSD_ACT_COUNT:
+        return FSD_EMIT_NO_ENCODING;
     }
+
+    /* Belt to the braces above: an action outside the enum cannot reach here
+     * (fsd_emit_supported refuses it), but if one ever does it leaves without
+     * an encoding instead of borrowing map light's. */
+    if(want_id == 0) return FSD_EMIT_NO_ENCODING;
 
     if(!t->seen) return FSD_EMIT_NO_TEMPLATE;
 
