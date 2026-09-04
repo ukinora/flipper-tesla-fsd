@@ -11,9 +11,14 @@
  * below — three independent ways to catch the same class of mistake, because
  * this project has already shipped a permission table that defaulted open.
  *
- * 🔴 EXACTLY ONE ROW IS ARMABLE. MAP_LIGHT carries over unchanged from the old
- * T1; every other row is armable_at_runtime = false, so rewriting this table
- * opened nothing. Each row names the evidence that flips its bool. */
+ * 🔴 TWO ROWS ARE ARMABLE (2026-09-05). MAP_LIGHT carries over unchanged
+ * from the old T1. DOOR_OPEN joined it when the third visit produced the thing
+ * its own comment demanded -- the command frame, measured, not inferred -- and
+ * it joined with every other restriction still on.
+ *
+ * Each row names the evidence that flips its bool. That is the discipline this
+ * table is for: a row opens when a stated condition is met, and the condition
+ * is written down BEFORE anyone wants the row open. */
 static const FsdBodyCaps FSD_BODY_CAPS[] = {
     [FSD_ACT_MAP_LIGHT] =
         {
@@ -34,13 +39,49 @@ static const FsdBodyCaps FSD_BODY_CAPS[] = {
             .max_hold_ms = 30000u,
         },
 
-    /* Opening a door has no undo and no upper bound on consequences. Every
-     * restriction on, and NOT ARMABLE — no code path may enable it, so a
-     * detector can run and publish while the action stays structurally
-     * unreachable. An all-zero row is exactly the tightest row, which is why
-     * the struct is written permissive-when-true.
-     * FLIPS WHEN: the unfiltered capture identifies the actual command frame. */
-    [FSD_ACT_DOOR_OPEN] = {.action = FSD_ACT_DOOR_OPEN},
+    /* Opening a door has no undo and no upper bound on consequences.
+     *
+     * 🔴 THE CONDITION THIS ROW WROTE FOR ITSELF WAS MET (2026-09-05).
+     * It said "FLIPS WHEN: the unfiltered capture identifies the actual command
+     * frame", and the third visit did: 0x1F9 byte 1 = 0x03, injected in the
+     * same millisecond as the car's own frame, 113 ms before the right front
+     * door moved. So the row opens -- and nothing else about it relaxes.
+     *
+     * EVERY restriction stays on. The struct is permissive-when-true, so the
+     * four bools left false below are four gates, each backed by a signal we
+     * actually receive:
+     *
+     *      may_act_while_moving         false -> 0x257 DI_speed, standstill
+     *      may_act_out_of_park          false -> 0x118 DI_gear, P only
+     *      may_act_without_driver       false -> 0x3C2 mux 0 driverPresent
+     *      may_act_without_drive_session false -> a P->D/R with the belt latched
+     *
+     * 🔴 AND HERE IS WHAT NONE OF THEM COVER. A door swings OUTWARD, and
+     * nothing on this bus says what is beside the car -- not a person, not a
+     * wall, not a passing cyclist. That hazard is unobservable, it is the main
+     * one, and no gate here reduces it. What the gates do is make the car
+     * stationary, in park, with someone in the driver's seat when it happens.
+     * The residue is why action_enabled[] is session-scoped and dies with the
+     * power: this is an action an operator opts into for one sitting, not a
+     * setting a car carries around.
+     *
+     * min_interval_ms is 3000, an order above the light's 500. It is not a
+     * debounce -- it is a bound on how bad a stuck rule can get, and a door
+     * that reopens twice a second is a different event from a light that does.
+     * (A 0 here would also be a second structural lock: fsd_body_caps_verdict()
+     * refuses any row whose interval is 0, so the value had to be chosen, not
+     * inherited.)
+     *
+     * max_hold_ms is 1000. TSL sends the command twice 300 ms apart and stops;
+     * there is nothing to hold, and the bound exists so a re-sender written
+     * later cannot quietly become one. */
+    [FSD_ACT_DOOR_OPEN] =
+        {
+            .action = FSD_ACT_DOOR_OPEN,
+            .armable_at_runtime = true,
+            .min_interval_ms = 3000u,
+            .max_hold_ms = 1000u,
+        },
 
     [FSD_ACT_CAMERA] =
         {

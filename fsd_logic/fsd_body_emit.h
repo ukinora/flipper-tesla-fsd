@@ -84,6 +84,30 @@ extern "C" {
 #define FSD_EMIT_TEMPLATE_MAX_AGE_MS 1500u
 
 /* 0x273 UI_vehicleControl -- measured, see the header comment. */
+/* THE DOOR-OPEN COMMAND. Measured 2026-09-05, third visit.
+ *
+ *      (8.127) 1F9#0000000000000000     <- the car
+ *      (8.127) 1F9#0003000000000000     <- TSL, same millisecond
+ *      (8.240)                          <- the right front door opens
+ *
+ * 🔴 0x1F9 IS IN NONE OF OUR FIVE DBCs. It has no name and we do not know
+ * what the frame is for -- only what setting byte 1 to 0x03 does. Two visits
+ * failed to catch it for exactly that reason: a filter assembled from ids we
+ * can name cannot hold an id nobody has named.
+ *
+ * Across three unfiltered control captures the payload is all zeroes in 273
+ * frames with no exception; in the door capture exactly two carry 0x03, 300 ms
+ * apart, and the door moves between them.
+ *
+ * A template is required even though we have seen only zeroes. Knowing every
+ * byte was zero on THIS car is not knowing what the other seven bytes mean,
+ * and synthesising them would be a claim about fields we cannot read. Same
+ * rule as 0x273, for a weaker-looking but identical reason. */
+#define FSD_EMIT_DOOR_ID         0x1F9u
+#define FSD_EMIT_DOOR_BYTE       1u
+#define FSD_EMIT_DOOR_MASK       0x03u
+#define FSD_EMIT_DOOR_DLC        8u
+
 #define FSD_EMIT_MAP_LIGHT_ID    0x273u
 #define FSD_EMIT_MAP_LIGHT_BYTE  7u
 #define FSD_EMIT_MAP_LIGHT_MASK  0x08u   /* bit 3 of byte 7 = bit 59 */

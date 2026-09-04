@@ -71,26 +71,67 @@ static FsdBodyInputs good_inputs(uint32_t now_ms) {
 
 // ── the axis ─────────────────────────────────────────────────────────────────
 
-static void test_t2_can_never_be_armed(void) {
-    printf("\n-- T2 is unreachable, by construction --\n");
+/* This test used to assert the opposite: "T2 is unreachable, by construction".
+ * The row said it would open when the command frame was measured, the third
+ * visit measured it (0x1F9 byte 1 = 0x03, 2026-09-05), and it opened.
+ *
+ * 🔴 So the test has to get STRONGER, not go away. What protected the door
+ * before was one bool. What protects it now is five gates, and the job of this
+ * test is to prove that taking away any single one of them refuses -- because
+ * the failure mode to fear is no longer "someone flips the bool", it is
+ * "someone widens a row while adding something unrelated". */
+/* One-line breakers, so the table above reads as a list of gates rather than a
+ * list of struct assignments. */
+static void break_speed(FsdBodyInputs* in) { in->speed_kph = 5.0f; }
+static void break_gear(FsdBodyInputs* in) { in->gear = FSD_GEAR_D; }
+static void break_driver(FsdBodyInputs* in) { in->driver_present = false; }
+static void break_session(FsdBodyInputs* in) { in->drive_session = false; }
+static void break_enable(FsdBodyInputs* in) { in->action_enabled[FSD_ACT_DOOR_OPEN] = false; }
+static void break_mode(FsdBodyInputs* in) { in->op_mode = OpMode_ListenOnly; }
+static void break_bus(FsdBodyInputs* in) { in->bus_tx_open = false; }
 
-    // Every input satisfied, every flag set, both permissive modes tried. The
-    // capability row is the only thing refusing, and nothing at runtime can
-    // reach it.
+static void test_door_is_armed_but_every_gate_still_holds(void) {
+    printf("\n-- the door row opened; each gate still refuses alone --\n");
+
     const uint32_t now = 10000;
     FsdBodyInputs in = good_inputs(now);
-    CHECK(fsd_body_allows(&in, FSD_ACT_DOOR_OPEN, now) == FSD_BODY_NOT_ARMABLE,
-          "T2 refused with everything satisfied");
 
-    in.op_mode = OpMode_Service;
-    CHECK(fsd_body_allows(&in, FSD_ACT_DOOR_OPEN, now) == FSD_BODY_NOT_ARMABLE,
-          "Service does not help");
+    CHECK(fsd_body_allows(&in, FSD_ACT_DOOR_OPEN, now) == FSD_BODY_OK,
+          "with every input satisfied, the door is allowed");
 
-    // NOT_ARMABLE is checked FIRST, so it is the answer even when other gates
-    // would also refuse — the app must never be told "just start the car".
-    memset(&in, 0, sizeof(in));
-    CHECK(fsd_body_allows(&in, FSD_ACT_DOOR_OPEN, now) == FSD_BODY_NOT_ARMABLE,
-          "and it is the FIRST refusal, not a later one");
+    /* One at a time, from the full set. Each must refuse, and refuse with the
+     * reason that names the missing thing -- a door that refuses for the wrong
+     * reason sends someone to fix the wrong input. */
+    struct {
+        const char* name;
+        FsdBodyVerdict want;
+        void (*break_it)(FsdBodyInputs*);
+    } cases[] = {
+        {"moving", FSD_BODY_MOVING, break_speed},
+        {"not in park", FSD_BODY_NOT_PARK, break_gear},
+        {"no driver", FSD_BODY_NO_DRIVER_PRESENT, break_driver},
+        {"no drive session", FSD_BODY_NO_DRIVE_SESSION, break_session},
+        {"not enabled", FSD_BODY_NOT_ENABLED, break_enable},
+        {"listen-only", FSD_BODY_NO_MODE, break_mode},
+        {"bus shut", FSD_BODY_BUS_SHUT, break_bus},
+    };
+    for(unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        FsdBodyInputs bad = good_inputs(now);
+        cases[i].break_it(&bad);
+        FsdBodyVerdict got = fsd_body_allows(&bad, FSD_ACT_DOOR_OPEN, now);
+        CHECK(got == cases[i].want, "%s -> %s, got %s", cases[i].name,
+              fsd_body_verdict_str(cases[i].want), fsd_body_verdict_str(got));
+    }
+
+    /* 🔴 And the rate limit is real. A stuck rule asking twice in a second
+     * is the shape this bound exists for. */
+    FsdBodyInputs again = good_inputs(now);
+    again.last_act_ms[FSD_ACT_DOOR_OPEN] = now - 2999u;
+    CHECK(fsd_body_allows(&again, FSD_ACT_DOOR_OPEN, now) == FSD_BODY_TOO_SOON,
+          "2999 ms after the last one -> too soon");
+    again.last_act_ms[FSD_ACT_DOOR_OPEN] = now - 3000u;
+    CHECK(fsd_body_allows(&again, FSD_ACT_DOOR_OPEN, now) == FSD_BODY_OK,
+          "3000 ms after -> allowed");
 }
 
 static void test_zero_is_the_tightest_row(void) {
@@ -484,21 +525,24 @@ static void test_rewrite_opened_nothing(void) {
     for (int a = 0; a < FSD_ACT_COUNT; a++) in.action_enabled[a] = true;
 
     CHECK(fsd_body_allows(&in, FSD_ACT_MAP_LIGHT, now) == FSD_BODY_OK,
-          "MAP_LIGHT carries over from T1 and is still the one armable row");
+          "MAP_LIGHT carries over from T1");
+    CHECK(fsd_body_allows(&in, FSD_ACT_DOOR_OPEN, now) == FSD_BODY_OK,
+          "DOOR_OPEN joined it once its command frame was measured (2026-09-05)");
 
     for (int a = 0; a < FSD_ACT_COUNT; a++) {
-        if (a == FSD_ACT_MAP_LIGHT) continue;
+        if (a == FSD_ACT_MAP_LIGHT || a == FSD_ACT_DOOR_OPEN) continue;
         CHECK(fsd_body_allows(&in, (FsdBodyAction)a, now) == FSD_BODY_NOT_ARMABLE,
               "%s must refuse on its row even with every input satisfied",
               fsd_body_action_str((FsdBodyAction)a));
     }
 
     // The count itself, so adding a row without deciding its arming is a
-    // failing test rather than a silent grant.
+    // failing test rather than a silent grant. It moved 1 -> 2 on 2026-09-05
+    // and that move cost six red tests, which is the price it should cost.
     int armable = 0;
     for (int a = 0; a < FSD_ACT_COUNT; a++)
         if (fsd_body_caps((FsdBodyAction)a)->armable_at_runtime) armable++;
-    CHECK(armable == 1, "exactly one armable row, found %d", armable);
+    CHECK(armable == 2, "exactly two armable rows, found %d", armable);
 }
 
 static void test_caps_table_is_well_formed(void) {
@@ -649,14 +693,24 @@ static void test_owner_decisions_are_in_the_table(void) {
           "and a stuck rule cannot drive the motor to the end of its rail");
     CHECK(fsd_body_caps(FSD_ACT_CAMERA)->may_act_while_moving,
           "owner decision: camera on AND off, including under way");
-    CHECK(fsd_body_caps(FSD_ACT_DOOR_OPEN)->min_interval_ms == 0u &&
-              !fsd_body_caps(FSD_ACT_DOOR_OPEN)->armable_at_runtime,
-          "the door row is still all-zero: its command frame is unknown");
+    /* 🔴 This line used to read "the door row is still all-zero: its command
+     * frame is unknown". The frame is known now, so what has to be asserted is
+     * no longer that the row is shut -- it is that opening it relaxed NOTHING
+     * else. Every restriction the all-zero row gave for free is now written
+     * out, and stated here so removing one is a red test. */
+    const FsdBodyCaps* d = fsd_body_caps(FSD_ACT_DOOR_OPEN);
+    CHECK(d->armable_at_runtime, "the door row opened: its frame was measured");
+    CHECK(!d->may_act_while_moving && !d->may_act_out_of_park &&
+              !d->may_act_without_driver && !d->may_act_without_drive_session,
+          "and every gate the all-zero row gave for free is still shut");
+    CHECK(d->min_interval_ms >= 3000u,
+          "a door is rate-limited an order above a light, got %u",
+          (unsigned)d->min_interval_ms);
 }
 
 int main(void) {
     printf("test_body\n");
-    test_t2_can_never_be_armed();
+    test_door_is_armed_but_every_gate_still_holds();
     test_zero_is_the_tightest_row();
     test_axis_refuses_in_order();
     test_tx_ids_are_refused_unconditionally();
