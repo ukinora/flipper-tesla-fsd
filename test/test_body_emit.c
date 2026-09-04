@@ -69,6 +69,122 @@ static void test_matches_tsl_byte_for_byte(void) {
     CHECK((f.data[7] ^ CAR[7]) == 0x08u, "and it is byte7 bit3");
 }
 
+/* 0x1F9 as the car sends it, 2026-09-05. Identical in 273 control frames
+ * across three unfiltered captures -- no exception, no counter, no checksum. */
+static const uint8_t CAR_DOOR[8] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+/* 0x1F9 as TSL sends it in the same millisecond. 113 ms later the door moves. */
+static const uint8_t TSL_DOOR[8] = {0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+
+static FsdEmitTemplate door_template(uint32_t at_ms) {
+    FsdEmitTemplate t;
+    memset(&t, 0, sizeof(t));
+    t.seen = true;
+    t.id = FSD_EMIT_DOOR_ID;
+    t.dlc = 8;
+    memcpy(t.data, CAR_DOOR, 8);
+    t.seen_ms = at_ms;
+    return t;
+}
+
+static void test_door_matches_tsl_byte_for_byte(void) {
+    printf("\n-- door: our frame == the frame TSL sent --\n");
+
+    FsdEmitTemplate t = door_template(1000u);
+    FsdEmitFrame f;
+    CHECK(fsd_emit_build(FSD_ACT_DOOR_OPEN, &t, 1100u, &f) == FSD_EMIT_OK, "built");
+    CHECK(f.id == 0x1F9u, "id 0x1F9, got 0x%X", (unsigned)f.id);
+    CHECK(f.dlc == 8, "dlc 8, got %u", f.dlc);
+    CHECK(memcmp(f.data, TSL_DOOR, 8) == 0,
+          "bytes must equal TSL's: got %02X%02X%02X%02X%02X%02X%02X%02X",
+          f.data[0], f.data[1], f.data[2], f.data[3],
+          f.data[4], f.data[5], f.data[6], f.data[7]);
+
+    /* Said the other way round: exactly two bits differ from the car's frame,
+     * and both are in byte 1. */
+    unsigned diff = 0;
+    for(unsigned i = 0; i < 8; i++) {
+        uint8_t x = (uint8_t)(f.data[i] ^ CAR_DOOR[i]);
+        while(x) { diff += (x & 1u); x >>= 1; }
+    }
+    CHECK(diff == 2, "exactly two bits differ, got %u", diff);
+    CHECK((f.data[1] ^ CAR_DOOR[1]) == 0x03u, "and they are byte1 bits 0 and 1");
+}
+
+/* 🔴 The two commands must not be interchangeable. A caller that asks for
+ * a light and receives a door-open frame is the worst failure this file can
+ * have, and it would look like an ordinary off-by-one in a switch. */
+static void test_door_and_light_do_not_cross(void) {
+    printf("\n-- the two commands cannot be swapped --\n");
+
+    FsdEmitTemplate door = door_template(1000u);
+    FsdEmitTemplate light = car_template(1000u);
+    FsdEmitFrame f;
+
+    /* Right action, wrong template: refused, not silently stamped. */
+    CHECK(fsd_emit_build(FSD_ACT_DOOR_OPEN, &light, 1100u, &f) == FSD_EMIT_BAD_TEMPLATE,
+          "door action + light template -> refuse");
+    CHECK(fsd_emit_build(FSD_ACT_MAP_LIGHT, &door, 1100u, &f) == FSD_EMIT_BAD_TEMPLATE,
+          "light action + door template -> refuse");
+
+    /* And the two outputs are different frames on different ids. */
+    FsdEmitFrame a, b;
+    CHECK(fsd_emit_build(FSD_ACT_DOOR_OPEN, &door, 1100u, &a) == FSD_EMIT_OK, "door built");
+    CHECK(fsd_emit_build(FSD_ACT_MAP_LIGHT, &light, 1100u, &b) == FSD_EMIT_OK, "light built");
+    CHECK(a.id != b.id, "different ids");
+}
+
+static void test_door_refusals(void) {
+    printf("\n-- door: refusals --\n");
+
+    FsdEmitTemplate t;
+    memset(&t, 0, sizeof(t));
+    FsdEmitFrame f;
+    CHECK(fsd_emit_build(FSD_ACT_DOOR_OPEN, &t, 1000u, &f) == FSD_EMIT_NO_TEMPLATE,
+          "no template -> refuse");
+
+    /* 🔴 We have only ever seen this frame all-zero, which is exactly why
+     * a template is still required. Knowing every byte was zero on THIS car is
+     * not knowing what the other seven bytes mean. */
+    t = door_template(1000u);
+    t.dlc = 4;
+    CHECK(fsd_emit_build(FSD_ACT_DOOR_OPEN, &t, 1100u, &f) == FSD_EMIT_BAD_TEMPLATE,
+          "short frame -> refuse (this car has short frames: 0x311, 0x399, 0x3D8)");
+
+    t = door_template(1000u);
+    CHECK(fsd_emit_build(FSD_ACT_DOOR_OPEN, &t, 1000u + 1499u, &f) == FSD_EMIT_OK,
+          "1499 ms old is still usable");
+    CHECK(fsd_emit_build(FSD_ACT_DOOR_OPEN, &t, 1000u + 1500u, &f)
+              == FSD_EMIT_STALE_TEMPLATE,
+          "1500 ms old is not");
+}
+
+/* The axis row, checked here rather than only in fsd_body's own tests, because
+ * this is the file that made the row's stated condition true. */
+static void test_door_row_is_open_but_narrow(void) {
+    printf("\n-- the door row opened, and nothing else relaxed --\n");
+
+    const FsdBodyCaps* c = fsd_body_caps(FSD_ACT_DOOR_OPEN);
+    CHECK(c != NULL, "row exists");
+    if(!c) return;
+
+    CHECK(c->armable_at_runtime, "armable: the command frame is measured");
+
+    /* 🔴 Every one of these is a gate that stays shut. If a later change
+     * wants one of them open it has to say so here, in a red test, and not by
+     * quietly widening a row while adding something unrelated. */
+    CHECK(!c->may_act_while_moving, "not while moving");
+    CHECK(!c->may_act_out_of_park, "park only");
+    CHECK(!c->may_act_without_driver, "driver must be present");
+    CHECK(!c->may_act_without_drive_session, "a drive must have happened");
+
+    /* A rate limit an order above the light's. Not a debounce -- a bound on how
+     * bad a stuck rule gets. */
+    CHECK(c->min_interval_ms >= 3000u, "at least 3 s apart, got %u",
+          (unsigned)c->min_interval_ms);
+    CHECK(c->min_interval_ms > fsd_body_caps(FSD_ACT_MAP_LIGHT)->min_interval_ms,
+          "slower than the map light");
+}
+
 /* 🔴 The car frame carries no counter and no checksum -- that is WHY copying
  * works at all. If a future car adds one, replaying a template is no longer a
  * valid frame and the car will ignore it. Pinned here so that shows up as a red
@@ -154,9 +270,10 @@ static void test_only_map_light_has_an_encoding(void) {
     FsdEmitFrame f;
 
     CHECK(fsd_emit_supported(FSD_ACT_MAP_LIGHT), "map light: yes");
+    CHECK(fsd_emit_supported(FSD_ACT_DOOR_OPEN), "door: yes (measured 2026-09-05)");
 
     const FsdBodyAction rest[] = {
-        FSD_ACT_DOOR_OPEN, FSD_ACT_CAMERA, FSD_ACT_SEAT_DRIVER,
+        FSD_ACT_CAMERA, FSD_ACT_SEAT_DRIVER,
         FSD_ACT_SEAT_PASSENGER, FSD_ACT_SCROLL, FSD_ACT_GEAR_D,
     };
     for(unsigned i = 0; i < sizeof(rest) / sizeof(rest[0]); i++) {
@@ -196,6 +313,10 @@ static void test_result_names(void) {
 int main(void) {
     printf("test_body_emit\n");
     test_matches_tsl_byte_for_byte();
+    test_door_matches_tsl_byte_for_byte();
+    test_door_and_light_do_not_cross();
+    test_door_refusals();
+    test_door_row_is_open_but_narrow();
     test_no_counter_in_the_frame();
     test_refuses_without_a_template();
     test_refuses_a_stale_template();
