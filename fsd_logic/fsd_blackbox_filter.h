@@ -170,6 +170,29 @@ static const uint32_t FSD_BLACKBOX_KEY_IDS[] = {
              //   correlated against whether the car was moving, and 0x118 gives
              //   gear only. Also the only proof the car actually moves, which
              //   the GPS freeze detector already depends on.
+
+    /* 0x1F9 — TSL'S DOOR-OPEN COMMAND. Measured 2026-09-05.
+     *
+     * This one is here for a different reason than every other id above: it is
+     * not in any DBC we have, it has no name, and we still do not know what the
+     * frame is for. What we know is what it DOES.
+     *
+     *     (8.127) 1F9#0000000000000000     <- the car
+     *     (8.127) 1F9#0003000000000000     <- TSL, same millisecond
+     *     (8.240)                          <- the right front door opens
+     *
+     * Across three unfiltered control captures the payload is all zeroes in
+     * 273 frames with no exception; in the door capture exactly two frames
+     * carry byte1 = 0x03.
+     *
+     * 🔴 The lesson is the reason this line exists. Two visits failed to catch
+     * this command, and the explanation was never "we forgot" -- it was that a
+     * filter built from ids we can NAME cannot contain an id nobody has named.
+     * The rule for this list is "we do not become unable to see it", not "we
+     * know we need it", and this is the case that proves the difference.
+     *
+     * Cheap: the car sends it at ~10 Hz with a constant payload. */
+    0x1F9u,  // (unnamed) — TSL door-open command, byte1 = 0x03
 };
 
 #define FSD_BLACKBOX_KEY_ID_COUNT \
