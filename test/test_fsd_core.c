@@ -2214,6 +2214,19 @@ static void test_blackbox_filter(void) {
     CHECK(fsd_blackbox_should_record(0x229u), "0x229 right stalk incl. park button");
     CHECK(fsd_blackbox_should_record(0x257u), "0x257 road speed (state for automation)");
 
+    /* 0x1F9 — TSL's door-open command, measured 2026-09-05.
+     *
+     * 🔴 This id is the reason the list's rule is "we do not become unable
+     * to see it" and not "we know we need it". It is in none of our five DBCs,
+     * it has no name, and two visits failed to capture the command because a
+     * filter assembled from ids we can name cannot hold an id nobody named.
+     *
+     * Asserted by name, like the block above: a loop over the array passes for
+     * whatever the array happens to contain, so it cannot catch a deletion --
+     * and a deletion here only shows up as a capture that is missing the one
+     * frame it was taken for. */
+    CHECK(fsd_blackbox_should_record(0x1F9u), "0x1F9 TSL door-open command");
+
     // Chatty non-diagnostic frames are dropped (the ~15x rate cut).
     CHECK(!fsd_blackbox_should_record(CAN_ID_BMS_HV_BUS),  "0x132 BMS dropped");
     CHECK(!fsd_blackbox_should_record(CAN_ID_ESP_WHEELSPD),"0x175 wheel speeds dropped");
