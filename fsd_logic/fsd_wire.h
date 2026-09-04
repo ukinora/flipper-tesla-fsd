@@ -39,13 +39,13 @@ extern "C" {
 
 /* Both payloads are 20 bytes because that is the most a default 23-byte ATT MTU
  * carries. Not a coincidence and not adjustable without a version bump. */
-#define FSD_WIRE_STATE_LEN 27u
+#define FSD_WIRE_STATE_LEN 28u
 #define FSD_WIRE_CAMSTAT_LEN 20u
 #define FSD_WIRE_RESULT_LEN 4u
 
 /* Wire versions. Each payload carries its own — sharing one meant that bumping
  * State also announced a CamStat change that had not happened. */
-#define FSD_WIRE_STATE_VERSION 6u
+#define FSD_WIRE_STATE_VERSION 7u
 #define FSD_WIRE_CAMSTAT_VERSION 2u
 
 /* FSD v14 Lite exposes four speed profiles. */
@@ -55,10 +55,11 @@ extern "C" {
 
 /* Everything State is built from. Filled by the caller from FSDState.
  *
- * Note what is NOT here: flags bits 5 and 7. They are structurally zero --
- * blind-spot is not extracted on the ESP32 path and the closed loop that would
- * set bit 7 emits nothing -- so they are not inputs to anything. Giving them a
- * field would invite someone to fill it. */
+ * Note what is NOT here: flags bit 7. It is structurally zero -- the closed
+ * loop that would set it emits nothing -- so it is not an input to anything.
+ * Giving it a field would invite someone to fill it.
+ *
+ * (Bit 5 was in that sentence until 2026-09-05, when ui_speed_seen took it.) */
 typedef struct {
     bool rx_seen; // any CAN frame ever received
     bool ota_in_progress;
@@ -125,6 +126,27 @@ typedef struct {
     bool observed_profile_seen;
 
     float speed_kph;   // negatives clamped to 0, sent x10, saturating
+
+    /* Byte 27 + flags bit 5. DI_uiSpeed -- the number on the car's OWN display.
+     *
+     * 🔴 THIS EXISTS BECAUSE speed_kph GOES NEGATIVE IN REVERSE and the
+     * packer clamps it to 0. Measured 2026-09-05: reversing, DI_vehicleSpeed
+     * ran 0x1F4 (=0 km/h) down to 455 (=-3.6), while DI_uiSpeed read 0,1,2,3.
+     * The owner reported "no speed shown in reverse" after the first drive;
+     * this is that.
+     *
+     * 🔴 The two are NOT interchangeable and must not be merged. This one
+     * is in the car's DISPLAY unit -- an mph car reports mph here -- and the
+     * ratio between them is the only thing on this bus that says which unit the
+     * car is set to. speed_kph stays the input to the safety gates, which want
+     * true km/h; this one is the speedometer, because it is by definition the
+     * number the driver is looking at.
+     *
+     * 🔴 A seen FLAG, not a sentinel. 0 is a legal display speed (stopped)
+     * and 255 is a plausible one, so no value in the byte can mean "absent" --
+     * unlike byte 26, whose field is 3 bits wide and leaves 0x0F free. */
+    bool ui_speed_seen;
+    uint8_t ui_speed;
     float soc_percent; // clamped 0..100
 
     uint8_t gear; // 0=INVALID 1=P 2=R 3=N 4=D 7=SNA

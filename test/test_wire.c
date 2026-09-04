@@ -62,8 +62,54 @@ static void test_profile_sentinel(void) {
     CHECK(FSD_WIRE_PROFILE_NONE > FSD_PROFILE_MASK,
           "sentinel 0x%02X must not be a real profile (mask 0x%02X)",
           FSD_WIRE_PROFILE_NONE, FSD_PROFILE_MASK);
-    CHECK(FSD_WIRE_STATE_LEN == 27u, "State is 27 bytes in v6");
-    CHECK(FSD_WIRE_STATE_VERSION == 6u, "version bumped with the length");
+    CHECK(FSD_WIRE_STATE_LEN == 28u, "State is 28 bytes in v7");
+    CHECK(FSD_WIRE_STATE_VERSION == 7u, "version bumped with the length");
+}
+
+/* 🔴 The reverse-speed defect, pinned as an equation rather than a story.
+ *
+ * The owner reported "no speed shown in reverse" after the first drive
+ * (2026-09-03). The cause, measured 2026-09-05: DI_vehicleSpeed goes NEGATIVE
+ * below a standstill -- raw 0x1F4 is 0 km/h, and reversing ran it down to 455
+ * (= -3.6 km/h) -- and the packer clamps negatives to zero, correctly, because
+ * the field it feeds is unsigned.
+ *
+ * DI_uiSpeed, the number on the car's own display, read 0,1,2,3 through the
+ * same seconds. So the fix is not to unclamp anything; it is to carry the other
+ * signal, which is what a speedometer wanted all along. */
+static void test_reverse_speed_needs_the_other_signal(void) {
+    printf("\n-- reverse: the clamped one and the one that works --\n");
+
+    FsdWireState w;
+    memset(&w, 0, sizeof(w));
+    uint8_t b[FSD_WIRE_STATE_LEN];
+
+    /* Reversing at 3.6 km/h, as the car reported it. */
+    w.speed_kph = -3.6f;
+    w.ui_speed_seen = true;
+    w.ui_speed = 3;
+    fsd_wire_pack_state(&w, b);
+
+    const uint16_t x10 = (uint16_t)(b[6] | ((uint16_t)b[7] << 8));
+    CHECK(x10 == 0, "the km/h field still clamps -- it is unsigned, got %u", x10);
+    CHECK(b[27] == 3, "and the display value survives, got %u", b[27]);
+
+    /* Forward, both agree in magnitude. The point is that they are two fields,
+     * not that they always differ. */
+    w.speed_kph = 42.0f;
+    w.ui_speed = 42;
+    fsd_wire_pack_state(&w, b);
+    CHECK((uint16_t)(b[6] | ((uint16_t)b[7] << 8)) == 420, "42.0 km/h");
+    CHECK(b[27] == 42, "and 42 on the display");
+
+    /* 🔴 They are NOT the same number in general. An mph car reports mph in
+     * byte 27, and the ratio between the two is the only thing on this bus that
+     * says which unit the car is set to. Merging them would destroy that. */
+    w.speed_kph = 100.0f; /* km/h */
+    w.ui_speed = 62;      /* the same speed shown in mph */
+    fsd_wire_pack_state(&w, b);
+    CHECK((uint16_t)(b[6] | ((uint16_t)b[7] << 8)) == 1000, "100.0 km/h");
+    CHECK(b[27] == 62, "62 mph on the display -- a legal disagreement");
 }
 
 static void test_state_layout(void) {
@@ -323,8 +369,19 @@ static void test_state_structural_zeros(void) {
 
     uint8_t b[FSD_WIRE_STATE_LEN];
     fsd_wire_pack_state(&w, b);
-    CHECK((b[1] & (1u << 5)) == 0, "blind spot R never set");
+    /* 🔴 Bit 5 asserted "never set" until 2026-09-05. It carried nothing
+     * because blind-spot is not extracted on this path; now it carries
+     * ui_speed_seen, and the memset above made that true. The test does not go
+     * away -- it becomes the assertion that the bit TRACKS ITS FIELD, which is
+     * strictly more than "it is zero". */
+    CHECK((b[1] & (1u << 5)) != 0, "ui_speed_seen set when the field is true");
     CHECK((b[1] & (1u << 7)) == 0, "profile-change never set");
+
+    w.ui_speed_seen = false;
+    fsd_wire_pack_state(&w, b);
+    CHECK((b[1] & (1u << 5)) == 0, "and clear when it is false");
+    CHECK(b[27] == 0, "a speed nobody saw is not sent");
+    w.ui_speed_seen = true;
 
     // ...and bit 4 tracks its field in BOTH directions, so it can neither be
     // stuck on nor silently dropped.
@@ -779,6 +836,7 @@ static void write_fixture(void) {
 
 int main(void) {
     printf("test_wire\n");
+    test_reverse_speed_needs_the_other_signal();
     test_state_layout();
     test_state_structural_zeros();
     test_state_blink_nibble();
