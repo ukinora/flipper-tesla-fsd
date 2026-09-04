@@ -1151,6 +1151,26 @@ void fsd_handle_vcfront_lighting(FSDState *state, const CanFrame *frame) {
     state->left_turn_status_seen = true;
     state->right_turn_status_seen = true;
     state->turn_status_seen = true;
+
+    /* Mirror into the dashboard fields when 0x311 is not supplying them.
+     *
+     * 🔴 The bits above were already being parsed correctly -- they just
+     * landed in left_turn_active, which only main.cpp's own nag helpers read.
+     * The BLE State packs ui_*_blinker instead, and the only writer of those is
+     * the 0x311 parser. On this car 0x311 is TWO BYTES, so that parser returns
+     * at its length guard and the dashboard showed no indicator on a whole
+     * drive (owner report, 2026-09-03).
+     *
+     * Guarded, not unconditional: on a car where 0x311 does carry them, that
+     * frame stays the source and nothing here changes. Same shape as the 0x39B
+     * fallback for DAS state, and for the same reason -- a car we have not seen
+     * must not be made worse by a fix for the one we have. */
+    if(!state->ui_warning_seen) {
+        state->ui_left_blinker = state->left_turn_active;
+        state->ui_right_blinker = state->right_turn_active;
+        state->ui_left_blinker_blinking = left_request;
+        state->ui_right_blinker_blinking = right_request;
+    }
 }
 
 bool fsd_build_gear_lever_frame(CanFrame *frame, uint8_t gear_pos, uint8_t counter) {

@@ -268,11 +268,19 @@ typedef struct FSDState {
      * pressed". Hazards do not move the stalk, so they may not appear there at
      * all — which is exactly why these two are read.
      *
-     * UNVERIFIED on this car. Bit positions come from the community DBC and the
-     * right-hand definition there contradicts itself (26|2@1+ with range
-     * [0|15], and the opposite endianness from its left-hand twin). 0x311 is in
-     * the capture filter; the visit settles it. Until then nothing may FAIL
-     * when these read zero — see turnSignalLit() on the app side. */
+     * 🔴 THE VISIT SETTLED IT, AND NOT THE WAY THIS COMMENT EXPECTED
+     * (2026-09-05). 0x311 on this car is TWO BYTES — the bits described above
+     * do not exist, so this parser returns at its length guard and these two
+     * were structurally zero for a whole drive (owner report 2026-09-03).
+     *
+     * The lamps are on 0x3F5 VCFRONT_lighting byte 0 instead, in the same
+     * 0/1/2 encoding, and fsd_handle_vcfront_lighting() now mirrors them here
+     * when ui_warning_seen is false. See fsd_decode_blinkers() in fsd_types.h
+     * for the measurement.
+     *
+     * The old caution still holds for cars where 0x311 DOES carry them: those
+     * bit positions remain unverified, so nothing may FAIL when these read
+     * zero — see turnSignalLit() on the app side. */
     uint8_t ui_left_blinker_blinking;
     uint8_t ui_right_blinker_blinking;
 
