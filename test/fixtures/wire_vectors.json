@@ -41,6 +41,6 @@
     { "name": "door_state_enter", "hex": "011205010000000000000000", "fields": { "enabled": 1, "signal": 18, "kind": 5, "value": 1, "action": 0, "arg": 0 } },
     { "name": "disabled_but_filled", "hex": "001405040000000201000000", "fields": { "enabled": 0, "signal": 20, "kind": 5, "value": 4, "action": 2, "arg": 1 } },
     { "name": "big_negative_arg", "hex": "0101020000000003006cca88", "fields": { "enabled": 1, "signal": 1, "kind": 2, "value": 0, "action": 3, "arg": -2000000000 } },
-    { "name": "max_enums", "hex": "011507ffffff7f06ffffff7f", "fields": { "enabled": 1, "signal": 21, "kind": 7, "value": 2147483647, "action": 6, "arg": 2147483647 } }
+    { "name": "max_enums", "hex": "011507ffffff7f07ffffff7f", "fields": { "enabled": 1, "signal": 21, "kind": 7, "value": 2147483647, "action": 7, "arg": 2147483647 } }
   ]
 }

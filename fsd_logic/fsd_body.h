@@ -88,6 +88,12 @@ typedef enum {
                             //   sent an emitter to 0x3C2.
     FSD_ACT_SCROLL,         // 0x3C2 byte3, 6-bit signed detents
     FSD_ACT_GEAR_D,         // 0x229 -- P -> D only. See caps row.
+    /* 🔴 APPENDED, NOT INSERTED, AND THAT IS NOT A STYLE CHOICE. This
+     * number is written into NVS by fsd_rule_pack() (out[7] = rule->action) and
+     * goes out on the wire. Inserting anywhere above would silently turn every
+     * saved rule into a rule about a different action -- a door rule becoming a
+     * seat rule, with nothing on screen to say so. New actions go here. */
+    FSD_ACT_HAZARDS,        // 0x3E9 byte0 bit2 -- measured 2026-09-05
     FSD_ACT_COUNT,
 } FsdBodyAction;
 

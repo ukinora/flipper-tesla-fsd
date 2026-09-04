@@ -11,10 +11,12 @@
  * below — three independent ways to catch the same class of mistake, because
  * this project has already shipped a permission table that defaulted open.
  *
- * 🔴 TWO ROWS ARE ARMABLE (2026-09-05). MAP_LIGHT carries over unchanged
- * from the old T1. DOOR_OPEN joined it when the third visit produced the thing
- * its own comment demanded -- the command frame, measured, not inferred -- and
- * it joined with every other restriction still on.
+ * 🔴 THREE ROWS ARE ARMABLE (2026-09-05). MAP_LIGHT carries over unchanged
+ * from the old T1. DOOR_OPEN and HAZARDS joined it when the third visit
+ * produced the thing their comments demanded -- the command frames, measured,
+ * not inferred. DOOR_OPEN joined with every other restriction still on;
+ * HAZARDS joined with the motion gates open, because a hazard light that may
+ * only act in park cannot do what hazard lights are for.
  *
  * Each row names the evidence that flips its bool. That is the discipline this
  * table is for: a row opens when a stated condition is met, and the condition
@@ -158,6 +160,39 @@ static const FsdBodyCaps FSD_BODY_CAPS[] = {
             .requires_belt = true,
             .min_interval_ms = 1000u,
         },
+
+    /* Hazards. Measured 2026-09-05: 0x3E9 byte 0 bit 2, with a counter and a
+     * check that make this the one command we REWRITE rather than copy.
+     *
+     * The motion gates are OPEN here, and deliberately. TSL's own rule turns
+     * the hazards on for reverse -- moving, out of park -- and a hazard light
+     * that may only act in P is a hazard light that cannot do the thing hazard
+     * lights are for. This is the row where "every restriction on" would be the
+     * unsafe choice, not the safe one.
+     *
+     * 🔴 What bounds it instead is that we can only ever turn them ON.
+     * The command sets a bit; it has no clear. Ceasing to send returns the
+     * lamps to the car, exactly as the map light does. So the failure this row
+     * has to survive is a stuck rule HOLDING them, and that is max_hold_ms --
+     * not a gate on when it may start.
+     *
+     * may_act_without_driver stays false. Not because an empty car must never
+     * flash -- that is arguably what hazards are for -- but because no rule we
+     * have wants it yet, and a body write on an unattended car deserves its own
+     * reason written here rather than inheriting one.
+     *
+     * min_interval_ms 500 matches the car's own period (~495 ms): this is a
+     * command that is held by re-sending, so the interval is a cadence, not a
+     * debounce. */
+    [FSD_ACT_HAZARDS] =
+        {
+            .action = FSD_ACT_HAZARDS,
+            .may_act_while_moving = true,
+            .may_act_out_of_park = true,
+            .armable_at_runtime = true,
+            .min_interval_ms = 500u,
+            .max_hold_ms = 30000u,
+        },
 };
 
 _Static_assert(sizeof(FSD_BODY_CAPS) / sizeof(FSD_BODY_CAPS[0]) == FSD_ACT_COUNT,
@@ -281,6 +316,7 @@ const char* fsd_body_action_str(FsdBodyAction a) {
     case FSD_ACT_SEAT_PASSENGER: return "seat-passenger";
     case FSD_ACT_SCROLL: return "scroll";
     case FSD_ACT_GEAR_D: return "gear-D";
+    case FSD_ACT_HAZARDS: return "hazards";
     case FSD_ACT_COUNT: break;
     }
     return "?";

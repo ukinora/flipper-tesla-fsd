@@ -86,6 +86,134 @@ static FsdEmitTemplate door_template(uint32_t at_ms) {
     return t;
 }
 
+/* 0x3E9 as the car and TSL sent it, 2026-09-05, while the car was in reverse.
+ * Four consecutive pairs, copied out of captures/2026-09-05/후진. */
+static const struct {
+    uint8_t car[8];
+    uint8_t tsl[8];
+} HZ[4] = {
+    {{0xF1,0x88,0x02,0,0,0,0xC0,0x27}, {0xF5,0x88,0x02,0,0,0,0xD0,0x3B}},
+    {{0xF1,0x88,0x02,0,0,0,0xD0,0x37}, {0xF5,0x88,0x02,0,0,0,0xE0,0x4B}},
+    {{0xF1,0x88,0x02,0,0,0,0xE0,0x47}, {0xF5,0x88,0x02,0,0,0,0xF0,0x5B}},
+    /* The wrap. F -> 0, and the check follows it. */
+    {{0xF1,0x88,0x02,0,0,0,0xF0,0x57}, {0xF5,0x88,0x02,0,0,0,0x00,0x6B}},
+};
+
+static FsdEmitTemplate hz_template(const uint8_t* car, uint32_t at_ms) {
+    FsdEmitTemplate t;
+    memset(&t, 0, sizeof(t));
+    t.seen = true;
+    t.id = FSD_EMIT_HAZARD_ID;
+    t.dlc = 8;
+    memcpy(t.data, car, 8);
+    t.seen_ms = at_ms;
+    return t;
+}
+
+/* The one that matters, and it is a harder claim than the other two emitters
+ * make. For the light and the door "our bytes == TSL's bytes" only asks whether
+ * we set the right bit. Here it also asks whether we advanced the counter the
+ * way TSL does and computed the same check -- on four pairs including the wrap
+ * from F to 0. */
+static void test_hazards_match_tsl_byte_for_byte(void) {
+    printf("\n-- hazards: our frame == the frame TSL sent, four times --\n");
+
+    for(unsigned i = 0; i < 4; i++) {
+        FsdEmitTemplate t = hz_template(HZ[i].car, 1000u);
+        FsdEmitFrame f;
+        CHECK(fsd_emit_build(FSD_ACT_HAZARDS, &t, 1100u, &f) == FSD_EMIT_OK,
+              "pair %u built", i);
+        CHECK(f.id == 0x3E9u, "pair %u: id 0x3E9", i);
+        CHECK(memcmp(f.data, HZ[i].tsl, 8) == 0,
+              "pair %u: got %02X%02X%02X%02X%02X%02X%02X%02X", i,
+              f.data[0], f.data[1], f.data[2], f.data[3],
+              f.data[4], f.data[5], f.data[6], f.data[7]);
+    }
+}
+
+/* 🔴 The check is not a guess that happened to fit four frames. It was
+ * derived against every distinct 0x3E9 payload in every capture we hold -- 162
+ * of them, zero exceptions -- and these are spot samples of that set, chosen
+ * because their other bytes differ from the reverse capture's. A rule that fits
+ * one situation and a rule that fits the frame look identical until they do
+ * not. */
+static void test_hazard_check_holds_away_from_the_hazard_capture(void) {
+    printf("\n-- the check rule, on frames from other captures --\n");
+
+    /* car frames seen while nothing was happening -- byte1/byte2 are 0 here and
+     * 0x88/0x02 in the reverse capture, so the check must differ and does. */
+    static const uint8_t OTHERS[5][8] = {
+        {0xF1,0,0,0,0,0,0x00,0xDD},
+        {0xF1,0,0,0,0,0,0x10,0xED},
+        {0xF1,0,0,0x40,0,0,0x70,0x8D},
+        {0xF1,0,0,0x80,0,0,0x20,0x7D},
+        {0xF1,0,0,0xC0,0,0,0x00,0x9D},
+    };
+    for(unsigned i = 0; i < 5; i++) {
+        unsigned sum = 0;
+        for(unsigned k = 0; k < 7u; k++) sum += OTHERS[i][k];
+        CHECK((uint8_t)((sum + 0xECu) & 0xFFu) == OTHERS[i][7],
+              "sample %u: rule reproduces the car's own byte7 (%02X)",
+              i, OTHERS[i][7]);
+    }
+}
+
+static void test_hazard_refusals(void) {
+    printf("\n-- hazards: refusals --\n");
+
+    FsdEmitTemplate t;
+    memset(&t, 0, sizeof(t));
+    FsdEmitFrame f;
+    CHECK(fsd_emit_build(FSD_ACT_HAZARDS, &t, 1000u, &f) == FSD_EMIT_NO_TEMPLATE,
+          "no template -> refuse");
+
+    t = hz_template(HZ[0].car, 1000u);
+    t.id = 0x273u;
+    CHECK(fsd_emit_build(FSD_ACT_HAZARDS, &t, 1100u, &f) == FSD_EMIT_BAD_TEMPLATE,
+          "wrong id -> refuse");
+
+    /* 🔴 Staleness bites harder here than anywhere else. A copied light
+     * frame that is a second old is still a valid light frame; a hazard frame
+     * that old carries a counter the car has already run past. */
+    t = hz_template(HZ[0].car, 1000u);
+    CHECK(fsd_emit_build(FSD_ACT_HAZARDS, &t, 1000u + 1499u, &f) == FSD_EMIT_OK,
+          "1499 ms old is still usable");
+    CHECK(fsd_emit_build(FSD_ACT_HAZARDS, &t, 1000u + 1500u, &f)
+              == FSD_EMIT_STALE_TEMPLATE,
+          "1500 ms old is not");
+
+    /* And it cannot be confused with the other two commands. */
+    FsdEmitTemplate light = car_template(1000u);
+    CHECK(fsd_emit_build(FSD_ACT_HAZARDS, &light, 1100u, &f) == FSD_EMIT_BAD_TEMPLATE,
+          "hazards + light template -> refuse");
+    CHECK(fsd_emit_build(FSD_ACT_MAP_LIGHT, &t, 1100u, &f) == FSD_EMIT_BAD_TEMPLATE,
+          "light + hazard template -> refuse");
+}
+
+/* The low nibble of byte 6 is not ours. We have only ever seen 0 and 2 there
+ * and do not know what either means, so it is copied through -- and this test
+ * exists because "advance the counter" written carelessly clears it. */
+static void test_hazard_leaves_the_other_nibble_alone(void) {
+    printf("\n-- the low nibble of byte 6 is copied, not cleared --\n");
+
+    uint8_t car[8] = {0xF1, 0x88, 0x02, 0, 0, 0, 0xC2, 0x00};
+    unsigned sum = 0;
+    for(unsigned k = 0; k < 7u; k++) sum += car[k];
+    car[7] = (uint8_t)((sum + 0xECu) & 0xFFu); /* a valid car frame */
+
+    FsdEmitTemplate t = hz_template(car, 1000u);
+    FsdEmitFrame f;
+    CHECK(fsd_emit_build(FSD_ACT_HAZARDS, &t, 1100u, &f) == FSD_EMIT_OK, "built");
+    CHECK((f.data[6] & 0x0Fu) == 0x02u, "low nibble survives, got 0x%X",
+          f.data[6] & 0x0Fu);
+    CHECK((f.data[6] >> 4) == 0x0Du, "and the counter advanced C -> D");
+
+    /* Our own frame must satisfy the rule we derived from the car's. */
+    unsigned s2 = 0;
+    for(unsigned k = 0; k < 7u; k++) s2 += f.data[k];
+    CHECK(f.data[7] == (uint8_t)((s2 + 0xECu) & 0xFFu), "and the check is right");
+}
+
 static void test_door_matches_tsl_byte_for_byte(void) {
     printf("\n-- door: our frame == the frame TSL sent --\n");
 
@@ -272,6 +400,8 @@ static void test_only_map_light_has_an_encoding(void) {
     CHECK(fsd_emit_supported(FSD_ACT_MAP_LIGHT), "map light: yes");
     CHECK(fsd_emit_supported(FSD_ACT_DOOR_OPEN), "door: yes (measured 2026-09-05)");
 
+    CHECK(fsd_emit_supported(FSD_ACT_HAZARDS), "hazards: yes (measured 2026-09-05)");
+
     const FsdBodyAction rest[] = {
         FSD_ACT_CAMERA, FSD_ACT_SEAT_DRIVER,
         FSD_ACT_SEAT_PASSENGER, FSD_ACT_SCROLL, FSD_ACT_GEAR_D,
@@ -313,6 +443,10 @@ static void test_result_names(void) {
 int main(void) {
     printf("test_body_emit\n");
     test_matches_tsl_byte_for_byte();
+    test_hazards_match_tsl_byte_for_byte();
+    test_hazard_check_holds_away_from_the_hazard_capture();
+    test_hazard_refusals();
+    test_hazard_leaves_the_other_nibble_alone();
     test_door_matches_tsl_byte_for_byte();
     test_door_and_light_do_not_cross();
     test_door_refusals();
