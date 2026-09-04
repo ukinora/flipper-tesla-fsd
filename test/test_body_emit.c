@@ -391,8 +391,8 @@ static void test_refuses_the_wrong_frame(void) {
 
 /* ── the gap, stated ──────────────────────────────────────────────────────── */
 
-static void test_only_map_light_has_an_encoding(void) {
-    printf("\n-- 여섯은 아직 방출기가 없다 --\n");
+static void test_which_actions_have_an_encoding(void) {
+    printf("\n-- 셋은 방출기가 있고 다섯은 없다 --\n");
 
     FsdEmitTemplate t = car_template(1000u);
     FsdEmitFrame f;
@@ -406,6 +406,15 @@ static void test_only_map_light_has_an_encoding(void) {
         FSD_ACT_CAMERA, FSD_ACT_SEAT_DRIVER,
         FSD_ACT_SEAT_PASSENGER, FSD_ACT_SCROLL, FSD_ACT_GEAR_D,
     };
+    /* 🔴 The list is written out by hand, so it can quietly stop covering
+     * things: add an action to the enum, forget this line, and the loop below
+     * still passes while testing one action less. Same shape as the CAN-id
+     * check that only compared the intersection. Count it. */
+    CHECK(sizeof(rest) / sizeof(rest[0]) == (size_t)FSD_ACT_COUNT - 3u,
+          "the no-emitter list must name every action that is not one of the "
+          "three with emitters (%u named, %u expected)",
+          (unsigned)(sizeof(rest) / sizeof(rest[0])),
+          (unsigned)FSD_ACT_COUNT - 3u);
     for(unsigned i = 0; i < sizeof(rest) / sizeof(rest[0]); i++) {
         CHECK(!fsd_emit_supported(rest[i]),
               "%s has no emitter", fsd_body_action_str(rest[i]));
@@ -426,6 +435,47 @@ static void test_only_map_light_has_an_encoding(void) {
               (int)c->armable_at_runtime,
               (int)fsd_emit_supported((FsdBodyAction)a));
     }
+}
+
+/**
+ * 🔴 A SUPPORTED ACTION MUST NEVER BORROW ANOTHER ACTION'S ENCODING.
+ *
+ * fsd_emit_build() picks the id, length and bit from a switch on the action.
+ * That switch used to end in `default:` -> map light, and the comment excused
+ * it with "fsd_emit_supported() already refused everything else". True today,
+ * false the moment somebody adds an action to fsd_emit_supported() and forgets
+ * the switch -- and then the new action silently emits a MAP LIGHT COMMAND and
+ * returns FSD_EMIT_OK.
+ *
+ * A compile warning now catches that (the switch lists every case and has no
+ * default). This test catches it too, from the other side and at runtime: hand
+ * every supported action the MAP LIGHT template and only map light may accept
+ * it. A borrowed encoding shows up here as an OK that should have been
+ * BAD_TEMPLATE.
+ */
+static void test_no_action_borrows_another_encoding(void) {
+    printf("\n-- 지원되는 동작은 남의 인코딩을 빌리지 않는다 --\n");
+
+    FsdEmitTemplate t = car_template(1000u); /* 0x273 -- map light's frame */
+    FsdEmitFrame f;
+
+    unsigned supported = 0;
+    for(unsigned a = 0; a < FSD_ACT_COUNT; a++) {
+        FsdBodyAction act = (FsdBodyAction)a;
+        if(!fsd_emit_supported(act)) continue;
+        supported++;
+
+        FsdEmitResult r = fsd_emit_build(act, &t, 1100u, &f);
+        if(act == FSD_ACT_MAP_LIGHT) {
+            CHECK(r == FSD_EMIT_OK, "map light accepts its own template");
+            CHECK(f.id == FSD_EMIT_MAP_LIGHT_ID, "and emits on 0x273");
+        } else {
+            CHECK(r == FSD_EMIT_BAD_TEMPLATE,
+                  "%s must refuse the 0x273 template, got '%s'",
+                  fsd_body_action_str(act), fsd_emit_result_str(r));
+        }
+    }
+    CHECK(supported == 3u, "three actions have emitters, saw %u", supported);
 }
 
 static void test_result_names(void) {
@@ -455,7 +505,8 @@ int main(void) {
     test_refuses_without_a_template();
     test_refuses_a_stale_template();
     test_refuses_the_wrong_frame();
-    test_only_map_light_has_an_encoding();
+    test_which_actions_have_an_encoding();
+    test_no_action_borrows_another_encoding();
     test_result_names();
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
