@@ -66,7 +66,7 @@
  * three times; 288 bytes cannot. */
 #define BLE_UUID_RULES   "6b1a000b-4b53-4d4f-4432-43414e000001"
 
-#define BLE_STATE_LEN  27u   // v6: +byte 26, observed speed profile
+#define BLE_STATE_LEN  28u   // v7: +byte 27, DI_uiSpeed (reverse shows 0 otherwise)
 #define BLE_RESULT_LEN 4u
 #define BLE_BULK_HDR   2u   // seq prefix on every bulk frame
 
@@ -239,7 +239,7 @@ static uint32_t g_bulk_busy   = 0;     // notify() refusals (radio queue full)
 static uint32_t g_bulk_stall  = 0;     // ticks that got nothing out at all
 static uint32_t g_bulk_next_ms = 0;    // pacing gate — earliest next burst
 
-// ── State serialisation (27 B, little-endian) ────────────────────────────────
+// ── State serialisation (28 B, little-endian) ────────────────────────────────
 // Layout is fixed; the app parses by offset. Bump BLE_PROTO_VERSION on change.
 // GATHERS ONLY. Every clamp, scale and byte position lives in
 // fsd_logic/fsd_wire.c, which is pure C and host-tested — this file cannot be
@@ -284,6 +284,8 @@ static void ble_pack_state(uint8_t *out, uint16_t rx_fps) {
     w.observed_profile      = s.observed_profile;
     w.observed_profile_seen = s.observed_profile_seen;
     w.speed_kph        = s.vehicle_speed_kph;
+    w.ui_speed         = s.ui_speed;
+    w.ui_speed_seen    = s.ui_speed_seen;
     w.soc_percent      = s.soc_percent;
     w.gear             = s.di_gear;
     /* 🔴 낡은 제한속도는 아예 안 보낸다. 세 프레임이 같은 칸을 덮어쓰는데

@@ -50,6 +50,7 @@ void fsd_wire_pack_state(const FsdWireState* in, uint8_t* out) {
      * change in progress) belongs to the SET_PROFILE closed loop, which emits
      * nothing while both of its gates are shut. */
     if(in->blackbox_recording) flags |= (1u << 4);
+    if(in->ui_speed_seen) flags |= (1u << 5);
     if(in->brake_applied) flags |= (1u << 6);
 
     int32_t prof = in->speed_profile;
@@ -112,6 +113,13 @@ void fsd_wire_pack_state(const FsdWireState* in, uint8_t* out) {
     out[26] = in->observed_profile_seen
                   ? (uint8_t)(in->observed_profile & 0x07u)
                   : FSD_WIRE_PROFILE_NONE;
+
+    /* 🔴 The speedometer's number, and the reason it is separate from
+     * byte 2. speed_kph is DI_vehicleSpeed, which goes NEGATIVE in reverse and
+     * is clamped to 0 above -- so a reversing car showed nothing at all.
+     * Sent raw: it is the car's own display value, in the car's own unit, and
+     * converting it here would be inventing a unit we were not told. */
+    out[27] = in->ui_speed_seen ? in->ui_speed : 0u;
 }
 
 void fsd_wire_pack_camstat(const FsdWireCamStat* in, uint8_t* out) {
