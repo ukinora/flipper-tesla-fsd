@@ -528,21 +528,24 @@ static void test_rewrite_opened_nothing(void) {
           "MAP_LIGHT carries over from T1");
     CHECK(fsd_body_allows(&in, FSD_ACT_DOOR_OPEN, now) == FSD_BODY_OK,
           "DOOR_OPEN joined it once its command frame was measured (2026-09-05)");
+    CHECK(fsd_body_allows(&in, FSD_ACT_HAZARDS, now) == FSD_BODY_OK,
+          "HAZARDS joined the same day, with the motion gates open on purpose");
 
     for (int a = 0; a < FSD_ACT_COUNT; a++) {
-        if (a == FSD_ACT_MAP_LIGHT || a == FSD_ACT_DOOR_OPEN) continue;
+        if (a == FSD_ACT_MAP_LIGHT || a == FSD_ACT_DOOR_OPEN ||
+            a == FSD_ACT_HAZARDS) continue;
         CHECK(fsd_body_allows(&in, (FsdBodyAction)a, now) == FSD_BODY_NOT_ARMABLE,
               "%s must refuse on its row even with every input satisfied",
               fsd_body_action_str((FsdBodyAction)a));
     }
 
     // The count itself, so adding a row without deciding its arming is a
-    // failing test rather than a silent grant. It moved 1 -> 2 on 2026-09-05
-    // and that move cost six red tests, which is the price it should cost.
+    // failing test rather than a silent grant. It moved 1 -> 2 -> 3 on
+    // 2026-09-05; each move cost red tests, which is the price it should cost.
     int armable = 0;
     for (int a = 0; a < FSD_ACT_COUNT; a++)
         if (fsd_body_caps((FsdBodyAction)a)->armable_at_runtime) armable++;
-    CHECK(armable == 2, "exactly two armable rows, found %d", armable);
+    CHECK(armable == 3, "exactly three armable rows, found %d", armable);
 }
 
 static void test_caps_table_is_well_formed(void) {
@@ -706,6 +709,18 @@ static void test_owner_decisions_are_in_the_table(void) {
     CHECK(d->min_interval_ms >= 3000u,
           "a door is rate-limited an order above a light, got %u",
           (unsigned)d->min_interval_ms);
+
+    /* 🔴 Hazards are the row where "every restriction on" would be the
+     * UNSAFE choice. TSL's own rule flashes them for reverse -- moving, out of
+     * park -- and a hazard light that may only act in P cannot do what hazard
+     * lights are for. Stated here so a later tidy-up that "hardens" the table
+     * by closing every gate has to argue with a red test. */
+    const FsdBodyCaps* h = fsd_body_caps(FSD_ACT_HAZARDS);
+    CHECK(h->armable_at_runtime, "hazards armable: frame measured 2026-09-05");
+    CHECK(h->may_act_while_moving, "owner-visible decision: hazards while moving");
+    CHECK(h->may_act_out_of_park, "and out of park -- reverse is the whole case");
+    CHECK(h->max_hold_ms > 0u,
+          "the failure to survive is a stuck rule HOLDING them, so bound it");
 }
 
 int main(void) {

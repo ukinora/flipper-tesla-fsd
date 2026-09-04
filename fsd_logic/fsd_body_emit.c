@@ -13,6 +13,7 @@ bool fsd_emit_supported(FsdBodyAction action) {
     switch(action) {
     case FSD_ACT_MAP_LIGHT:
     case FSD_ACT_DOOR_OPEN:
+    case FSD_ACT_HAZARDS:
         return true;
     case FSD_ACT_CAMERA:
     case FSD_ACT_SEAT_DRIVER:
@@ -23,6 +24,54 @@ bool fsd_emit_supported(FsdBodyAction action) {
         return false;
     }
     return false;
+}
+
+/* byte 7 = (sum of bytes 0..6 + 0xEC) & 0xFF.
+ *
+ * Checked against every distinct 0x3E9 payload we hold -- 162, zero
+ * exceptions -- rather than against the handful the hazard capture happened to
+ * contain. A rule that fits four samples and a rule that fits 162 look the
+ * same until the day they do not. */
+static uint8_t hazard_check(const uint8_t* d) {
+    unsigned sum = 0;
+    for(unsigned i = 0; i < 7u; i++) sum += d[i];
+    return (uint8_t)((sum + FSD_EMIT_HAZARD_SUM_ADD) & 0xFFu);
+}
+
+static FsdEmitResult emit_hazards(const FsdEmitTemplate* t, uint32_t now_ms,
+                                  FsdEmitFrame* out) {
+    if(!t->seen) return FSD_EMIT_NO_TEMPLATE;
+    if(t->id != FSD_EMIT_HAZARD_ID) return FSD_EMIT_BAD_TEMPLATE;
+    if(t->dlc != FSD_EMIT_HAZARD_DLC) return FSD_EMIT_BAD_TEMPLATE;
+    if((uint32_t)(now_ms - t->seen_ms) >= FSD_EMIT_TEMPLATE_MAX_AGE_MS)
+        return FSD_EMIT_STALE_TEMPLATE;
+
+    /* 🔴 Staleness matters MORE here than for the other two. A copied
+     * light frame that is a second old is still a valid light frame; a hazard
+     * frame that is a second old carries a counter the car has already moved
+     * past, and the receiver has every reason to drop it. The shared bound is
+     * three of the car's own periods, which is the right order for a frame the
+     * car sends about every 495 ms. */
+
+    memset(out, 0, sizeof(*out));
+    out->id = FSD_EMIT_HAZARD_ID;
+    out->dlc = FSD_EMIT_HAZARD_DLC;
+    memcpy(out->data, t->data, FSD_EMIT_HAZARD_DLC);
+
+    out->data[FSD_EMIT_HAZARD_BYTE] |= FSD_EMIT_HAZARD_MASK;
+
+    /* The counter is the HIGH nibble; the low nibble is not ours and is copied
+     * through untouched (it is 0 or 2 in everything we have seen, and we do not
+     * know which of those means what). */
+    uint8_t cnt = (uint8_t)((out->data[FSD_EMIT_HAZARD_CNT_BYTE] >> 4) & 0x0Fu);
+    cnt = (uint8_t)((cnt + 1u) & 0x0Fu);
+    out->data[FSD_EMIT_HAZARD_CNT_BYTE] =
+        (uint8_t)((cnt << 4) | (out->data[FSD_EMIT_HAZARD_CNT_BYTE] & 0x0Fu));
+
+    /* Last, because the counter is inside the summed range. Doing it in the
+     * other order produces a frame that looks right and checks wrong. */
+    out->data[7] = hazard_check(out->data);
+    return FSD_EMIT_OK;
 }
 
 FsdEmitResult fsd_emit_build(FsdBodyAction action, const FsdEmitTemplate* t,
@@ -36,6 +85,12 @@ FsdEmitResult fsd_emit_build(FsdBodyAction action, const FsdEmitTemplate* t,
      * does NOT fit this shape it gets its own branch rather than a fourth
      * variable; 0x3E9 (hazards) is already known to be that case, because it
      * carries a counter and a check field and cannot be copied at all. */
+    /* Hazards take their own branch, exactly as the comment above the copy
+     * shape predicted they would: a counter and a check mean the frame is not
+     * a copy with a bit set, it is a copy REWRITTEN. Kept separate so nobody
+     * has to read the shared path wondering which of its steps apply. */
+    if(action == FSD_ACT_HAZARDS) return emit_hazards(t, now_ms, out);
+
     uint32_t want_id;
     uint8_t want_dlc, byte_ix, bits;
     switch(action) {

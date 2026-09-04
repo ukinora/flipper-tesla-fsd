@@ -103,6 +103,41 @@ extern "C" {
  * byte was zero on THIS car is not knowing what the other seven bytes mean,
  * and synthesising them would be a claim about fields we cannot read. Same
  * rule as 0x273, for a weaker-looking but identical reason. */
+/* THE HAZARD COMMAND. Measured 2026-09-05, when TSL turned the hazards on by
+ * itself because the car went into reverse -- a rule the owner had configured,
+ * and a fact only the owner could supply. Without that sentence these two
+ * injections were an unexplained pair.
+ *
+ *      (6.199) gear -> R
+ *      (6.881) 3E9#F18802000000C027     <- the car,  counter 0xC
+ *      (6.881) 3E9#F58802000000D03B     <- TSL, same ms, counter 0xD
+ *
+ * 🔴 THIS ONE CANNOT BE COPIED, AND THAT MAKES IT A DIFFERENT KIND OF
+ * EMITTER FROM THE OTHER TWO. 0x273 and 0x1F9 carry no counter and no check, so
+ * "copy the car's frame and set one field" produces a frame the car accepts.
+ * 0x3E9 carries both. A copied frame is a stale counter and a wrong check, and
+ * a receiver that validates either will drop it -- silently, which is the worst
+ * way for a hazard command to fail.
+ *
+ * Both rules were derived from captures, not assumed:
+ *
+ *   COUNTER  byte 6, high nibble. TSL sends the car's value PLUS ONE, wrapping
+ *            F -> 0. Four consecutive injections, all +1, no exception.
+ *
+ *   CHECK    byte 7 = (sum of bytes 0..6 + 0xEC) & 0xFF. Verified against
+ *            EVERY distinct 0x3E9 payload in every capture we hold -- 162 of
+ *            them, zero exceptions. The counter lives inside the summed range,
+ *            which is why advancing it and recomputing the check is one step.
+ *
+ * The 0xEC is this frame's constant and nothing else's. It is not a CRC
+ * polynomial and must not be reused for another id. */
+#define FSD_EMIT_HAZARD_ID       0x3E9u
+#define FSD_EMIT_HAZARD_BYTE     0u
+#define FSD_EMIT_HAZARD_MASK     0x04u
+#define FSD_EMIT_HAZARD_DLC      8u
+#define FSD_EMIT_HAZARD_CNT_BYTE 6u
+#define FSD_EMIT_HAZARD_SUM_ADD  0xECu
+
 #define FSD_EMIT_DOOR_ID         0x1F9u
 #define FSD_EMIT_DOOR_BYTE       1u
 #define FSD_EMIT_DOOR_MASK       0x03u
