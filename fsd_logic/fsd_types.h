@@ -254,6 +254,54 @@ static inline bool fsd_decode_profile_obs(const uint8_t* d, uint8_t dlc, uint8_t
  * Evidence: captures/2026-09-03/{유휴,맵등 켜기,우측앞문열기,조수석시트앞뒤}
  * versus captures/2026-09-03/속도프로파일4단계 (the one drive).
  */
+/* Turn indicators and hazards, from 0x3F5 VCFRONT_lighting byte 0.
+ *
+ * Measured 2026-09-05. This car's 0x311 UI_warning is TWO BYTES, so the
+ * dashboard's blinker fields -- documented in fsd_state.h as "UNVERIFIED on
+ * this car... the visit settles it" -- were never written at all. The visit
+ * settled it: not by confirming 0x311, but by finding the lamps elsewhere.
+ *
+ *      bit 0  left,  dark phase        bit 2  right, dark phase
+ *      bit 1  left,  lit  phase        bit 3  right, lit  phase
+ *      bit 4  hazards
+ *
+ * The 2-bit-per-side layout is NOT new -- can_signals.h already carried these
+ * shifts. What was new is that they are real on this car, and which of the two
+ * phases means "lit":
+ *
+ *      0x3F5 b0 = 0x02  <->  0x3E2 VCLEFT_lightStatus = 12 00 84 ...
+ *      0x3F5 b0 = 0x01  <->  0x3E2 VCLEFT_lightStatus = 02 00 80 ...  (baseline)
+ *      0x3F5 b0 = 0x08  <->  0x3E3 = 10000000
+ *      0x3F5 b0 = 0x04  <->  0x3E3 = 00000000
+ *
+ * Two frames from two controllers agree: the HIGHER bit of each pair is the
+ * lamp actually alight. That matches the wire encoding (0 off / 1 dark / 2 lit)
+ * exactly, which is why this returns the raw 2-bit field untouched.
+ *
+ * Cross-checked against the hazards: a person pressing the button gives
+ * 0x1A <-> 0x15, and TSL turning them on for reverse gives 0x7A <-> 0x75 --
+ * identical in the low five bits, and 0x1A = 0x08|0x02|0x10 is precisely both
+ * sides lit at once.
+ *
+ * 🔴 Which pair is LEFT is measured, not assumed. Two independent lines
+ * agree: VCLEFT changes its own byte during the 0x01/0x02 segment, and the
+ * owner confirmed the group blinking immediately before the hazards was the
+ * RIGHT one -- which in the capture is 0x08/0x04. */
+#define FSD_BLINK_LEFT_SHIFT  0u
+#define FSD_BLINK_RIGHT_SHIFT 2u
+#define FSD_BLINK_MASK        0x03u
+#define FSD_BLINK_HAZARD      0x10u
+
+static inline bool fsd_decode_blinkers(const uint8_t* d, uint8_t dlc,
+                                       uint8_t* left, uint8_t* right,
+                                       bool* hazard) {
+    if(!d || dlc < 1u) return false;
+    if(left) *left = (uint8_t)((d[0] >> FSD_BLINK_LEFT_SHIFT) & FSD_BLINK_MASK);
+    if(right) *right = (uint8_t)((d[0] >> FSD_BLINK_RIGHT_SHIFT) & FSD_BLINK_MASK);
+    if(hazard) *hazard = (d[0] & FSD_BLINK_HAZARD) != 0u;
+    return true;
+}
+
 static inline bool fsd_decode_das_state_b0(const uint8_t* d, uint8_t dlc, uint8_t* out) {
     if(!d || !out || dlc < 1u) return false;
     *out = d[0] & 0x0Fu;

@@ -2831,6 +2831,68 @@ static void test_profile_observed(void) {
      * against this mask in test_wire.c where both headers are in scope. */
 }
 
+/* Turn indicators, from the bytes the car actually sent.
+ *
+ * captures/2026-09-05/좌우비상등 (unfiltered) and .../후진.
+ * Every constant below is copied out of a capture; none is hand-built.
+ */
+static void test_blinker_decode(void) {
+    printf("\n-- 0x3F5 byte0: turn indicators and hazards --\n");
+
+    uint8_t l = 9, r = 9;
+    bool hz = true;
+
+    /* Nothing on. 10 seconds of idle never left this value. */
+    CHECK(fsd_decode_blinkers((const uint8_t[]){0x00}, 1, &l, &r, &hz), "decodes");
+    CHECK(l == 0 && r == 0 && !hz, "0x00 = all off, got l=%u r=%u hz=%d",
+          l, r, (int)hz);
+
+    /* Left indicator, the two phases. Measured t=5.971 / t=6.427, and paired
+     * with 0x3E2 VCLEFT_lightStatus leaving / returning to its baseline. */
+    CHECK(fsd_decode_blinkers((const uint8_t[]){0x02}, 1, &l, &r, &hz), "decodes");
+    CHECK(l == 2 && r == 0 && !hz, "0x02 = left lit, got l=%u r=%u", l, r);
+    CHECK(fsd_decode_blinkers((const uint8_t[]){0x01}, 1, &l, &r, &hz), "decodes");
+    CHECK(l == 1 && r == 0 && !hz, "0x01 = left dark, got l=%u r=%u", l, r);
+
+    /* Right indicator. Measured t=1.927 / t=2.121, paired with 0x3E3. */
+    CHECK(fsd_decode_blinkers((const uint8_t[]){0x08}, 1, &l, &r, &hz), "decodes");
+    CHECK(l == 0 && r == 2 && !hz, "0x08 = right lit, got l=%u r=%u", l, r);
+    CHECK(fsd_decode_blinkers((const uint8_t[]){0x04}, 1, &l, &r, &hz), "decodes");
+    CHECK(l == 0 && r == 1 && !hz, "0x04 = right dark, got l=%u r=%u", l, r);
+
+    /* Hazards, pressed by a person. t=9.641 / t=9.991.
+     * 0x1A is exactly 0x08|0x02|0x10 -- both sides lit at once, which is what
+     * makes this a hazard and not a turn. */
+    CHECK(fsd_decode_blinkers((const uint8_t[]){0x1A}, 1, &l, &r, &hz), "decodes");
+    CHECK(l == 2 && r == 2 && hz, "0x1A = both lit + hazard, got l=%u r=%u hz=%d",
+          l, r, (int)hz);
+    CHECK(fsd_decode_blinkers((const uint8_t[]){0x15}, 1, &l, &r, &hz), "decodes");
+    CHECK(l == 1 && r == 1 && hz, "0x15 = both dark + hazard, got l=%u r=%u hz=%d",
+          l, r, (int)hz);
+
+    /* 🔴 Hazards again, but turned on by TSL when the car went into
+     * reverse. Different upper bits (0x60, which the turn indicators are not),
+     * IDENTICAL low five. Two different senders, one meaning -- that is the
+     * cross-check that says this reading is about the car and not about the
+     * one capture it came from. */
+    CHECK(fsd_decode_blinkers((const uint8_t[]){0x7A}, 1, &l, &r, &hz), "decodes");
+    CHECK(l == 2 && r == 2 && hz, "0x7A (TSL, reverse) reads like 0x1A");
+    CHECK(fsd_decode_blinkers((const uint8_t[]){0x75}, 1, &l, &r, &hz), "decodes");
+    CHECK(l == 1 && r == 1 && hz, "0x75 (TSL, reverse) reads like 0x15");
+
+    /* An empty frame is not "everything off". */
+    CHECK(!fsd_decode_blinkers((const uint8_t[]){0x00}, 0, &l, &r, &hz),
+          "dlc 0 refused");
+    CHECK(!fsd_decode_blinkers(NULL, 1, &l, &r, &hz), "null refused");
+
+    /* The shifts must not drift apart from can_signals.h, which the ESP32
+     * handler uses. Stated as literals so changing one and not the other is
+     * a red test rather than a dashboard that swaps left for right. */
+    CHECK(FSD_BLINK_LEFT_SHIFT == 0u, "left is the low pair");
+    CHECK(FSD_BLINK_RIGHT_SHIFT == 2u, "right is the next pair");
+    CHECK(FSD_BLINK_HAZARD == 0x10u, "hazard is bit 4");
+}
+
 static void test_tpms_decode(void) {
     printf("\n-- 0x219: mux 5 carries the pressures --\n");
 
@@ -3508,6 +3570,7 @@ int main(void) {
     test_owner();
     test_ble_session();
     test_speed_observer();
+    test_blinker_decode();
     test_tpms_decode();
     test_das_state_alt();
     test_profile_observed();
