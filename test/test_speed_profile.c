@@ -360,7 +360,7 @@ static void test_apply_scroll(void) {
 static void test_encoding_is_table_driven(void) {
     FsdSpeedProfile sp;
     ready(&sp);
-    sp.enc.tick_toward_higher = -2; // pretend the capture says the opposite
+    sp.enc.tick_toward_faster = -2; // pretend the capture says the opposite
     uint8_t buf[8];
     memset(buf, 0, sizeof(buf));
     buf[0] = 0x01;
@@ -477,21 +477,21 @@ static void test_out_of_range_detent_is_refused(void) {
     ready(&sp);
     uint8_t buf[8];
 
-    sp.enc.tick_toward_higher = 40;  // outside 6-bit signed
+    sp.enc.tick_toward_faster = 40;  // outside 6-bit signed
     memset(buf, 0, sizeof(buf));
     buf[0] = 0x01;
     CHECK(!fsd_sp_apply_scroll(&sp, FSD_SP_ACT_TICK_UP, buf, 8),
           "detent +40 does not fit 6 bits — must be refused, got byte3=0x%02X",
           buf[3]);
 
-    sp.enc.tick_toward_higher = -40;
+    sp.enc.tick_toward_faster = -40;
     memset(buf, 0, sizeof(buf));
     buf[0] = 0x01;
     CHECK(!fsd_sp_apply_scroll(&sp, FSD_SP_ACT_TICK_UP, buf, 8),
           "detent -40 does not fit 6 bits — must be refused");
 
     // A zero detent is not a movement; emitting it burns budget for nothing.
-    sp.enc.tick_toward_higher = 0;
+    sp.enc.tick_toward_faster = 0;
     memset(buf, 0, sizeof(buf));
     buf[0] = 0x01;
     CHECK(!fsd_sp_apply_scroll(&sp, FSD_SP_ACT_TICK_UP, buf, 8),
@@ -500,14 +500,14 @@ static void test_out_of_range_detent_is_refused(void) {
     // -32 fits the field but its negation (+32) does not: it wraps back to -32,
     // so UP and DOWN would put the identical value on the wire. The usable
     // range has to be symmetric, which makes -32 invalid despite fitting.
-    sp.enc.tick_toward_higher = -32;
+    sp.enc.tick_toward_faster = -32;
     memset(buf, 0, sizeof(buf));
     buf[0] = 0x01;
     CHECK(!fsd_sp_apply_scroll(&sp, FSD_SP_ACT_TICK_UP, buf, 8),
           "-32 must be refused: negating it does not fit, so UP == DOWN");
 
     // The real edges stay valid and stay distinguishable.
-    sp.enc.tick_toward_higher = 31;
+    sp.enc.tick_toward_faster = 31;
     memset(buf, 0, sizeof(buf));
     buf[0] = 0x01;
     CHECK(fsd_sp_apply_scroll(&sp, FSD_SP_ACT_TICK_UP, buf, 8), "+31 is valid");
@@ -517,7 +517,7 @@ static void test_out_of_range_detent_is_refused(void) {
     CHECK(fsd_sp_apply_scroll(&sp, FSD_SP_ACT_TICK_DOWN, buf, 8), "-31 is valid");
     CHECK(buf[3] == 0x21, "byte3=0x%02X exp 0x21 (6-bit -31)", buf[3]);
 
-    sp.enc.tick_toward_higher = -31;
+    sp.enc.tick_toward_faster = -31;
     memset(buf, 0, sizeof(buf));
     buf[0] = 0x01;
     CHECK(fsd_sp_apply_scroll(&sp, FSD_SP_ACT_TICK_UP, buf, 8), "-31 as UP is valid");
@@ -530,12 +530,12 @@ static void test_bad_encoding_refuses_requests(void) {
     FsdSpInputs in = good_inputs(0);
 
     ready(&sp);
-    sp.enc.tick_toward_higher = 40;
+    sp.enc.tick_toward_faster = 40;
     CHECK(fsd_sp_request(&sp, &in, 3, 1000) == FSD_SP_ERR_UNVERIFIED,
           "out-of-range detent must refuse the request, not just the write");
 
     ready(&sp);
-    sp.enc.tick_toward_higher = 0;
+    sp.enc.tick_toward_faster = 0;
     CHECK(fsd_sp_request(&sp, &in, 3, 1000) == FSD_SP_ERR_UNVERIFIED,
           "zero detent must refuse the request");
 
@@ -557,6 +557,288 @@ static void test_bad_encoding_refuses_requests(void) {
     CHECK(!fsd_sp_encoding_ok(&sp.enc), "shipped table is unverified");
     ready(&sp);
     CHECK(fsd_sp_encoding_ok(&sp.enc), "a verified, in-range table passes");
+}
+
+
+// ── the car's own scale (4th visit, 2026-09-05 + 2nd visit, 2026-09-03) ──────
+//
+// Frames below are COPIED OUT OF THE CAPTURES, byte for byte. A test built from
+// the table could only prove the table agrees with itself.
+
+// The car's idle 0x3C2 mux-1 frame, and the two the commercial device inserted
+// 0-1 ms behind it. Every byte but byte3 is identical, which is the finding.
+static const uint8_t CAR_IDLE[8]   = {0x29, 0x55, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80};
+static const uint8_t TSL_PLUS1[8]  = {0x29, 0x55, 0x00, 0x01, 0x00, 0x00, 0x00, 0x80};
+static const uint8_t TSL_PLUS5[8]  = {0x29, 0x55, 0x00, 0x05, 0x00, 0x00, 0x00, 0x80};
+
+static void test_raw_scale_is_measured_and_not_monotonic(void) {
+    // Measured on the car, 2nd visit (2026-09-03, gear D): one +1 detent walked
+    // 0x3FD from Sloth to Chill to Standard to Hurry, and the values it read
+    // back were 4, 0, 1, 2. Slowest first.
+    CHECK(FSD_SP_RAW_BY_RANK[0] == 4u, "rank 0 (Sloth) raw=%u exp 4",
+          FSD_SP_RAW_BY_RANK[0]);
+    CHECK(FSD_SP_RAW_BY_RANK[1] == 0u, "rank 1 (Chill) raw=%u exp 0",
+          FSD_SP_RAW_BY_RANK[1]);
+    CHECK(FSD_SP_RAW_BY_RANK[2] == 1u, "rank 2 (Standard) raw=%u exp 1",
+          FSD_SP_RAW_BY_RANK[2]);
+    CHECK(FSD_SP_RAW_BY_RANK[3] == 2u, "rank 3 (Hurry) raw=%u exp 2",
+          FSD_SP_RAW_BY_RANK[3]);
+
+    // 🔴 The whole reason this table exists, stated as an assertion: the raw
+    // numbers do NOT rise with speed. Sloth (4) sorts above Hurry (2), so a
+    // direction taken from the sign of a raw difference points the wrong way.
+    int raw_monotonic = 1;
+    for(unsigned i = 1; i < FSD_SP_PROFILE_COUNT; i++) {
+        if(FSD_SP_RAW_BY_RANK[i] > FSD_SP_RAW_BY_RANK[i - 1]) continue;
+        raw_monotonic = 0;
+    }
+    CHECK(!raw_monotonic, "raw CAN values must NOT be ordered by speed");
+    CHECK(FSD_SP_RAW_BY_RANK[0] > FSD_SP_RAW_BY_RANK[FSD_SP_PROFILE_MAX],
+          "raw Sloth (%u) must sort above raw Hurry (%u) — a numeric clamp inverts",
+          FSD_SP_RAW_BY_RANK[0], FSD_SP_RAW_BY_RANK[FSD_SP_PROFILE_MAX]);
+
+    // The named constants and the ordered table are the same statement.
+    CHECK(FSD_SP_RAW_SLOTH == 4u && FSD_SP_RAW_CHILL == 0u &&
+          FSD_SP_RAW_STANDARD == 1u && FSD_SP_RAW_HURRY == 2u,
+          "named raw constants must match the capture");
+}
+
+static void test_rank_conversion_round_trips(void) {
+    for(uint8_t rank = 0; rank <= FSD_SP_PROFILE_MAX; rank++) {
+        uint8_t raw = 0xFFu, back = 0xFFu;
+        CHECK(fsd_sp_raw_from_rank(rank, &raw), "rank %u must convert", rank);
+        CHECK(fsd_sp_rank_from_raw(raw, &back), "raw %u must convert back", raw);
+        CHECK(back == rank, "round trip rank %u -> raw %u -> rank %u", rank, raw,
+              back);
+    }
+
+    // Values the car has never sent are not profiles. Saying "unknown" is the
+    // point: a mis-decoded frame that looks like a profile is worse than one
+    // that looks like nothing, because the clamp would trust it.
+    uint8_t r = 0xEEu;
+    CHECK(!fsd_sp_rank_from_raw(3u, &r), "raw 3 is not a value this car sends");
+    CHECK(r == 0xEEu, "a refused conversion must not touch the output");
+    CHECK(!fsd_sp_rank_from_raw(7u, &r), "raw 7 (HW4 range) must be refused");
+    CHECK(!fsd_sp_rank_from_raw(255u, &r), "raw 255 must be refused");
+    uint8_t raw = 0xEEu;
+    CHECK(!fsd_sp_raw_from_rank(4u, &raw), "rank 4 does not exist");
+    CHECK(raw == 0xEEu, "a refused conversion must not touch the output");
+    CHECK(!fsd_sp_rank_from_raw(0u, NULL), "NULL out must be refused");
+    CHECK(!fsd_sp_raw_from_rank(0u, NULL), "NULL out must be refused");
+}
+
+// The concrete harm, and the boundary that prevents it.
+static void test_observe_raw_is_the_boundary(void) {
+    FsdSpeedProfile sp;
+    ready(&sp);
+    FsdSpInputs in = good_inputs(FSD_SP_PROFILE_MAX); // Hurry, as a rank
+    CHECK(fsd_sp_request(&sp, &in, 0, 1000) == FSD_SP_OK, "Hurry -> Sloth ok");
+
+    // 🔴 Feeding the RAW value straight in is the mistake. Raw Sloth is 4,
+    // which is outside the rank scale, so fsd_sp_observe() drops it: the car
+    // reaches the target and the machine never notices.
+    fsd_sp_observe(&sp, FSD_SP_RAW_SLOTH, 1100);
+    CHECK(sp.observed == FSD_SP_PROFILE_MAX,
+          "raw 4 fed to observe() must be ignored, observed=%u", sp.observed);
+
+    // Through the boundary it lands as rank 0 and the request converges.
+    CHECK(fsd_sp_observe_raw(&sp, FSD_SP_RAW_SLOTH, 1100),
+          "observe_raw must accept raw Sloth");
+    CHECK(sp.observed == 0u, "raw 4 must land as rank 0, got %u", sp.observed);
+
+    // And a value the car never sends is reported as unknown, not silently
+    // taken as some profile.
+    CHECK(!fsd_sp_observe_raw(&sp, 3u, 1200), "raw 3 must be refused");
+    CHECK(sp.observed == 0u, "a refused raw value must not move observed");
+    CHECK(!fsd_sp_observe_raw(NULL, FSD_SP_RAW_CHILL, 1200),
+          "observe_raw(NULL) is a no-op");
+}
+
+// ── the wire, against the bytes the commercial device actually sent ─────────
+static void test_detents_match_the_captured_frames(void) {
+    FsdSpeedProfile sp;
+    ready(&sp);
+    uint8_t buf[8];
+
+    // +1: our bytes must equal the device's bytes, all eight of them.
+    memcpy(buf, CAR_IDLE, sizeof(buf));
+    CHECK(fsd_sp_apply_detents(&sp, 1, buf, 8), "+1 must be accepted");
+    CHECK(memcmp(buf, TSL_PLUS1, sizeof(buf)) == 0,
+          "+1 frame must equal the captured one: got %02X%02X%02X%02X%02X%02X%02X%02X",
+          buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7]);
+
+    // +5: ONE frame carrying five, not five frames carrying one. This is the
+    // 4th visit's finding and the reason this function exists at all.
+    memcpy(buf, CAR_IDLE, sizeof(buf));
+    CHECK(fsd_sp_apply_detents(&sp, 5, buf, 8), "+5 must be accepted");
+    CHECK(memcmp(buf, TSL_PLUS5, sizeof(buf)) == 0,
+          "+5 frame must equal the captured one: got %02X%02X%02X%02X%02X%02X%02X%02X",
+          buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7]);
+
+    // Turned around: the decoder must read the device's own frames back as the
+    // counts a human read off the capture.
+    int8_t n = 0;
+    CHECK(fsd_sp_read_detents(TSL_PLUS1, 8, &n) && n == 1,
+          "captured +1 frame must read back as 1, got %d", n);
+    CHECK(fsd_sp_read_detents(TSL_PLUS5, 8, &n) && n == 5,
+          "captured +5 frame must read back as 5, got %d", n);
+    CHECK(fsd_sp_read_detents(CAR_IDLE, 8, &n) && n == 0,
+          "the car's own idle frame must read back as 0, got %d", n);
+}
+
+// The negatives were measured too — 2nd visit, the owner turning the wheel by
+// hand. Two's complement, so they are the interesting half.
+static void test_negative_detents_are_twos_complement(void) {
+    FsdSpeedProfile sp;
+    ready(&sp);
+    uint8_t buf[8];
+
+    // Captured byte3 values and the detent counts the capture attributes to
+    // them: 0x3E = -2, 0x3D = -3, 0x3C = -4, 0x3B = -5.
+    static const struct { uint8_t byte3; int8_t detents; } CAPTURED[] = {
+        {0x3Eu, -2}, {0x3Du, -3}, {0x3Cu, -4}, {0x3Bu, -5},
+    };
+    for(unsigned i = 0; i < sizeof(CAPTURED) / sizeof(CAPTURED[0]); i++) {
+        memcpy(buf, CAR_IDLE, sizeof(buf));
+        CHECK(fsd_sp_apply_detents(&sp, CAPTURED[i].detents, buf, 8),
+              "%d must be accepted", CAPTURED[i].detents);
+        CHECK(buf[3] == CAPTURED[i].byte3,
+              "%d -> byte3=0x%02X exp 0x%02X", CAPTURED[i].detents, buf[3],
+              CAPTURED[i].byte3);
+
+        uint8_t frame[8];
+        memcpy(frame, CAR_IDLE, sizeof(frame));
+        frame[3] = CAPTURED[i].byte3;
+        int8_t n = 0;
+        CHECK(fsd_sp_read_detents(frame, 8, &n) && n == CAPTURED[i].detents,
+              "0x%02X must read back as %d, got %d", CAPTURED[i].byte3,
+              CAPTURED[i].detents, n);
+    }
+
+    // Symmetry: +n and -n are the same magnitude, and the field never confuses
+    // them. 0x3F is -1, not +63 — without sign extension a scroll DOWN would
+    // be reported as a large scroll UP.
+    for(int8_t n = 1; n <= FSD_SP_DETENT_MAX; n++) {
+        uint8_t up[8], down[8];
+        memcpy(up, CAR_IDLE, sizeof(up));
+        memcpy(down, CAR_IDLE, sizeof(down));
+        CHECK(fsd_sp_apply_detents(&sp, n, up, 8) &&
+              fsd_sp_apply_detents(&sp, (int8_t)-n, down, 8),
+              "+/-%d must both be accepted", n);
+        CHECK(up[3] != down[3], "+%d and -%d must differ on the wire", n, n);
+        int8_t a = 0, b = 0;
+        CHECK(fsd_sp_read_detents(up, 8, &a) && a == n,
+              "+%d round trip got %d", n, a);
+        CHECK(fsd_sp_read_detents(down, 8, &b) && b == (int8_t)-n,
+              "-%d round trip got %d", n, b);
+    }
+}
+
+static void test_detent_writer_is_gated_and_bounded(void) {
+    // 🔴 The shipped encoding is UNVERIFIED, so the writer must refuse even a
+    // perfectly legal count. This is the flag that stands between us and a car
+    // with a recorded emergency-braking incident; a new function must not
+    // become the way around it.
+    FsdSpeedProfile shipped;
+    fsd_sp_init(&shipped);
+    uint8_t buf[8];
+    memcpy(buf, CAR_IDLE, sizeof(buf));
+    CHECK(!fsd_sp_apply_detents(&shipped, 1, buf, 8),
+          "the shipped (unverified) encoding must refuse to build a frame");
+    CHECK(memcmp(buf, CAR_IDLE, sizeof(buf)) == 0,
+          "a refused write must not touch the frame");
+
+    FsdSpeedProfile sp;
+    ready(&sp);
+    // 0 moves nothing; out-of-range values would be MASKED into the opposite
+    // direction rather than clamped (+40 lands on the wire as -24).
+    static const int16_t BAD[] = {0, 32, -32, 40, -40, 127, -128};
+    for(unsigned i = 0; i < sizeof(BAD) / sizeof(BAD[0]); i++) {
+        memcpy(buf, CAR_IDLE, sizeof(buf));
+        CHECK(!fsd_sp_apply_detents(&sp, (int8_t)BAD[i], buf, 8),
+              "detent %d must be refused", BAD[i]);
+        CHECK(buf[3] == 0x00u, "detent %d must not touch the frame", BAD[i]);
+    }
+
+    // mux 0 is the seat/window/button view — writing byte3 there moves a seat.
+    //
+    // These four byte0 values are every one this car was seen to send on 0x3C2
+    // across three visits: idle mux 0, and the three button presses (horn,
+    // hazard button, driver-present). All of them are mux 0, and none of them
+    // may be mistaken for a scroll frame.
+    //
+    // ⚠️ What these frames CANNOT settle is the width of the selector itself.
+    // 0x00/0x04/0x08/0x10 are refused whether the mask is 2 or 3 bits, and the
+    // scroll frame's 0x29 is mux 1 under either. Only a mux-1 frame WITH one of
+    // those switch bits set would tell them apart, and no capture has one. The
+    // mask stays at 2 bits because the 4th visit showed 0x04 is "mux 0 with the
+    // horn pressed" rather than a mux 4 that does not exist — a 3-bit mask
+    // would read it as the latter.
+    static const uint8_t MUX0_BYTE0[] = {0x00u, 0x04u, 0x08u, 0x10u};
+    for(unsigned i = 0; i < sizeof(MUX0_BYTE0) / sizeof(MUX0_BYTE0[0]); i++) {
+        uint8_t m0[8] = {MUX0_BYTE0[i], 0x55u, 0x55u, 0x55u,
+                         0x00u,         0x00u, 0x69u, 0x85u};
+        int8_t junk = 0;
+        CHECK(!fsd_sp_apply_detents(&sp, 1, m0, 8),
+              "byte0=0x%02X is mux 0 — must be refused", MUX0_BYTE0[i]);
+        CHECK(m0[3] == 0x55u, "a refused write must not touch byte3");
+        CHECK(!fsd_sp_read_detents(m0, 8, &junk),
+              "byte0=0x%02X is mux 0 — byte3 there is not a detent",
+              MUX0_BYTE0[i]);
+    }
+
+    memcpy(buf, CAR_IDLE, sizeof(buf));
+    buf[0] = 0x00u;
+    CHECK(!fsd_sp_apply_detents(&sp, 1, buf, 8), "mux 0 must be refused");
+    CHECK(!fsd_sp_read_detents(buf, 8, NULL) , "read with NULL out is refused");
+    int8_t n = 0;
+    CHECK(!fsd_sp_read_detents(buf, 8, &n), "mux 0 must not be read as a detent");
+    CHECK(!fsd_sp_apply_detents(&sp, 1, buf, 3), "DLC 3 has no byte3");
+    CHECK(!fsd_sp_apply_detents(&sp, 1, NULL, 8), "NULL buf is refused");
+    CHECK(!fsd_sp_apply_detents(NULL, 1, buf, 8), "NULL sp is refused");
+    CHECK(!fsd_sp_read_detents(NULL, 8, &n), "NULL buf is refused");
+
+    // Bits 6-7 of byte3 belong to other signals and must survive.
+    memcpy(buf, CAR_IDLE, sizeof(buf));
+    buf[3] = 0xC0u;
+    CHECK(fsd_sp_apply_detents(&sp, 5, buf, 8), "accept");
+    CHECK(buf[3] == 0xC5u, "must preserve byte3 bits 6-7: 0x%02X exp 0xC5", buf[3]);
+}
+
+// 🔴 Filling the table in is NOT the same as arming it. Every field above is
+// measured, and the gate must still be shut.
+static void test_measured_table_is_still_not_verified(void) {
+    FsdSpeedProfile sp;
+    fsd_sp_init(&sp);
+
+    CHECK(FSD_SP_ENCODING_DEFAULT.tick_toward_faster == 1,
+          "measured: +1 detent = one step toward FASTER, got %d",
+          FSD_SP_ENCODING_DEFAULT.tick_toward_faster);
+    CHECK(FSD_SP_ENCODING_DEFAULT.ticks_per_step == 1,
+          "measured: one detent, one step, got %u",
+          FSD_SP_ENCODING_DEFAULT.ticks_per_step);
+    CHECK(FSD_SP_ENCODING_DEFAULT.wrap == false,
+          "the ends saturate; and with the top end unobserved, false is also "
+          "the conservative value");
+
+    CHECK(FSD_SP_ENCODING_DEFAULT.verified == false,
+          "the shipped table must stay UNVERIFIED — the top end was never "
+          "observed (the car was parked) and arming is the owner's decision");
+    CHECK(!fsd_sp_encoding_ok(&FSD_SP_ENCODING_DEFAULT),
+          "an unverified table must not pass the gate, however complete it is");
+    CHECK(!fsd_sp_encoding_ok(&sp.enc),
+          "a freshly initialised machine must not pass the gate");
+
+    FsdSpInputs in = good_inputs(0);
+    CHECK(fsd_sp_request(&sp, &in, FSD_SP_PROFILE_MAX, 1000) == FSD_SP_ERR_UNVERIFIED,
+          "a request against the shipped table must be refused as UNVERIFIED");
+
+    // ...and flipping just that one field is what opens it. Stated here so the
+    // day someone flips it, this test says out loud what changed.
+    FsdSpEncoding armed = FSD_SP_ENCODING_DEFAULT;
+    armed.verified = true;
+    CHECK(fsd_sp_encoding_ok(&armed),
+          "the measured table is complete: `verified` is the only thing left");
 }
 
 int main(void) {
@@ -583,6 +865,13 @@ int main(void) {
     test_converged_result_survives_a_late_precondition_loss();
     test_out_of_range_detent_is_refused();
     test_bad_encoding_refuses_requests();
+    test_raw_scale_is_measured_and_not_monotonic();
+    test_rank_conversion_round_trips();
+    test_observe_raw_is_the_boundary();
+    test_detents_match_the_captured_frames();
+    test_negative_detents_are_twos_complement();
+    test_detent_writer_is_gated_and_bounded();
+    test_measured_table_is_still_not_verified();
 
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
