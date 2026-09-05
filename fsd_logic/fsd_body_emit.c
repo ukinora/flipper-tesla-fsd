@@ -3,7 +3,7 @@
 #include <string.h>
 
 bool fsd_emit_supported(FsdBodyAction action) {
-    /* Three actions, and they match the three armable rows in fsd_body.c. Written
+    /* Four actions, and they match the four armable rows in fsd_body.c. Written
      * as a switch rather than a comparison so that adding an action to the enum
      * without deciding about it here is a compiler warning, not a silent "no".
      *
@@ -14,6 +14,7 @@ bool fsd_emit_supported(FsdBodyAction action) {
     case FSD_ACT_MAP_LIGHT:
     case FSD_ACT_DOOR_OPEN:
     case FSD_ACT_HAZARDS:
+    case FSD_ACT_TURN_SIGNAL:
         return true;
     case FSD_ACT_CAMERA:
     case FSD_ACT_SEAT_DRIVER:
@@ -52,6 +53,41 @@ const char* fsd_emit_door_str(int32_t door) {
     case FSD_EMIT_DOOR_RIGHT_FRONT: return "right front";
     case FSD_EMIT_DOOR_RIGHT_REAR: return "right rear";
     case FSD_EMIT_DOOR_COUNT: break;
+    }
+    return "?";
+}
+
+/* Turn-signal selector -> byte2 stalk field. A switch for the same reason the
+ * door is one: an unmeasured selector must be a compiler warning here, not an
+ * index into whatever follows. */
+bool fsd_emit_turn_bits(int32_t turn, uint8_t* bits_out) {
+    if(!bits_out) return false;
+    switch((FsdEmitTurn)turn) {
+    case FSD_EMIT_TURN_LEFT:
+        *bits_out = FSD_EMIT_TURN_LEFT_BITS;
+        return true;
+    case FSD_EMIT_TURN_RIGHT:
+        *bits_out = FSD_EMIT_TURN_RIGHT_BITS;
+        return true;
+    case FSD_EMIT_TURN_CANCEL:
+        *bits_out = FSD_EMIT_TURN_CANCEL_BITS;
+        return true;
+    case FSD_EMIT_TURN_COUNT:
+        break;
+    }
+    /* 🔴 Includes DOWN_1 (0x06), the other half tap. It is in every capture --
+     * a person passes through it on the way to a left indicator -- but nobody
+     * has sent it ALONE, so whether it cancels the way UP_1 does is unknown.
+     * Seen is not measured. */
+    return false;
+}
+
+const char* fsd_emit_turn_str(int32_t turn) {
+    switch((FsdEmitTurn)turn) {
+    case FSD_EMIT_TURN_LEFT: return "left";
+    case FSD_EMIT_TURN_RIGHT: return "right";
+    case FSD_EMIT_TURN_CANCEL: return "cancel";
+    case FSD_EMIT_TURN_COUNT: break;
     }
     return "?";
 }
@@ -104,22 +140,103 @@ static FsdEmitResult emit_hazards(const FsdEmitTemplate* t, uint32_t now_ms,
     return FSD_EMIT_OK;
 }
 
+/* ── the stalk check table ───────────────────────────────────────────────────
+ *
+ * GENERATED. tools/derive_stalk_check.py reads every 0x249 frame in every
+ * capture we hold and prints exactly these numbers. Do not edit by hand; run
+ * the script, and if it disagrees with what is here then the captures changed
+ * and this table is the thing that is wrong.
+ *
+ * byte0 = BASE[counter] ^ DELTA[stalk]. See the header for why a table and not
+ * a formula, and for the leave-one-out cross-validation. */
+static const uint8_t FSD_EMIT_TURN_CHECK_BASE[16] = {
+    0x9Bu, 0xE8u, 0x2Au, 0xD3u,
+    0xD3u, 0x83u, 0x4Cu, 0x5Eu,
+    0x3Fu, 0x5Eu, 0xE2u, 0x28u,
+    0x3Au, 0x13u, 0xAFu, 0xCEu,
+};
+
+/* Written as a switch, not an array indexed by the stalk value, so that a
+ * stalk position nobody measured cannot reach the table at all. `false` here
+ * and FSD_EMIT_NO_CHECK at the call site. */
+static bool turn_check_delta(uint8_t stalk, uint8_t* delta_out) {
+    switch(stalk) {
+    case 0x00u: *delta_out = 0x00u; return true; /* idle */
+    case 0x02u: *delta_out = 0x1Cu; return true; /* UP_1   -- cancel */
+    case 0x04u: *delta_out = 0x38u; return true; /* UP_2   -- right */
+    case 0x06u: *delta_out = 0x24u; return true; /* DOWN_1 */
+    case 0x08u: *delta_out = 0x70u; return true; /* DOWN_2 -- left */
+    default: return false;
+    }
+}
+
+static FsdEmitResult emit_turn_signal(int32_t arg, const FsdEmitTemplate* t,
+                                      uint32_t now_ms, FsdEmitFrame* out) {
+    /* 🔴 The selector is judged BEFORE the template, same as the door. An
+     * unmeasured direction must not get as far as "the template was stale",
+     * which reads like something waiting would fix. */
+    uint8_t stalk = 0;
+    if(!fsd_emit_turn_bits(arg, &stalk)) return FSD_EMIT_NO_ENCODING;
+
+    if(!t->seen) return FSD_EMIT_NO_TEMPLATE;
+    if(t->id != FSD_EMIT_TURN_ID) return FSD_EMIT_BAD_TEMPLATE;
+    if(t->dlc != FSD_EMIT_TURN_DLC) return FSD_EMIT_BAD_TEMPLATE;
+    if((uint32_t)(now_ms - t->seen_ms) >= FSD_EMIT_TEMPLATE_MAX_AGE_MS)
+        return FSD_EMIT_STALE_TEMPLATE;
+
+    /* 🔴 THE EDGE OF THE MEASURED REGION, checked before anything is built.
+     * Every frame the table was derived from had the high beams and the washer
+     * idle, and the CRC covers both. A template with either one set is a frame
+     * we have never seen the check byte for. */
+    if(t->data[FSD_EMIT_TURN_CNT_BYTE] & FSD_EMIT_TURN_B1_UNKNOWN) return FSD_EMIT_NO_CHECK;
+    if(t->data[FSD_EMIT_TURN_STALK_BYTE] & FSD_EMIT_TURN_B2_UNKNOWN) return FSD_EMIT_NO_CHECK;
+    if(t->data[3] != 0u) return FSD_EMIT_NO_CHECK;
+
+    uint8_t cnt = (uint8_t)((t->data[FSD_EMIT_TURN_CNT_BYTE] + 1u) & FSD_EMIT_TURN_CNT_MASK);
+
+    uint8_t delta = 0;
+    /* Cannot fail for the three selectors above; checked anyway, because the
+     * day somebody adds one the failure has to be a refusal and not a frame
+     * built out of an uninitialised byte. */
+    if(!turn_check_delta(stalk, &delta)) return FSD_EMIT_NO_CHECK;
+
+    memset(out, 0, sizeof(*out));
+    out->id = FSD_EMIT_TURN_ID;
+    out->dlc = FSD_EMIT_TURN_DLC;
+    memcpy(out->data, t->data, FSD_EMIT_TURN_DLC);
+
+    out->data[FSD_EMIT_TURN_CNT_BYTE] = cnt;
+    /* Only our three bits. The rest of byte 2 is opendbc's leftStalkReserved1,
+     * and the guard above has already established it is zero -- but writing the
+     * whole byte would still be a claim about a field we do not read. */
+    out->data[FSD_EMIT_TURN_STALK_BYTE] =
+        (uint8_t)((out->data[FSD_EMIT_TURN_STALK_BYTE] & (uint8_t)~FSD_EMIT_TURN_STALK_MASK) |
+                  (stalk & FSD_EMIT_TURN_STALK_MASK));
+
+    /* Last, and from the bytes we just wrote -- not from the template's. */
+    out->data[FSD_EMIT_TURN_CHK_BYTE] = (uint8_t)(FSD_EMIT_TURN_CHECK_BASE[cnt] ^ delta);
+    return FSD_EMIT_OK;
+}
+
 FsdEmitResult fsd_emit_build(FsdBodyAction action, int32_t arg,
                              const FsdEmitTemplate* t, uint32_t now_ms,
                              FsdEmitFrame* out) {
     if(!t || !out) return FSD_EMIT_BAD_TEMPLATE;
     if(!fsd_emit_supported(action)) return FSD_EMIT_NO_ENCODING;
 
-    /* Two of the three commands have the same shape -- copy the car's frame,
+    /* Two of the four commands have the same shape -- copy the car's frame,
      * set one field, put it back on the same id -- so the id, length and bit
      * live in four variables and the checks below are written once.
      *
-     * Hazards do NOT fit that shape and take their own branch: 0x3E9 carries a
-     * counter and a check field, so the frame is not a copy with a bit set, it
-     * is a copy REWRITTEN. Kept separate so nobody has to read the shared path
-     * wondering which of its steps apply. */
+     * The other two do NOT fit that shape and take their own branches. 0x3E9
+     * and 0x249 both carry a counter and a check field, so the frame is not a
+     * copy with a bit set, it is a copy REWRITTEN -- and even those two differ,
+     * because one check is a formula and the other is a lookup. Kept separate
+     * so nobody has to read the shared path wondering which of its steps
+     * apply. */
     /* Hazards take no argument. Ignored, not refused -- see the header. */
     if(action == FSD_ACT_HAZARDS) return emit_hazards(t, now_ms, out);
+    if(action == FSD_ACT_TURN_SIGNAL) return emit_turn_signal(arg, t, now_ms, out);
 
     /* 🔴 NO `default:` HERE, AND THAT IS THE WHOLE POINT.
      *
@@ -168,7 +285,8 @@ FsdEmitResult fsd_emit_build(FsdBodyAction action, int32_t arg,
         byte_ix = FSD_EMIT_MAP_LIGHT_BYTE;
         bits = FSD_EMIT_MAP_LIGHT_MASK;
         break;
-    case FSD_ACT_HAZARDS: /* returned above; listed so the switch is complete */
+    case FSD_ACT_HAZARDS:     /* returned above; listed so the switch is complete */
+    case FSD_ACT_TURN_SIGNAL: /* likewise */
     case FSD_ACT_CAMERA:
     case FSD_ACT_SEAT_DRIVER:
     case FSD_ACT_SEAT_PASSENGER:
@@ -217,6 +335,7 @@ const char* fsd_emit_result_str(FsdEmitResult r) {
     case FSD_EMIT_STALE_TEMPLATE: return "stale template";
     case FSD_EMIT_BAD_TEMPLATE: return "bad template";
     case FSD_EMIT_NO_ENCODING: return "no encoding";
+    case FSD_EMIT_NO_CHECK: return "check byte unmeasured here";
     }
     return "?";
 }

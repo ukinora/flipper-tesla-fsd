@@ -75,10 +75,17 @@
 extern "C" {
 #endif
 
-/* How old the template may be. One bound for all three ids, because all three
- * arrive at about the same rate -- 0x273 every 500 ms, 0x3E9 every 495 ms --
- * so this is three periods: enough to ride out one or two dropped frames, short
- * enough that the fields we copy still describe the car as it is now.
+/* How old the template may be. One bound for all four ids -- 0x273 every
+ * 500 ms and 0x3E9 every 495 ms, so this is three of their periods: enough to
+ * ride out one or two dropped frames, short enough that the fields we copy
+ * still describe the car as it is now.
+ *
+ * ⚠️ 0x249 arrives every 50 ms, so for that frame the same bound is thirty
+ * periods rather than three. Left alone deliberately: what a stale stalk
+ * template costs is a stale COUNTER, and a receiver that checks the counter
+ * drops the frame rather than misreading it. The bound is about the fields we
+ * COPY still being true, and on 0x249 those are the high beams and the washer,
+ * which do not change faster than the light on the ceiling.
  *
  * 🔴 Staleness is not a transmission problem, it is a TRUTH problem. An old
  * template is an old statement about the mirrors and the horn. */
@@ -192,6 +199,128 @@ const char* fsd_emit_door_str(int32_t door);
 #define FSD_EMIT_MAP_LIGHT_MASK  0x08u   /* bit 3 of byte 7 = bit 59 */
 #define FSD_EMIT_MAP_LIGHT_DLC   8u
 
+/* THE TURN SIGNAL COMMAND. Measured 2026-09-05, fourth visit.
+ *
+ * 🔴 IT IS NOT 0x3E9, AND THAT PREDICTION WAS WRITTEN DOWN BEFORE THE
+ * CAPTURE. The hazards live in 0x3E9 and the indicators looked like they must
+ * too. They do not: TSL REPLAYS THE STALK. Across the three indicator captures
+ * 0x3E9 byte 0 held at 0xF1 for 19-21 frames with its 495 ms period unbroken --
+ * not one injection. So the same device drives the same lamps two different
+ * ways, and the only reason we know which is which is that somebody looked.
+ *
+ *      (7.955) 249#5E090000     <- the car,  counter 9,  stalk 00
+ *      (7.956) 249#920A0800     <- TSL, +1 ms, counter A, stalk 08
+ *      (8.006) 249#580B0800     <- ... and again, 50 ms later
+ *      (8.056) 249#4A0C0800
+ *      (8.106) 249#630D0800     <- four frames, then it stops
+ *      (8.133) 3F5#02000B38...  <- 27 ms later the left lamp is on
+ *
+ * The stalk field is byte 2, and it is the position TIMES TWO (17|3, one bit
+ * left of where opendbc puts it -- see the DBC comment). A person's stalk goes
+ * through detent 1 on the way to detent 2; TSL sends detent 2 directly:
+ *
+ *      person, right   02 02 04 04 04 04 04 04 00      UP_1 then UP_2
+ *      person, left    06 06 08 08 08 08 00            DOWN_1 then DOWN_2
+ *      TSL right       04 04 04                        UP_2
+ *      TSL left        08 08 08 08                     DOWN_2
+ *      TSL cancel      02 02 02                        UP_1, the half tap
+ *
+ * 🟢 Left-is-down and right-is-up is confirmed from OUTSIDE this frame: 0x3F5
+ * lights its right pair after 04 and its left pair after 08.
+ *
+ * ⚠️ "Off" IS A COMMAND HERE, unlike the map light and the hazards. Ceasing to
+ * send does not cancel an indicator -- the car latches it. TSL sends UP_1, the
+ * half tap a driver uses to cancel. Whether DOWN_1 cancels too is unmeasured,
+ * so it is not in the enum.
+ */
+#define FSD_EMIT_TURN_ID         0x249u
+#define FSD_EMIT_TURN_DLC        4u
+#define FSD_EMIT_TURN_CHK_BYTE   0u
+#define FSD_EMIT_TURN_CNT_BYTE   1u
+#define FSD_EMIT_TURN_STALK_BYTE 2u
+/* SCCM_turnIndicatorStalkStatus, 17|3 = byte 2 bits [3:1]. The bits we own,
+ * and the only ones we change. */
+#define FSD_EMIT_TURN_STALK_MASK 0x0Eu
+
+/* ---- WHAT WE MAY WRITE, AND WHERE THE CHECK TABLE STOPS -------------------
+ *
+ * 🔴 THIS FRAME CAN BE NEITHER COPIED NOR COMPUTED, WHICH MAKES IT A THIRD
+ * KIND OF EMITTER.
+ *
+ *   0x273, 0x1F9    copy the car's frame, set a field.       No counter, no
+ *                                                            check.
+ *   0x3E9           copy, advance the counter, RECOMPUTE
+ *                   the check from a formula we derived.
+ *   0x249           copy, advance the counter, and LOOK THE
+ *                   CHECK UP -- because there is no formula.
+ *
+ * byte 0 is SCCM_leftStalkCrc. The whole 8-bit CRC space (255 polynomials x
+ * 256 seeds x 4 reflection combinations x 2 xorouts, over eight byte layouts)
+ * was searched and nothing fits -- and nothing can, because two of the 51
+ * distinct payloads we hold are
+ *
+ *      D3 03 00 00   and   D3 04 00 00      different counter, same check
+ *      5E 07 00 00   and   5E 09 00 00      likewise
+ *
+ * A check that is a function of the bytes cannot do that. So we do not derive
+ * it; we carry what the car was measured to send.
+ *
+ * 🟢 BUT NOT AS 51 PAIRS. The observations factor exactly:
+ *
+ *      byte0 = BASE[counter] ^ DELTA[stalk]
+ *
+ * 16 + 4 = 20 numbers explaining 51 observations with no exception, and the
+ * BASE row for every one of the 16 counters comes from an IDLE frame, so it is
+ * derived without reference to any command. tools/derive_stalk_check.py
+ * regenerates both tables and cross-validates them leave-one-out: take DELTA
+ * from a single counter, predict every other counter. 300 out-of-sample
+ * predictions, zero misses.
+ *
+ * 🔴 WHY THAT MATTERS RATHER THAN BEING TIDY. The emitter does not get to
+ * choose its counter -- it is whatever the car last sent, plus one -- so which
+ * pair we need is decided by the millisecond the rule fires. A literal table of
+ * the 51 observed pairs covers 29 of the 48 (counter, stalk) combinations the
+ * three commands need. The indicator would work about 60% of the time, at
+ * random, with nothing on screen to explain the other 40%.
+ *
+ * 🔴 THE TABLE STILL HAS AN EDGE, AND IT IS REAL. Every frame we hold was
+ * captured with the high beams and the washer idle. Those live in the same
+ * byte as the counter (highBeamStalkStatus 12|2, washWipeButtonStatus 14|2)
+ * and the CRC covers them, so a template with either one set is outside
+ * everything we measured. FSD_EMIT_NO_CHECK, not a guess: flash the high beams
+ * while an indicator rule fires and the command is refused with a name.
+ */
+#define FSD_EMIT_TURN_CNT_MASK   0x0Fu  /* SCCM_leftStalkCounter, 8|4 */
+/* Bits that must be zero in the template for the check table to apply. byte 1
+ * outside the counter is the high beam and washer; byte 2 outside our field is
+ * opendbc's leftStalkReserved1; byte 3 was zero in all 51. */
+#define FSD_EMIT_TURN_B1_UNKNOWN 0xF0u
+#define FSD_EMIT_TURN_B2_UNKNOWN 0xF1u
+
+/** Which way, or cancel. The raw byte-2 values are deliberately NOT the enum
+ *  values: a rule's stored arg must keep meaning the same thing if the field
+ *  encoding is ever re-read, and 0 must not be a live command by accident. */
+typedef enum {
+    /* 0 is LEFT because a rule stored with arg 0 -- which is what the app
+     * writes when it has never offered a choice -- has to mean something
+     * measured. All three of these are measured; none is a fallback. */
+    FSD_EMIT_TURN_LEFT = 0,
+    FSD_EMIT_TURN_RIGHT = 1,
+    FSD_EMIT_TURN_CANCEL = 2,
+    FSD_EMIT_TURN_COUNT,
+} FsdEmitTurn;
+
+#define FSD_EMIT_TURN_LEFT_BITS   0x08u /* DOWN_2 */
+#define FSD_EMIT_TURN_RIGHT_BITS  0x04u /* UP_2 */
+#define FSD_EMIT_TURN_CANCEL_BITS 0x02u /* UP_1, the half tap */
+
+/** byte2 stalk field for a turn-signal selector. False — *bits_out untouched —
+ *  for a selector this car has never been measured to accept. */
+bool fsd_emit_turn_bits(int32_t turn, uint8_t* bits_out);
+
+/** Name for logs and the serial console. Never returns NULL. */
+const char* fsd_emit_turn_str(int32_t turn);
+
 typedef enum {
     FSD_EMIT_OK = 0,
     /** No frame for this action's id has been received; nothing to copy. */
@@ -201,10 +330,19 @@ typedef enum {
     /** The template is the wrong id or too short to hold the field. */
     FSD_EMIT_BAD_TEMPLATE,
     /** No encoding for this request. Either the action has no emitter yet
-     *  (five of the eight), or it has one but the argument selects something
+     *  (five of the nine), or it has one but the argument selects something
      *  nobody has measured — a door on the left, say. Both are gaps, not
      *  gates, and a gap must never be filled by guessing. */
     FSD_EMIT_NO_ENCODING,
+    /** 🔴 We know the command and we have the template, but the template is
+     *  outside the region where the check byte was measured — the high beams
+     *  or the washer are in use, and 0x249's CRC covers them.
+     *
+     *  Distinct from NO_ENCODING on purpose. NO_ENCODING is permanent: no
+     *  amount of waiting teaches us which bits open the driver's door. This
+     *  one clears by itself the moment the stalk goes back to rest, so a
+     *  caller may retry and a screen should say something different. */
+    FSD_EMIT_NO_CHECK,
 } FsdEmitResult;
 
 /** The car's most recent frame for the id this action writes. */
@@ -227,7 +365,8 @@ typedef struct {
  * Build the frame for one action, or say why not.
  *
  * `arg` is the rule's own argument (FsdRule.arg / FsdRuleDecision.arg), carried
- * here unchanged. Today only FSD_ACT_DOOR_OPEN reads it, as an FsdEmitDoor.
+ * here unchanged. Two actions read it: FSD_ACT_DOOR_OPEN as an FsdEmitDoor and
+ * FSD_ACT_TURN_SIGNAL as an FsdEmitTurn.
  *
  * 🔴 An action that takes no argument IGNORES it rather than refusing. That is
  * deliberate: rules stored before an action had an argument carry whatever was
@@ -242,10 +381,10 @@ typedef struct {
  * against bytes copied out of a real capture.
  *
  * Returns FSD_EMIT_NO_ENCODING for every action but FSD_ACT_MAP_LIGHT,
- * FSD_ACT_DOOR_OPEN and FSD_ACT_HAZARDS. That mirrors fsd_body.c, where those
- * three are the rows with armable_at_runtime = true -- two independent
- * statements of the same fact, so widening one without the other does nothing,
- * and a host test asserts they agree for every action.
+ * FSD_ACT_DOOR_OPEN, FSD_ACT_HAZARDS and FSD_ACT_TURN_SIGNAL. That mirrors
+ * fsd_body.c, where those four are the rows with armable_at_runtime = true --
+ * two independent statements of the same fact, so widening one without the
+ * other does nothing, and a host test asserts they agree for every action.
  */
 FsdEmitResult fsd_emit_build(FsdBodyAction action, int32_t arg,
                              const FsdEmitTemplate* t, uint32_t now_ms,

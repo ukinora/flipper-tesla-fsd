@@ -11,12 +11,14 @@
  * below — three independent ways to catch the same class of mistake, because
  * this project has already shipped a permission table that defaulted open.
  *
- * 🔴 THREE ROWS ARE ARMABLE (2026-09-05). MAP_LIGHT carries over unchanged
+ * 🔴 FOUR ROWS ARE ARMABLE (2026-09-06). MAP_LIGHT carries over unchanged
  * from the old T1. DOOR_OPEN and HAZARDS joined it when the third visit
  * produced the thing their comments demanded -- the command frames, measured,
  * not inferred. DOOR_OPEN joined with every other restriction still on;
  * HAZARDS joined with the motion gates open, because a hazard light that may
- * only act in park cannot do what hazard lights are for.
+ * only act in park cannot do what hazard lights are for. TURN_SIGNAL joined
+ * on the fourth visit's frames plus two explicit owner decisions, which its
+ * own row records -- the capture could not have supplied either of them.
  *
  * Each row names the evidence that flips its bool. That is the discipline this
  * table is for: a row opens when a stated condition is met, and the condition
@@ -193,6 +195,58 @@ static const FsdBodyCaps FSD_BODY_CAPS[] = {
             .min_interval_ms = 500u,
             .max_hold_ms = 30000u,
         },
+
+    /* Turn signals. Measured 2026-09-05: 0x249 byte 2, a replay of the stalk
+     * itself -- not a lamp command. Two owner decisions on 2026-09-06 put this
+     * row where it is, and both are recorded because neither follows from the
+     * capture.
+     *
+     * 🔴 DECISION 1 -- MAY WE SEND THE STALK FRAME AT ALL. Yes (owner). It
+     * matters because 0x249 is an INPUT frame: everything else this axis emits
+     * is a request to a body controller, and this is us pretending a person
+     * moved a control. That is the same technique the commercial device uses
+     * for the speed profile, and the same one it uses here, so it is not new to
+     * this car -- but "not new" is not "already agreed", and the deny-list did
+     * not cover this id. Now it is deliberate rather than a default.
+     *
+     * 🔴 DECISION 2 -- MAY IT ACT WHILE MOVING. Yes (owner). The motion gates
+     * are open for the same reason as the hazards, one step further: an
+     * indicator that may only act in park cannot indicate anything. A lane
+     * change is the whole point, and a lane change happens at speed. This is
+     * the second row where "every restriction on" is the unsafe answer.
+     *
+     * 🔴 AND HERE IS WHAT THAT DOES NOT COVER. Unlike the hazards, this
+     * command has a DIRECTION, so a wrong one is not a louder version of the
+     * right one -- it tells the traffic behind that we are going the other way.
+     * No gate on this bus can catch that; only the rule the owner wrote can be
+     * right or wrong about it. What the gates do is the same as everywhere
+     * else: refuse when we cannot see the car, and bound how long a stuck rule
+     * can go on.
+     *
+     * may_act_without_driver stays false. An empty car has no lane to change
+     * into, and the same sentence as the hazard row applies: a body write on an
+     * unattended car needs its own reason written here, not an inherited one.
+     *
+     * min_interval_ms is 50, the car's own period for this frame, because TSL
+     * sends three or four back to back at exactly that rate and we do not know
+     * which of them the car acts on. A larger interval would make the emitter
+     * structurally unable to reproduce the only sequence we have seen work.
+     * 🔴 That is the loosest interval in this table, and the thing that keeps
+     * it from being a burst generator is max_hold_ms, not this.
+     *
+     * max_hold_ms is 1000. TSL is done in 150-200 ms. Unlike the map light and
+     * the hazards this command is NOT held by re-sending -- the car latches the
+     * indicator and the cancel is its own command -- so a re-sender is not a
+     * feature to be bounded, it is a bug to be caught. */
+    [FSD_ACT_TURN_SIGNAL] =
+        {
+            .action = FSD_ACT_TURN_SIGNAL,
+            .may_act_while_moving = true,
+            .may_act_out_of_park = true,
+            .armable_at_runtime = true,
+            .min_interval_ms = 50u,
+            .max_hold_ms = 1000u,
+        },
 };
 
 _Static_assert(sizeof(FSD_BODY_CAPS) / sizeof(FSD_BODY_CAPS[0]) == FSD_ACT_COUNT,
@@ -317,6 +371,10 @@ const char* fsd_body_action_str(FsdBodyAction a) {
     case FSD_ACT_SCROLL: return "scroll";
     case FSD_ACT_GEAR_D: return "gear-D";
     case FSD_ACT_HAZARDS: return "hazards";
+    /* One word, no spaces -- the log line is "<name> -> <verdict>" and a
+     * two-word name makes the arrow the only thing separating them. Same rule
+     * as the J6 button names. */
+    case FSD_ACT_TURN_SIGNAL: return "turn-signal";
     case FSD_ACT_COUNT: break;
     }
     return "?";

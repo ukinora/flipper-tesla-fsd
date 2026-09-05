@@ -394,7 +394,7 @@ static void test_refuses_the_wrong_frame(void) {
 /* ── the gap, stated ──────────────────────────────────────────────────────── */
 
 static void test_which_actions_have_an_encoding(void) {
-    printf("\n-- 셋은 방출기가 있고 다섯은 없다 --\n");
+    printf("\n-- 넷은 방출기가 있고 다섯은 없다 --\n");
 
     FsdEmitTemplate t = car_template(1000u);
     FsdEmitFrame f;
@@ -403,6 +403,8 @@ static void test_which_actions_have_an_encoding(void) {
     CHECK(fsd_emit_supported(FSD_ACT_DOOR_OPEN), "door: yes (measured 2026-09-05)");
 
     CHECK(fsd_emit_supported(FSD_ACT_HAZARDS), "hazards: yes (measured 2026-09-05)");
+    CHECK(fsd_emit_supported(FSD_ACT_TURN_SIGNAL),
+          "turn signal: yes (measured 2026-09-05, 4th visit)");
 
     const FsdBodyAction rest[] = {
         FSD_ACT_CAMERA, FSD_ACT_SEAT_DRIVER,
@@ -412,11 +414,11 @@ static void test_which_actions_have_an_encoding(void) {
      * things: add an action to the enum, forget this line, and the loop below
      * still passes while testing one action less. Same shape as the CAN-id
      * check that only compared the intersection. Count it. */
-    CHECK(sizeof(rest) / sizeof(rest[0]) == (size_t)FSD_ACT_COUNT - 3u,
+    CHECK(sizeof(rest) / sizeof(rest[0]) == (size_t)FSD_ACT_COUNT - 4u,
           "the no-emitter list must name every action that is not one of the "
-          "three with emitters (%u named, %u expected)",
+          "four with emitters (%u named, %u expected)",
           (unsigned)(sizeof(rest) / sizeof(rest[0])),
-          (unsigned)FSD_ACT_COUNT - 3u);
+          (unsigned)FSD_ACT_COUNT - 4u);
     for(unsigned i = 0; i < sizeof(rest) / sizeof(rest[0]); i++) {
         CHECK(!fsd_emit_supported(rest[i]),
               "%s has no emitter", fsd_body_action_str(rest[i]));
@@ -477,14 +479,440 @@ static void test_no_action_borrows_another_encoding(void) {
                   fsd_body_action_str(act), fsd_emit_result_str(r));
         }
     }
-    CHECK(supported == 3u, "three actions have emitters, saw %u", supported);
+    CHECK(supported == 4u, "four actions have emitters, saw %u", supported);
+}
+
+/* ── the turn signal, 0x249 ───────────────────────────────────────────────────
+ *
+ * 🔴 EVERY FRAME IN THIS SECTION IS TWO LINES OUT OF A CAPTURE, IN ORDER.
+ * The car's frame is the template and TSL's is what we must produce, so each
+ * pair is a complete statement of the command with nothing of mine in it.
+ *
+ *      captures/2026-09-05-4차/TSL좌깜빡이켜기
+ *      captures/2026-09-05-4차/TSL우깜빡이켜기
+ *      captures/2026-09-05-4차/TSL깜빡이전부끄기
+ */
+typedef struct {
+    uint8_t car[4];
+    uint8_t tsl[4];
+    int32_t turn;
+    const char* where;
+} TurnCase;
+
+/* Ten consecutive injections across three captures. Ten different counters,
+ * which is the point: the check table is indexed by counter and one pair would
+ * only prove one row of it. */
+static const TurnCase TURN_CASES[] = {
+    {{0x5E, 0x09, 0x00, 0x00}, {0x92, 0x0A, 0x08, 0x00}, FSD_EMIT_TURN_LEFT, "좌 7.955->7.956"},
+    {{0xE2, 0x0A, 0x00, 0x00}, {0x58, 0x0B, 0x08, 0x00}, FSD_EMIT_TURN_LEFT, "좌 8.006"},
+    {{0x28, 0x0B, 0x00, 0x00}, {0x4A, 0x0C, 0x08, 0x00}, FSD_EMIT_TURN_LEFT, "좌 8.055->8.056"},
+    {{0x3A, 0x0C, 0x00, 0x00}, {0x63, 0x0D, 0x08, 0x00}, FSD_EMIT_TURN_LEFT, "좌 8.106"},
+
+    /* 🔴 F -> 0. The counter wraps inside the command, and it wraps in a real
+     * capture rather than in a case I invented. */
+    {{0xCE, 0x0F, 0x00, 0x00}, {0xA3, 0x00, 0x04, 0x00}, FSD_EMIT_TURN_RIGHT, "우 5.851"},
+    {{0x9B, 0x00, 0x00, 0x00}, {0xD0, 0x01, 0x04, 0x00}, FSD_EMIT_TURN_RIGHT, "우 5.901"},
+    {{0xE8, 0x01, 0x00, 0x00}, {0x12, 0x02, 0x04, 0x00}, FSD_EMIT_TURN_RIGHT, "우 5.951"},
+
+    /* 🔴 The same car frame 9B000000 appears here and one line above, and the
+     * two commands differ ONLY in the stalk byte -- so this pair and that one
+     * together prove the check byte moves with the stalk and not just with the
+     * counter. D0 vs F4 out of the same template. */
+    {{0x9B, 0x00, 0x00, 0x00}, {0xF4, 0x01, 0x02, 0x00}, FSD_EMIT_TURN_CANCEL, "끄기 6.743"},
+    {{0xE8, 0x01, 0x00, 0x00}, {0x36, 0x02, 0x02, 0x00}, FSD_EMIT_TURN_CANCEL, "끄기 6.793"},
+    {{0x2A, 0x02, 0x00, 0x00}, {0xCF, 0x03, 0x02, 0x00}, FSD_EMIT_TURN_CANCEL, "끄기 6.844"},
+};
+
+static FsdEmitTemplate turn_template(const uint8_t car[4], uint32_t at_ms) {
+    FsdEmitTemplate t;
+    memset(&t, 0, sizeof(t));
+    t.seen = true;
+    t.id = FSD_EMIT_TURN_ID;
+    t.dlc = FSD_EMIT_TURN_DLC;
+    memcpy(t.data, car, 4);
+    t.seen_ms = at_ms;
+    return t;
+}
+
+static void test_turn_matches_tsl_byte_for_byte(void) {
+    printf("\n-- 깜빡이: 우리 프레임 == TSL 프레임 (열 짝) --\n");
+
+    for (unsigned i = 0; i < sizeof(TURN_CASES) / sizeof(TURN_CASES[0]); i++) {
+        const TurnCase* c = &TURN_CASES[i];
+        FsdEmitTemplate t = turn_template(c->car, 1000u);
+        FsdEmitFrame f;
+        FsdEmitResult r = fsd_emit_build(FSD_ACT_TURN_SIGNAL, c->turn, &t, 1010u, &f);
+        CHECK(r == FSD_EMIT_OK, "%s: built (%s)", c->where, fsd_emit_result_str(r));
+        CHECK(f.id == FSD_EMIT_TURN_ID, "%s: id 0x249, got 0x%X", c->where, (unsigned)f.id);
+        CHECK(f.dlc == 4u, "%s: dlc 4, got %u", c->where, f.dlc);
+        CHECK(memcmp(f.data, c->tsl, 4) == 0,
+              "%s: %s -> expected %02X%02X%02X%02X, got %02X%02X%02X%02X",
+              c->where, fsd_emit_turn_str(c->turn),
+              c->tsl[0], c->tsl[1], c->tsl[2], c->tsl[3],
+              f.data[0], f.data[1], f.data[2], f.data[3]);
+    }
+}
+
+/**
+ * 🔴 THE SAME BUILDER, CHECKED AGAINST FRAMES TSL NEVER TOUCHED.
+ *
+ * In the two captures where a PERSON worked the stalk there is no injection at
+ * all -- every 0x249 is the car's. Consecutive car frames therefore form
+ * (template, expected) pairs of exactly the kind the emitter produces: the
+ * counter advances by one and the stalk field is whatever the driver was
+ * holding. If our table is right, feeding frame N and asking for the direction
+ * frame N+1 carries must reproduce frame N+1 to the byte.
+ *
+ * That is a different kind of evidence from the ten pairs above. Those prove we
+ * agree with the commercial device. These prove we agree with the CAR.
+ *
+ *      captures/2026-09-05-4차/좌깜빡이   (사람이 좌 스토크)
+ *      captures/2026-09-05-4차/우깜빡이   (사람이 우 스토크)
+ */
+static void test_turn_reproduces_the_cars_own_frames(void) {
+    printf("\n-- 깜빡이: 사람이 만진 캡처의 차 프레임을 그대로 재현한다 --\n");
+
+    static const TurnCase SELF[] = {
+        {{0xCC, 0x01, 0x06, 0x00}, {0x5A, 0x02, 0x08, 0x00}, FSD_EMIT_TURN_LEFT, "좌 DOWN_1->DOWN_2"},
+        {{0x5A, 0x02, 0x08, 0x00}, {0xA3, 0x03, 0x08, 0x00}, FSD_EMIT_TURN_LEFT, "좌 이어서"},
+        /* 🔴 A3 -> A3: two different counters, the SAME check byte. This is the
+         * pair that makes byte 0 impossible to be a CRC over these bytes, and
+         * the table reproduces it without knowing that. */
+        {{0xA3, 0x03, 0x08, 0x00}, {0xA3, 0x04, 0x08, 0x00}, FSD_EMIT_TURN_LEFT, "좌 A3->A3"},
+        {{0xA3, 0x04, 0x08, 0x00}, {0xF3, 0x05, 0x08, 0x00}, FSD_EMIT_TURN_LEFT, "좌 끝"},
+        /* Cancel and right out of the same capture, including one where the
+         * driver moved from the cancel detent straight to the other side. */
+        {{0x0F, 0x0D, 0x02, 0x00}, {0xB3, 0x0E, 0x02, 0x00}, FSD_EMIT_TURN_CANCEL, "우 UP_1 유지"},
+        {{0xB3, 0x0E, 0x02, 0x00}, {0xF6, 0x0F, 0x04, 0x00}, FSD_EMIT_TURN_RIGHT, "우 UP_1->UP_2"},
+        {{0xA3, 0x00, 0x04, 0x00}, {0xD0, 0x01, 0x04, 0x00}, FSD_EMIT_TURN_RIGHT, "우 유지"},
+        {{0xD0, 0x01, 0x04, 0x00}, {0x12, 0x02, 0x04, 0x00}, FSD_EMIT_TURN_RIGHT, "우 유지2"},
+        {{0x12, 0x02, 0x04, 0x00}, {0xEB, 0x03, 0x04, 0x00}, FSD_EMIT_TURN_RIGHT, "우 유지3"},
+        {{0xEB, 0x03, 0x04, 0x00}, {0xEB, 0x04, 0x04, 0x00}, FSD_EMIT_TURN_RIGHT, "우 EB->EB"},
+    };
+
+    for (unsigned i = 0; i < sizeof(SELF) / sizeof(SELF[0]); i++) {
+        const TurnCase* c = &SELF[i];
+        FsdEmitTemplate t = turn_template(c->car, 5000u);
+        FsdEmitFrame f;
+        CHECK(fsd_emit_build(FSD_ACT_TURN_SIGNAL, c->turn, &t, 5010u, &f) == FSD_EMIT_OK,
+              "%s: built", c->where);
+        CHECK(memcmp(f.data, c->tsl, 4) == 0,
+              "%s: expected %02X%02X%02X%02X, got %02X%02X%02X%02X",
+              c->where, c->tsl[0], c->tsl[1], c->tsl[2], c->tsl[3],
+              f.data[0], f.data[1], f.data[2], f.data[3]);
+    }
+}
+
+/**
+ * 🔴 WHERE THE CHECK TABLE STOPS, AND THAT IT REFUSES RATHER THAN GUESSES.
+ *
+ * Every 0x249 we hold was captured with the high beams and the washer idle.
+ * Both live in the counter's byte (12|2 and 14|2) and the CRC covers them, so a
+ * template with either set is outside everything measured. This is the one
+ * refusal in the file that clears by itself, which is why it has its own name.
+ */
+static void test_turn_refuses_outside_the_measured_region(void) {
+    printf("\n-- 깜빡이: 잰 적 없는 영역은 지어내지 않고 거부한다 --\n");
+
+    FsdEmitFrame f;
+
+    /* SCCM_highBeamStalkStatus, byte1 bits [5:4]. */
+    uint8_t hi[4] = {0x5E, 0x19, 0x00, 0x00};
+    FsdEmitTemplate t = turn_template(hi, 1000u);
+    CHECK(fsd_emit_build(FSD_ACT_TURN_SIGNAL, FSD_EMIT_TURN_LEFT, &t, 1010u, &f)
+              == FSD_EMIT_NO_CHECK,
+          "high beam held -> NO_CHECK");
+
+    /* SCCM_washWipeButtonStatus, byte1 bits [7:6]. */
+    uint8_t wash[4] = {0x5E, 0x49, 0x00, 0x00};
+    t = turn_template(wash, 1000u);
+    CHECK(fsd_emit_build(FSD_ACT_TURN_SIGNAL, FSD_EMIT_TURN_LEFT, &t, 1010u, &f)
+              == FSD_EMIT_NO_CHECK,
+          "washer pulled -> NO_CHECK");
+
+    /* leftStalkReserved1 and byte 2 bit 0 -- never non-zero in 51 payloads. */
+    uint8_t resv[4] = {0x5E, 0x09, 0x10, 0x00};
+    t = turn_template(resv, 1000u);
+    CHECK(fsd_emit_build(FSD_ACT_TURN_SIGNAL, FSD_EMIT_TURN_LEFT, &t, 1010u, &f)
+              == FSD_EMIT_NO_CHECK,
+          "reserved bits in byte 2 -> NO_CHECK");
+
+    uint8_t b3[4] = {0x5E, 0x09, 0x00, 0x01};
+    t = turn_template(b3, 1000u);
+    CHECK(fsd_emit_build(FSD_ACT_TURN_SIGNAL, FSD_EMIT_TURN_LEFT, &t, 1010u, &f)
+              == FSD_EMIT_NO_CHECK,
+          "byte 3 non-zero -> NO_CHECK");
+
+    /* 🔴 And it must be a DIFFERENT answer from NO_ENCODING. One clears when
+     * the driver lets go of the stalk; the other never clears. A screen that
+     * says the same thing for both sends the owner looking in the wrong place. */
+    CHECK(FSD_EMIT_NO_CHECK != FSD_EMIT_NO_ENCODING, "two different refusals");
+
+    /* The same template with the extra bits cleared builds fine, so the
+     * refusals above are about those bits and not about something else. */
+    uint8_t ok[4] = {0x5E, 0x09, 0x00, 0x00};
+    t = turn_template(ok, 1000u);
+    CHECK(fsd_emit_build(FSD_ACT_TURN_SIGNAL, FSD_EMIT_TURN_LEFT, &t, 1010u, &f)
+              == FSD_EMIT_OK,
+          "and the same frame without them is fine");
+}
+
+static void test_turn_refusals(void) {
+    printf("\n-- 깜빡이: 템플릿과 방향에 대한 거부 --\n");
+
+    uint8_t car[4] = {0x5E, 0x09, 0x00, 0x00};
+    FsdEmitFrame f;
+
+    FsdEmitTemplate none;
+    memset(&none, 0, sizeof(none));
+    CHECK(fsd_emit_build(FSD_ACT_TURN_SIGNAL, FSD_EMIT_TURN_LEFT, &none, 1000u, &f)
+              == FSD_EMIT_NO_TEMPLATE,
+          "no template");
+
+    FsdEmitTemplate t = turn_template(car, 1000u);
+    CHECK(fsd_emit_build(FSD_ACT_TURN_SIGNAL, FSD_EMIT_TURN_LEFT, &t,
+                         1000u + FSD_EMIT_TEMPLATE_MAX_AGE_MS, &f)
+              == FSD_EMIT_STALE_TEMPLATE,
+          "stale at the bound");
+    CHECK(fsd_emit_build(FSD_ACT_TURN_SIGNAL, FSD_EMIT_TURN_LEFT, &t,
+                         1000u + FSD_EMIT_TEMPLATE_MAX_AGE_MS - 1u, &f)
+              == FSD_EMIT_OK,
+          "and fresh one millisecond earlier");
+
+    t = turn_template(car, 1000u);
+    t.id = 0x3E9u;
+    CHECK(fsd_emit_build(FSD_ACT_TURN_SIGNAL, FSD_EMIT_TURN_LEFT, &t, 1010u, &f)
+              == FSD_EMIT_BAD_TEMPLATE,
+          "the hazard frame is not the stalk frame");
+
+    t = turn_template(car, 1000u);
+    t.dlc = 8u;
+    CHECK(fsd_emit_build(FSD_ACT_TURN_SIGNAL, FSD_EMIT_TURN_LEFT, &t, 1010u, &f)
+              == FSD_EMIT_BAD_TEMPLATE,
+          "0x249 is four bytes");
+
+    /* 🔴 The unmeasured directions, refused BEFORE the template is judged --
+     * same rule as the door. DOWN_1 (0x06) is in every capture but nobody has
+     * sent it alone, so we do not know it cancels. */
+    t = turn_template(car, 1000u);
+    CHECK(fsd_emit_build(FSD_ACT_TURN_SIGNAL, FSD_EMIT_TURN_COUNT, &t, 1010u, &f)
+              == FSD_EMIT_NO_ENCODING,
+          "an out-of-range selector");
+    CHECK(fsd_emit_build(FSD_ACT_TURN_SIGNAL, 99, &t, 1010u, &f) == FSD_EMIT_NO_ENCODING,
+          "and a nonsense one");
+    CHECK(fsd_emit_build(FSD_ACT_TURN_SIGNAL, -1, &t, 1010u, &f) == FSD_EMIT_NO_ENCODING,
+          "and a negative one");
+
+    /* An unmeasured direction with a BAD template must still answer
+     * NO_ENCODING: "wait and retry" would be the wrong advice. */
+    memset(&none, 0, sizeof(none));
+    CHECK(fsd_emit_build(FSD_ACT_TURN_SIGNAL, 99, &none, 1010u, &f) == FSD_EMIT_NO_ENCODING,
+          "the direction is judged before the template");
+
+    uint8_t bits = 0xFF;
+    CHECK(!fsd_emit_turn_bits(FSD_EMIT_TURN_COUNT, &bits), "COUNT is not a direction");
+    CHECK(bits == 0xFF, "and a refusal leaves the byte alone");
+    CHECK(fsd_emit_turn_str(FSD_EMIT_TURN_COUNT)[0] == '?', "nor does it have a name");
+    for (int i = 0; i < FSD_EMIT_TURN_COUNT; i++) {
+        CHECK(fsd_emit_turn_bits(i, &bits), "selector %d is measured", i);
+        CHECK(fsd_emit_turn_str(i)[0] != '?', "selector %d has a name", i);
+    }
+}
+
+/**
+ * 🔴 THE STALK FIELD IS THREE BITS, NOT A BYTE.
+ *
+ * The emitter refuses a template whose byte 2 carries anything outside those
+ * three bits, so this can only be checked by reaching past the guard -- which
+ * is what the mask constant is for. Asserted directly because the mask is the
+ * difference between "indicate left" and "indicate left AND assert five
+ * reserved bits nobody has decoded".
+ */
+static void test_turn_writes_only_its_own_three_bits(void) {
+    printf("\n-- 깜빡이: 자기 세 비트 말고는 안 건드린다 --\n");
+
+    CHECK(FSD_EMIT_TURN_STALK_MASK == 0x0Eu, "17|3 is byte2 bits [3:1]");
+    CHECK((FSD_EMIT_TURN_LEFT_BITS & ~FSD_EMIT_TURN_STALK_MASK) == 0u, "left fits");
+    CHECK((FSD_EMIT_TURN_RIGHT_BITS & ~FSD_EMIT_TURN_STALK_MASK) == 0u, "right fits");
+    CHECK((FSD_EMIT_TURN_CANCEL_BITS & ~FSD_EMIT_TURN_STALK_MASK) == 0u, "cancel fits");
+
+    /* The three are distinct, so no two directions can encode alike -- the
+     * mistake the scroll table's own header warns about. */
+    CHECK(FSD_EMIT_TURN_LEFT_BITS != FSD_EMIT_TURN_RIGHT_BITS &&
+              FSD_EMIT_TURN_LEFT_BITS != FSD_EMIT_TURN_CANCEL_BITS &&
+              FSD_EMIT_TURN_RIGHT_BITS != FSD_EMIT_TURN_CANCEL_BITS,
+          "three directions, three values");
+
+    /* Starting from a template that already holds a direction, the new one
+     * REPLACES it rather than being OR-ed into it. 0x08 | 0x04 = 0x0C, which is
+     * not a stalk position at all -- so this is the difference between "turn
+     * right" and a value the car has never seen. */
+    uint8_t holding_left[4] = {0xA3, 0x03, 0x08, 0x00};
+    FsdEmitTemplate t = turn_template(holding_left, 1000u);
+    FsdEmitFrame f;
+    CHECK(fsd_emit_build(FSD_ACT_TURN_SIGNAL, FSD_EMIT_TURN_RIGHT, &t, 1010u, &f)
+              == FSD_EMIT_OK,
+          "built from a template already indicating left");
+    CHECK(f.data[FSD_EMIT_TURN_STALK_BYTE] == FSD_EMIT_TURN_RIGHT_BITS,
+          "the old direction is replaced, not or-ed: got %02X",
+          f.data[FSD_EMIT_TURN_STALK_BYTE]);
+}
+
+/**
+ * 🔴 THE COUNTER IS THE CAR'S PLUS ONE, AND IT WRAPS.
+ *
+ * Verified by pairing car and injected frames in time order across the three
+ * captures -- ten injections, every one +1, including F -> 0. Held here as its
+ * own assertion because the byte-for-byte cases above would also pass if the
+ * counter were right by accident for the counters they happen to cover.
+ */
+static void test_turn_counter_advances_and_wraps(void) {
+    printf("\n-- 깜빡이: 카운터는 차의 값 + 1, F 에서 감긴다 --\n");
+
+    for (unsigned c = 0; c < 16u; c++) {
+        uint8_t car[4] = {0x00, (uint8_t)c, 0x00, 0x00};
+        FsdEmitTemplate t = turn_template(car, 1000u);
+        FsdEmitFrame f;
+        CHECK(fsd_emit_build(FSD_ACT_TURN_SIGNAL, FSD_EMIT_TURN_LEFT, &t, 1010u, &f)
+                  == FSD_EMIT_OK,
+              "counter %u builds", c);
+        CHECK(f.data[FSD_EMIT_TURN_CNT_BYTE] == (uint8_t)((c + 1u) & 0x0Fu),
+              "counter %u -> %u, got %u", c, (c + 1u) & 0x0Fu,
+              f.data[FSD_EMIT_TURN_CNT_BYTE]);
+    }
+}
+
+/**
+ * 🔴 EVERY COMMAND PAYLOAD THE CAR OR TSL HAS EVER PUT ON THIS BUS.
+ *
+ * Generated from all 32 captures across four visits: the 29 distinct 0x249
+ * payloads whose stalk field is one of the three we can emit. Feed a template
+ * carrying the counter before it, ask for that direction, and the four bytes
+ * must come back identical.
+ *
+ * The ten pairs above prove we agree with the injections we watched. This
+ * proves we agree with EVERY 0x249 command byte we hold, whoever sent it, and
+ * it covers 15 of the 16 counter values rather than the ten those injections
+ * happened to land on.
+ */
+typedef struct {
+    uint8_t prev_ctr;
+    uint8_t want_check;
+    uint8_t want_stalk;
+    int32_t turn;
+} TurnObserved;
+
+static void test_turn_matches_every_observed_command(void) {
+    printf("\n-- 깜빡이: 세 방문에서 관측된 명령 페이로드 29개 전부 --\n");
+
+    static const TurnObserved TURN_OBSERVED[] = {
+        {0x0F, 0x87, 0x02, FSD_EMIT_TURN_CANCEL},
+        {0x00, 0xF4, 0x02, FSD_EMIT_TURN_CANCEL},
+        {0x01, 0x36, 0x02, FSD_EMIT_TURN_CANCEL},
+        {0x02, 0xCF, 0x02, FSD_EMIT_TURN_CANCEL},
+        {0x03, 0xCF, 0x02, FSD_EMIT_TURN_CANCEL},
+        {0x04, 0x9F, 0x02, FSD_EMIT_TURN_CANCEL},
+        {0x07, 0x23, 0x02, FSD_EMIT_TURN_CANCEL},
+        {0x08, 0x42, 0x02, FSD_EMIT_TURN_CANCEL},
+        {0x09, 0xFE, 0x02, FSD_EMIT_TURN_CANCEL},
+        {0x0A, 0x34, 0x02, FSD_EMIT_TURN_CANCEL},
+        {0x0C, 0x0F, 0x02, FSD_EMIT_TURN_CANCEL},
+        {0x0D, 0xB3, 0x02, FSD_EMIT_TURN_CANCEL},
+        {0x0E, 0xD2, 0x02, FSD_EMIT_TURN_CANCEL},
+        {0x0F, 0xA3, 0x04, FSD_EMIT_TURN_RIGHT},
+        {0x00, 0xD0, 0x04, FSD_EMIT_TURN_RIGHT},
+        {0x01, 0x12, 0x04, FSD_EMIT_TURN_RIGHT},
+        {0x02, 0xEB, 0x04, FSD_EMIT_TURN_RIGHT},
+        {0x03, 0xEB, 0x04, FSD_EMIT_TURN_RIGHT},
+        {0x05, 0x74, 0x04, FSD_EMIT_TURN_RIGHT},
+        {0x0E, 0xF6, 0x04, FSD_EMIT_TURN_RIGHT},
+        {0x01, 0x5A, 0x08, FSD_EMIT_TURN_LEFT},
+        {0x02, 0xA3, 0x08, FSD_EMIT_TURN_LEFT},
+        {0x03, 0xA3, 0x08, FSD_EMIT_TURN_LEFT},
+        {0x04, 0xF3, 0x08, FSD_EMIT_TURN_LEFT},
+        {0x08, 0x2E, 0x08, FSD_EMIT_TURN_LEFT},
+        {0x09, 0x92, 0x08, FSD_EMIT_TURN_LEFT},
+        {0x0A, 0x58, 0x08, FSD_EMIT_TURN_LEFT},
+        {0x0B, 0x4A, 0x08, FSD_EMIT_TURN_LEFT},
+        {0x0C, 0x63, 0x08, FSD_EMIT_TURN_LEFT},
+    };
+
+    for (unsigned i = 0; i < sizeof(TURN_OBSERVED) / sizeof(TURN_OBSERVED[0]); i++) {
+        const TurnObserved* o = &TURN_OBSERVED[i];
+        uint8_t car[4] = {0x00, o->prev_ctr, 0x00, 0x00};
+        FsdEmitTemplate t = turn_template(car, 1000u);
+        FsdEmitFrame f;
+        CHECK(fsd_emit_build(FSD_ACT_TURN_SIGNAL, o->turn, &t, 1010u, &f) == FSD_EMIT_OK,
+              "ctr %X %s: built", o->prev_ctr, fsd_emit_turn_str(o->turn));
+        CHECK(f.data[FSD_EMIT_TURN_CHK_BYTE] == o->want_check &&
+                  f.data[FSD_EMIT_TURN_STALK_BYTE] == o->want_stalk,
+              "ctr %X %s -> expected %02X..%02X, got %02X..%02X",
+              o->prev_ctr, fsd_emit_turn_str(o->turn), o->want_check, o->want_stalk,
+              f.data[FSD_EMIT_TURN_CHK_BYTE], f.data[FSD_EMIT_TURN_STALK_BYTE]);
+    }
+}
+
+/**
+ * 🔴 COUNTER 7 IS THE ONE THE CAPTURES CANNOT REACH DIRECTLY.
+ *
+ * No command frame with counter 7 exists in anything we hold, so the 29 rows
+ * above pin 15 of the 16 rows of the check table and leave one unpinned. That
+ * is a real hole: a typo in that row would ship.
+ *
+ * It is closed the way the analysis closed it — by the factorisation. The 16
+ * IDLE check bytes ARE the table's base row, and they are all directly
+ * observed. If check(counter, stalk) = idle(counter) ^ K(stalk), then taking K
+ * from ONE measured command must predict every counter including 7.
+ *
+ * 🟢 That is leave-one-out cross-validation written as a C test, and it is not
+ * circular: both inputs are capture bytes and the emitter is the thing being
+ * asked to satisfy them. tools/derive_stalk_check.py runs the same check over
+ * all 51 payloads, 300 out-of-sample predictions, zero misses.
+ */
+static void test_turn_check_table_is_pinned_at_every_counter(void) {
+    printf("\n-- 깜빡이: 검사표 16줄 전부, 유휴 프레임으로 --\n");
+
+    /* The idle payloads 249#<chk><ctr>0000, one per counter, out of the
+     * captures. Not a derivation -- these bytes were on the bus. */
+    static const uint8_t IDLE_CHECK[16] = {
+        0x9B, 0xE8, 0x2A, 0xD3,
+        0xD3, 0x83, 0x4C, 0x5E,
+        0x3F, 0x5E, 0xE2, 0x28,
+        0x3A, 0x13, 0xAF, 0xCE,
+    };
+
+    /* One measured command per direction supplies K. Counter 9 -> A, which is
+     * the very first injection in TSL좌깜빡이켜기, and the two others beside it. */
+    const struct { int32_t turn; uint8_t prev; uint8_t check; } SEED[] = {
+        {FSD_EMIT_TURN_LEFT, 0x09, 0x92},   /* 249#920A0800 */
+        {FSD_EMIT_TURN_RIGHT, 0x0F, 0xA3},  /* 249#A3000400 */
+        {FSD_EMIT_TURN_CANCEL, 0x00, 0xF4}, /* 249#F4010200 */
+    };
+
+    for (unsigned s = 0; s < sizeof(SEED) / sizeof(SEED[0]); s++) {
+        const uint8_t k = (uint8_t)(SEED[s].check ^ IDLE_CHECK[(SEED[s].prev + 1u) & 0x0Fu]);
+
+        for (unsigned c = 0; c < 16u; c++) {
+            uint8_t car[4] = {0x00, (uint8_t)c, 0x00, 0x00};
+            FsdEmitTemplate t = turn_template(car, 1000u);
+            FsdEmitFrame f;
+            CHECK(fsd_emit_build(FSD_ACT_TURN_SIGNAL, SEED[s].turn, &t, 1010u, &f)
+                      == FSD_EMIT_OK,
+                  "%s ctr %X builds", fsd_emit_turn_str(SEED[s].turn), c);
+            const uint8_t want = (uint8_t)(IDLE_CHECK[(c + 1u) & 0x0Fu] ^ k);
+            CHECK(f.data[FSD_EMIT_TURN_CHK_BYTE] == want,
+                  "%s from ctr %X: predicted %02X, got %02X",
+                  fsd_emit_turn_str(SEED[s].turn), c, want,
+                  f.data[FSD_EMIT_TURN_CHK_BYTE]);
+        }
+    }
 }
 
 static void test_result_names(void) {
     printf("\n-- 사유에 이름이 있다 --\n");
     const FsdEmitResult all[] = {
         FSD_EMIT_OK, FSD_EMIT_NO_TEMPLATE, FSD_EMIT_STALE_TEMPLATE,
-        FSD_EMIT_BAD_TEMPLATE, FSD_EMIT_NO_ENCODING,
+        FSD_EMIT_BAD_TEMPLATE, FSD_EMIT_NO_ENCODING, FSD_EMIT_NO_CHECK,
     };
     for(unsigned i = 0; i < sizeof(all) / sizeof(all[0]); i++) {
         const char* s = fsd_emit_result_str(all[i]);
@@ -630,6 +1058,14 @@ int main(void) {
     test_unmeasured_doors_are_refused();
     test_argless_actions_ignore_the_argument();
     test_door_row_is_open_but_narrow();
+    test_turn_matches_tsl_byte_for_byte();
+    test_turn_reproduces_the_cars_own_frames();
+    test_turn_refuses_outside_the_measured_region();
+    test_turn_refusals();
+    test_turn_writes_only_its_own_three_bits();
+    test_turn_counter_advances_and_wraps();
+    test_turn_matches_every_observed_command();
+    test_turn_check_table_is_pinned_at_every_counter();
     test_no_counter_in_the_frame();
     test_refuses_without_a_template();
     test_refuses_a_stale_template();

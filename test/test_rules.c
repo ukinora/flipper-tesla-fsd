@@ -349,6 +349,11 @@ static void test_affects_is_honest(void) {
           "🔴 the hazards land in 0x3F5 bit 4, which we now read — the car "
           "cannot tell our command from the owner's button, so 'on hazards, "
           "hazards' would hold itself on");
+    CHECK(fsd_rule_affects(FSD_ACT_TURN_SIGNAL, out, FSD_RULE_MAX_AFFECTS) == 1 &&
+              out[0] == FSD_SIG_TURN_STALK,
+          "🔴 the turn signal writes 0x249 byte 2, which IS the signal — no "
+          "controller stands in between, so our command is our own next "
+          "observation, at the 50 ms interval its row allows");
 
     /* 🔴 THE RULE THAT MADE THAT ROW NECESSARY, AND WHY IT IS NOT OPTIONAL.
      *
@@ -368,6 +373,8 @@ static void test_affects_is_honest(void) {
         {FSD_ACT_HAZARDS, FSD_SIG_HAZARD_ON, "the hazards set the bit we read"},
         {FSD_ACT_SCROLL, FSD_SIG_SCROLL_TICKS, "the scroll writes the field we read"},
         {FSD_ACT_GEAR_D, FSD_SIG_GEAR, "the gear moves the gear we read"},
+        {FSD_ACT_TURN_SIGNAL, FSD_SIG_TURN_STALK,
+         "the turn signal writes the very frame the signal is read from"},
     };
     for (unsigned i = 0; i < sizeof(feedback) / sizeof(feedback[0]); i++) {
         const uint8_t n = fsd_rule_affects(feedback[i].action, out, FSD_RULE_MAX_AFFECTS);

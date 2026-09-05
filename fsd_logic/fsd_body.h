@@ -16,7 +16,7 @@
  * triggers and actions are M:N, a row like T1 cannot exist.
  *
  * Risk does not live on the trigger. It lives on WHAT WE DO TO THE CAR. Index
- * the table by action and a hundred rules still check the same seven rows.
+ * the table by action and a hundred rules still check the same eight rows.
  *
  *      rule engine     trigger -> action      (owner builds these in the app)
  *          |
@@ -35,23 +35,24 @@
  * subtract. No OpMode value is added, and neither copy of fsd_can_transmit()
  * changes.
  *
- * THE EMITTER EXISTS FOR EXACTLY ONE ACTION (2026-09-03)
- * ------------------------------------------------------
+ * THE EMITTER EXISTS FOR FOUR ACTIONS (2026-09-06)
+ * ------------------------------------------------
  * 🔴 This section said "THERE IS STILL NO EMITTER ANYWHERE" until the map
- * light command was measured. One now exists, in fsd_body_emit.c, and it builds
- * a frame for MAP_LIGHT and refuses every other action.
+ * light command was measured. Four now exist in fsd_body_emit.c — map light,
+ * door, hazards, turn signal — and it refuses every other action.
  *
  * 🟢 NOTHING TRANSMITS. The emitter returns bytes; no caller puts them on a
  * bus. The first real write is a decision to be made in the car, with something
  * reversible, and it is not made in code.
  *
- * Only one row is armable (MAP_LIGHT, carried over unchanged from T1); every
- * other row has armable_at_runtime = false. Each row says in its comment what
- * evidence flips its bool.
+ * The other four rows have armable_at_runtime = false. Each row says in its
+ * comment what evidence flips its bool — and each of the four that opened did
+ * so because the condition it wrote for itself was met, not because somebody
+ * wanted it open.
  *
  * 🔴 The two statements must move together. armable_at_runtime and "has an
  * emitter" describe the same fact from two sides, and test_body_emit.c asserts
- * they agree for all seven actions — so opening a row without an encoding, or
+ * they agree for every action — so opening a row without an encoding, or
  * writing an encoding without opening the row, turns a test red.
  *
  * See 권한축-재설계.md and 페일세이프-정책.md.
@@ -94,6 +95,12 @@ typedef enum {
      * saved rule into a rule about a different action -- a door rule becoming a
      * seat rule, with nothing on screen to say so. New actions go here. */
     FSD_ACT_HAZARDS,        // 0x3E9 byte0 bit2 -- measured 2026-09-05
+    /* Left/right/cancel is the emitter's ARGUMENT, not three rows. Same
+     * reasoning as the seat: direction does not change the risk, so a row that
+     * cannot change the answer should not exist. Which LAMP it is does not
+     * change it either -- unlike the seats, where left and right are two
+     * different people. */
+    FSD_ACT_TURN_SIGNAL,    // 0x249 byte2 stalk replay -- measured 2026-09-05
     FSD_ACT_COUNT,
 } FsdBodyAction;
 
@@ -252,7 +259,7 @@ FsdBodyVerdict fsd_body_allows(const FsdBodyInputs* in, FsdBodyAction a, uint32_
  *  calling it from firmware would bypass arming. Nothing in the firmware calls
  *  it and nothing should.
  *
- *  It exists because six of the seven rows are not armable yet, which would
+ *  It exists because half the rows are not armable yet, which would
  *  otherwise ship the park / belt / occupancy / rate gates with no test at all
  *  — and this repository's own history is that an untested gate is a wrong
  *  gate. The tests build rows the table does not contain yet and drive every

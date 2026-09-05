@@ -126,10 +126,17 @@ static FsdBodyInputs body_inputs(uint32_t now_ms) {
     in.speed_kph = camera_task_ref_speed_kph();
     in.speed_ms = camera_task_ref_speed_ms();
 
-    /* No feature is enabled. T1 has no way to be armed yet because nothing
-     * needs it armed — the detector measures either way, and the verdict it
-     * records (NOT_ENABLED) is the honest one. T2 could not be armed even if
-     * this were true: its capability row forbids it. */
+    /* No action is enabled, and the memset above is what guarantees it for all
+     * of them -- these two lines are documentation, not the mechanism. The
+     * detectors measure either way, and the verdict they record (NOT_ENABLED)
+     * is the honest one.
+     *
+     * 🔴 The second line used to say "T2 could not be armed even if this were
+     * true: its capability row forbids it." That stopped being true on
+     * 2026-09-05 when the door's command frame was measured and its row opened,
+     * and the same now goes for the hazards and the turn signal. Four rows are
+     * armable today; NOTHING here arms them, and nothing anywhere transmits.
+     * The claim that has to keep being true is this one, not the old one. */
     in.action_enabled[FSD_ACT_MAP_LIGHT] = false;
     in.action_enabled[FSD_ACT_DOOR_OPEN] = false;
 

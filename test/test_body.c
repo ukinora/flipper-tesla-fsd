@@ -517,8 +517,9 @@ static void test_t2_frame_discipline(void) {
  * armable after.
  */
 
-// Every input maximally permissive, every action enabled. Only MAP_LIGHT may
-// get past arming — the other six must refuse on the row, not on the inputs.
+// Every input maximally permissive, every action enabled. Only the four rows
+// whose command frame has been measured may get past arming — the other four
+// must refuse on the row, not on the inputs.
 static void test_rewrite_opened_nothing(void) {
     const uint32_t now = 100000;
     FsdBodyInputs in = good_inputs(now);
@@ -530,10 +531,12 @@ static void test_rewrite_opened_nothing(void) {
           "DOOR_OPEN joined it once its command frame was measured (2026-09-05)");
     CHECK(fsd_body_allows(&in, FSD_ACT_HAZARDS, now) == FSD_BODY_OK,
           "HAZARDS joined the same day, with the motion gates open on purpose");
+    CHECK(fsd_body_allows(&in, FSD_ACT_TURN_SIGNAL, now) == FSD_BODY_OK,
+          "TURN_SIGNAL joined 2026-09-06, on a measured frame plus owner consent");
 
     for (int a = 0; a < FSD_ACT_COUNT; a++) {
         if (a == FSD_ACT_MAP_LIGHT || a == FSD_ACT_DOOR_OPEN ||
-            a == FSD_ACT_HAZARDS) continue;
+            a == FSD_ACT_HAZARDS || a == FSD_ACT_TURN_SIGNAL) continue;
         CHECK(fsd_body_allows(&in, (FsdBodyAction)a, now) == FSD_BODY_NOT_ARMABLE,
               "%s must refuse on its row even with every input satisfied",
               fsd_body_action_str((FsdBodyAction)a));
@@ -541,11 +544,65 @@ static void test_rewrite_opened_nothing(void) {
 
     // The count itself, so adding a row without deciding its arming is a
     // failing test rather than a silent grant. It moved 1 -> 2 -> 3 on
-    // 2026-09-05; each move cost red tests, which is the price it should cost.
+    // 2026-09-05 and 3 -> 4 on 2026-09-06; each move cost red tests, which is
+    // the price it should cost.
     int armable = 0;
     for (int a = 0; a < FSD_ACT_COUNT; a++)
         if (fsd_body_caps((FsdBodyAction)a)->armable_at_runtime) armable++;
-    CHECK(armable == 3, "exactly three armable rows, found %d", armable);
+    CHECK(armable == 4, "exactly four armable rows, found %d", armable);
+}
+
+/* 🔴 THE TURN SIGNAL IS THE SECOND ROW TO OPEN THE MOTION GATES, and unlike
+ * the hazards it has a DIRECTION, so its row deserves to be pinned rather than
+ * counted. Every one of these came from an owner decision on 2026-09-06 or
+ * from a measurement; none is a default. */
+static void test_turn_signal_row_is_open_where_it_has_to_be(void) {
+    printf("\n-- 깜빡이 행: 주행 중 허용, 나머지는 그대로 --\n");
+
+    const FsdBodyCaps *c = fsd_body_caps(FSD_ACT_TURN_SIGNAL);
+    CHECK(c != NULL, "the row exists");
+    if (!c) return;
+
+    // Owner decision 2: an indicator that may only act in park cannot indicate.
+    CHECK(c->may_act_while_moving, "may act while moving (owner, 2026-09-06)");
+    CHECK(c->may_act_out_of_park, "may act out of park (same decision)");
+
+    // And nothing else relaxed with it.
+    CHECK(!c->may_act_without_driver, "still needs someone in the driver's seat");
+    CHECK(!c->may_act_without_drive_session, "still needs a drive to have happened");
+    CHECK(!c->requires_park && !c->requires_belt && !c->requires_passenger_empty,
+          "no gate borrowed from another row");
+
+    // 50 ms is the car's own period for 0x249 and the rate TSL re-sends at.
+    // Written as a literal so that changing the constant turns this red rather
+    // than moving the assertion with it.
+    CHECK(c->min_interval_ms == 50u, "50 ms interval, got %u", c->min_interval_ms);
+    CHECK(c->max_hold_ms == 1000u, "1000 ms hold ceiling, got %u", c->max_hold_ms);
+
+    /* 🔴 The loosest interval in the table, so say so out loud: nothing else
+     * may fire this often, and the thing that keeps it from being a burst
+     * generator is max_hold_ms. If some other row is ever set below this, the
+     * reasoning in fsd_body.c stops being true. */
+    for (int a = 0; a < FSD_ACT_COUNT; a++) {
+        const FsdBodyCaps *o = fsd_body_caps((FsdBodyAction)a);
+        if (!o || a == FSD_ACT_TURN_SIGNAL || o->min_interval_ms == 0u) continue;
+        CHECK(o->min_interval_ms >= c->min_interval_ms,
+              "%s fires faster than the turn signal (%u < %u)",
+              fsd_body_action_str((FsdBodyAction)a), o->min_interval_ms,
+              c->min_interval_ms);
+    }
+
+    // A moving car with no driver still refuses — the direction of the gate
+    // that stayed shut, checked rather than assumed from the bool above.
+    const uint32_t now = 100000;
+    FsdBodyInputs in = good_inputs(now);
+    in.action_enabled[FSD_ACT_TURN_SIGNAL] = true;
+    in.speed_kph = 88.0f;
+    CHECK(fsd_body_allows(&in, FSD_ACT_TURN_SIGNAL, now) == FSD_BODY_OK,
+          "88 km/h is fine — that is the point of the row");
+    in.driver_present = false;
+    CHECK(fsd_body_allows(&in, FSD_ACT_TURN_SIGNAL, now) == FSD_BODY_NO_DRIVER_PRESENT,
+          "an empty seat is not");
 }
 
 static void test_caps_table_is_well_formed(void) {
@@ -736,6 +793,7 @@ int main(void) {
     test_t2_gesture();
     test_t2_frame_discipline();
     test_rewrite_opened_nothing();
+    test_turn_signal_row_is_open_where_it_has_to_be();
     test_caps_table_is_well_formed();
     test_rate_limit();
     test_gear_row_shape();

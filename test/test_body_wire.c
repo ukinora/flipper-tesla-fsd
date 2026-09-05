@@ -42,6 +42,10 @@ static const uint8_t MUX00[8] = {0x00, 0x55, 0x55, 0x55, 0x00, 0x00, 0x65, 0x85}
 // The car's 0x229, verbatim from 기어D-A1 at t=6.440.
 static const uint8_t STALK[3] = {0xDD, 0x06, 0x00};
 
+/* 0x249 as the car sends it, captures/2026-09-05-4차/TSL좌깜빡이켜기 at 7.955.
+ * Four bytes: CRC, counter, stalk position, and one the car keeps at zero. */
+static const uint8_t LSTALK[4] = {0x5E, 0x09, 0x00, 0x00};
+
 static FsdBodyRef ref_of(const uint8_t *d, uint8_t dlc, uint32_t ms) {
     FsdBodyRef r;
     memset(&r, 0, sizeof(r));
@@ -270,6 +274,97 @@ static void test_gear_is_isolated_by_its_frame(void) {
 // computed its vector from the constant it was supposed to pin. The fix is the
 // same one. Changing a row now requires changing this table too, and that is
 // the entire point of it.
+/**
+ * 🔴 THE STALK FRAME IS WHY THIS FILE IS BIT-GRANULAR.
+ *
+ * The owner said yes to sending 0x249 on 2026-09-06. That frame is the LEFT
+ * stalk: it carries the high beams (12|2) and the washer/wiper (14|2) beside
+ * the indicator (17|3). "Allow the id" would let a bug in the indicator emitter
+ * flash oncoming traffic or start the wipers, so the permission is three bits.
+ *
+ * ⚠️ WHAT THIS ROW CANNOT DO, SAID OUT LOUD. The counter shares its byte with
+ * the high beams, and the counter has to change, so byte 1 is entirely payload
+ * here — this file cannot catch a high beam being set. fsd_body_emit.c does,
+ * from the other side, by refusing to BUILD a frame whose template has those
+ * bits (FSD_EMIT_NO_CHECK). Two mechanisms, one hole each, and they do not
+ * overlap.
+ */
+static void test_turn_signal_is_three_bits_not_a_frame(void) {
+    const FsdBodyWire *w = fsd_body_wire(FSD_ACT_TURN_SIGNAL);
+    CHECK(w != NULL, "the stalk has a row");
+    if (!w) return;
+    CHECK(w->can_id == 0x249u, "0x249");
+    CHECK(w->dlc == 4u, "four bytes");
+
+    FsdBodyRef ref = ref_of(LSTALK, 4, 1000);
+    uint8_t out[4];
+
+    // The real command: 249#5E090000 -> 920A0800.
+    const uint8_t tsl[4] = {0x92, 0x0A, 0x08, 0x00};
+    memcpy(out, tsl, 4);
+    CHECK(fsd_body_wire_check(FSD_ACT_TURN_SIGNAL, 0x249u, out, 4, &ref, 1000) == FSD_WIRE_OK,
+          "the frame TSL actually sent passes");
+
+    // Every indicator position passes; each is one of the three bits.
+    const uint8_t stalks[] = {0x02, 0x04, 0x06, 0x08, 0x0E};
+    for (unsigned i = 0; i < sizeof(stalks) / sizeof(stalks[0]); i++) {
+        memcpy(out, tsl, 4);
+        out[2] = stalks[i];
+        CHECK(fsd_body_wire_check(FSD_ACT_TURN_SIGNAL, 0x249u, out, 4, &ref, 1000)
+                  == FSD_WIRE_OK,
+              "stalk value 0x%02X is inside the mask", stalks[i]);
+    }
+
+    /* 🔴 THE ONE THAT MATTERS. Bit 0 and bits [7:4] of byte 2 are
+     * leftStalkReserved1 — not ours, and the car had them at zero. */
+    memcpy(out, tsl, 4);
+    out[2] = 0x18; // 0x08 indicator + bit 4
+    CHECK(fsd_body_wire_check(FSD_ACT_TURN_SIGNAL, 0x249u, out, 4, &ref, 1000)
+              == FSD_WIRE_OUT_OF_MASK,
+          "a reserved bit in byte 2 is refused");
+    memcpy(out, tsl, 4);
+    out[2] = 0x09; // 0x08 indicator + bit 0
+    CHECK(fsd_body_wire_check(FSD_ACT_TURN_SIGNAL, 0x249u, out, 4, &ref, 1000)
+              == FSD_WIRE_OUT_OF_MASK,
+          "and so is bit 0");
+
+    // byte 3 belongs to the car.
+    memcpy(out, tsl, 4);
+    out[3] = 0x01;
+    CHECK(fsd_body_wire_check(FSD_ACT_TURN_SIGNAL, 0x249u, out, 4, &ref, 1000)
+              == FSD_WIRE_OUT_OF_MASK,
+          "byte 3 must be the car's");
+
+    // Wrong id, wrong length, no reference — the usual three, because this row
+    // is the first one added since they were written and none of them is
+    // automatic.
+    CHECK(fsd_body_wire_check(FSD_ACT_TURN_SIGNAL, 0x3E9u, out, 4, &ref, 1000)
+              == FSD_WIRE_WRONG_ID,
+          "the hazard id is not this action's");
+    memcpy(out, tsl, 4);
+    CHECK(fsd_body_wire_check(FSD_ACT_TURN_SIGNAL, 0x249u, out, 3, &ref, 1000)
+              == FSD_WIRE_WRONG_DLC,
+          "three bytes is not this frame");
+    FsdBodyRef none;
+    memset(&none, 0, sizeof(none));
+    CHECK(fsd_body_wire_check(FSD_ACT_TURN_SIGNAL, 0x249u, out, 4, &none, 1000)
+              == FSD_WIRE_NO_REF,
+          "a bus we are not hearing is a bus we do not write to");
+    CHECK(fsd_body_wire_check(FSD_ACT_TURN_SIGNAL, 0x249u, out, 4, &ref,
+                              1000 + FSD_BODY_WIRE_REF_FRESH_MS)
+              == FSD_WIRE_REF_STALE,
+          "and a stale reference is no reference");
+
+    /* 🟢 The high beam and washer bits ARE inside the payload mask, so this
+     * file lets them through — asserted rather than left implicit, because the
+     * comment above claims it and a claim in a comment is not a check. The
+     * emitter is what refuses these. */
+    memcpy(out, tsl, 4);
+    out[1] = (uint8_t)(out[1] | 0x10u);
+    CHECK(fsd_body_wire_check(FSD_ACT_TURN_SIGNAL, 0x249u, out, 4, &ref, 1000) == FSD_WIRE_OK,
+          "byte 1 is all payload here — the emitter is the gate for its high bits");
+}
+
 static void test_masks_are_pinned(void) {
     static const struct {
         FsdBodyAction a;
@@ -290,6 +385,10 @@ static void test_masks_are_pinned(void) {
         // gear: CRC and (command|counter). Wide on purpose — neither byte can
         // be compared against the reference.
         {FSD_ACT_GEAR_D, 0x229u, 3, {0xFF, 0xFF, 0, 0, 0, 0, 0, 0}},
+        // turn signal: CRC, counter byte, and byte2 bits [3:1]. The first two
+        // for the same reason as the gear; the third is the indicator field and
+        // NOTHING ELSE in that byte, because the rest is leftStalkReserved1.
+        {FSD_ACT_TURN_SIGNAL, 0x249u, 4, {0xFF, 0xFF, 0x0E, 0, 0, 0, 0, 0}},
     };
     const int n = (int)(sizeof(expect) / sizeof(expect[0]));
 
@@ -328,8 +427,10 @@ static void test_every_bit_is_accounted_for(void) {
         const FsdBodyWire *w = fsd_body_wire((FsdBodyAction)a);
         if (!w) continue;
 
-        const uint8_t *car =
-            (w->can_id == 0x229u) ? STALK : (w->mux_value == 0x29u) ? MUX29 : MUX00;
+        const uint8_t *car = (w->can_id == 0x229u)   ? STALK
+                             : (w->can_id == 0x249u) ? LSTALK
+                             : (w->mux_value == 0x29u) ? MUX29
+                                                       : MUX00;
         FsdBodyRef ref = ref_of(car, w->dlc, 1000);
 
         for (uint8_t i = 0; i < w->dlc; i++) {
@@ -386,6 +487,7 @@ int main(void) {
     test_camera_toggle();
     test_seat_and_scroll();
     test_gear_is_isolated_by_its_frame();
+    test_turn_signal_is_three_bits_not_a_frame();
     test_masks_are_pinned();
     test_every_bit_is_accounted_for();
     test_verdicts_are_nameable();

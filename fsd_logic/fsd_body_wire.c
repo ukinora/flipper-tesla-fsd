@@ -6,14 +6,33 @@
 
 /* The wire rows.
  *
- * Every mask below is a bit TSL was OBSERVED changing in the 2026-09-01
- * capture, decoded in 차량-캡처-2026-09-01.md §8. Nothing here is inferred from
- * a DBC, and nothing here has been transmitted yet.
+ * Every mask below is a bit TSL was OBSERVED changing in a capture -- the
+ * 2026-09-01 one for the four original rows (차량-캡처-2026-09-01.md §8), the
+ * 2026-09-05 afternoon one for the stalk (차량-캡처-2026-09-05-4차.md §5-②).
+ * Nothing here is inferred from a DBC, and nothing here has been transmitted.
  *
- * 🔴 Two actions are absent on purpose: MAP_LIGHT and DOOR_OPEN. Their command
- * frame is not known — 0x273 bit 59 correlates with both, which means it
- * selects neither. An action with no row is refused by this file no matter what
- * the capability table says. */
+ * 🔴 THREE ACTIONS ARE ABSENT, AND THE REASON CHANGED (2026-09-06).
+ * This comment used to read "MAP_LIGHT and DOOR_OPEN are absent because their
+ * command frame is not known -- 0x273 bit 59 correlates with both, which means
+ * it selects neither." Both halves of that stopped being true: the 2nd visit
+ * separated bit 59 (it is the map light, and not the door), the 3rd found the
+ * door on 0x1F9, and the hazards arrived on 0x3E9 with no row written at all.
+ *
+ * So MAP_LIGHT, DOOR_OPEN and HAZARDS are absent for a DIFFERENT reason now:
+ * their frames are known, and nobody has decided to open them here. An action
+ * with no row is refused by this file no matter what the capability table says,
+ * and refused is the correct state until the first write test in the car. It
+ * costs nothing today -- no caller reaches this file -- and it means the day a
+ * caller appears, the three that can open a door or hold a lamp on stay shut
+ * until somebody writes a row on purpose.
+ *
+ * 🔴 TURN_SIGNAL HAS A ROW AND THEY DO NOT, WHICH IS NOT AN OVERSIGHT. Its
+ * row is where the owner's 2026-09-06 decision lives. The other three write to
+ * frames that carry nothing but their own command, so "may we send this frame"
+ * and "may we do this thing" are the same question there, already answered by
+ * fsd_body.c. 0x249 is not like that: it carries the high beams and the washer
+ * beside the indicator, so the permission had to be narrowed to bits before it
+ * could be granted at all. The row IS the narrowing. */
 static const FsdBodyWire FSD_BODY_WIRES[] = {
     [FSD_ACT_CAMERA] =
         {
@@ -92,6 +111,41 @@ static const FsdBodyWire FSD_BODY_WIRES[] = {
             .dlc = 3u,
             .mux_byte = FSD_BODY_WIRE_NO_MUX,
             .payload = {[0] = 0xFFu, [1] = 0xFFu},
+        },
+
+    [FSD_ACT_TURN_SIGNAL] =
+        {
+            .action = FSD_ACT_TURN_SIGNAL,
+            /* 249#5E090000 -> 920A0800. Measured 2026-09-05 (4th visit).
+             *
+             * 🔴 THIS ROW IS THE WHOLE ANSWER TO "MAY WE SEND THE STALK
+             * FRAME". The owner said yes to 0x249 on 2026-09-06, and the ID is
+             * not the unit of that permission: 0x249 is the LEFT stalk, which
+             * carries the high beams (12|2) and the washer/wiper (14|2)
+             * alongside the indicator. Allowing the id would let a bug in the
+             * indicator emitter flash the high beams at oncoming traffic or
+             * start the wipers. Allowing three bits cannot.
+             *
+             * byte0 is the CRC over a frame that just changed and byte1 holds
+             * the counter, which must be the car's NEXT value -- neither can be
+             * compared against the reference, so both are payload. Same shape
+             * as 0x229 above, and written out for the same reason: a mask this
+             * wide should be visible rather than glossed.
+             *
+             * 🟢 What that leaves is exactly the check that matters. byte1's
+             * high nibble is inside the payload mask, so this file does not
+             * catch a high beam being flipped -- but fsd_body_emit.c refuses
+             * to build such a frame at all (FSD_EMIT_NO_CHECK), because the
+             * check table was never measured there. Two different mechanisms,
+             * and the emitter's is the tighter one for once.
+             *
+             * byte2 is masked to bits [3:1], the indicator field. Bit 0 and
+             * bits [7:4] are opendbc's leftStalkReserved1 and were zero in all
+             * 51 payloads; they must equal the car's. byte3 likewise. */
+            .can_id = 0x249u,
+            .dlc = 4u,
+            .mux_byte = FSD_BODY_WIRE_NO_MUX,
+            .payload = {[0] = 0xFFu, [1] = 0xFFu, [2] = 0x0Eu},
         },
 };
 
