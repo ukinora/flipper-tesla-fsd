@@ -141,8 +141,51 @@ extern "C" {
 
 #define FSD_EMIT_DOOR_ID         0x1F9u
 #define FSD_EMIT_DOOR_BYTE       1u
-#define FSD_EMIT_DOOR_MASK       0x03u
 #define FSD_EMIT_DOOR_DLC        8u
+
+/* WHICH DOOR. Measured, one door per visit:
+ *
+ *      right FRONT   byte1 = 0x03    3rd visit, 2026-09-05
+ *      right REAR    byte1 = 0xC0    4th visit, 2026-09-05 afternoon
+ *
+ * The 4th visit caught the rear one TWICE in two different captures — TSL's
+ * own menu entry, and the three-window-up gesture that fires the same rule —
+ * and both produced 0xC0. That is the internal cross-check; neither reading
+ * rests on the other.
+ *
+ *      (7.458) 1F9#0000000000000000     <- the car
+ *      (7.459) 1F9#00C0000000000000     <- TSL, +1 ms
+ *      (7.53x)                          <- 0x103 latch moves, 70-81 ms later
+ *
+ * ⚠️ TWO POINTS, AND EVERYTHING ELSE IS INFERENCE. 0x03 is bits[1:0] and 0xC0
+ * is bits[7:6], so "four 2-bit fields, value 3 = open" fits both. It also fits
+ * a plain bitmask. Either reading predicts 0x0C and 0x30 for the two LEFT
+ * doors — and NEITHER HAS BEEN SEEN. TSL has no left-door rule, so no capture
+ * can contain one.
+ *
+ * So the left doors are NOT in this enum. A guess here does not fail loudly:
+ * it opens a door on the other side of the car, next to whatever is standing
+ * there. FSD_EMIT_NO_ENCODING is the honest answer until somebody measures it.
+ */
+typedef enum {
+    /* 0 is the right front, which is what every rule stored before this enum
+     * existed already meant. A stored rule must not quietly change which door
+     * it opens because the emitter learned a second one. */
+    FSD_EMIT_DOOR_RIGHT_FRONT = 0,
+    FSD_EMIT_DOOR_RIGHT_REAR = 1,
+    FSD_EMIT_DOOR_COUNT,
+} FsdEmitDoor;
+
+#define FSD_EMIT_DOOR_RF_BITS    0x03u
+#define FSD_EMIT_DOOR_RR_BITS    0xC0u
+
+/** byte1 value for a door selector. False — *bits_out untouched — for a
+ *  selector this car has never been measured to accept. */
+bool fsd_emit_door_bits(int32_t door, uint8_t* bits_out);
+
+/** Name for logs and the serial console. Never returns NULL; an unmeasured
+ *  selector reads as "?" rather than as some door. */
+const char* fsd_emit_door_str(int32_t door);
 
 #define FSD_EMIT_MAP_LIGHT_ID    0x273u
 #define FSD_EMIT_MAP_LIGHT_BYTE  7u
@@ -157,7 +200,10 @@ typedef enum {
     FSD_EMIT_STALE_TEMPLATE,
     /** The template is the wrong id or too short to hold the field. */
     FSD_EMIT_BAD_TEMPLATE,
-    /** This action has no emitter yet. Four of the seven are here. */
+    /** No encoding for this request. Either the action has no emitter yet
+     *  (five of the eight), or it has one but the argument selects something
+     *  nobody has measured — a door on the left, say. Both are gaps, not
+     *  gates, and a gap must never be filled by guessing. */
     FSD_EMIT_NO_ENCODING,
 } FsdEmitResult;
 
@@ -180,6 +226,15 @@ typedef struct {
 /**
  * Build the frame for one action, or say why not.
  *
+ * `arg` is the rule's own argument (FsdRule.arg / FsdRuleDecision.arg), carried
+ * here unchanged. Today only FSD_ACT_DOOR_OPEN reads it, as an FsdEmitDoor.
+ *
+ * 🔴 An action that takes no argument IGNORES it rather than refusing. That is
+ * deliberate: rules stored before an action had an argument carry whatever was
+ * in the field, and a refusal would break them for a value that means nothing.
+ * The door is the opposite case — there 0 has always meant the right front, so
+ * ignoring is exactly what keeps a stored rule pointing at the same door.
+ *
  * 🔴 This answers "what would the bytes be", NOT "may this happen". The
  * authority axis (fsd_body_allows) is a separate question asked separately, and
  * this function deliberately does not call it -- a builder that also decides is
@@ -192,8 +247,9 @@ typedef struct {
  * statements of the same fact, so widening one without the other does nothing,
  * and a host test asserts they agree for every action.
  */
-FsdEmitResult fsd_emit_build(FsdBodyAction action, const FsdEmitTemplate* t,
-                             uint32_t now_ms, FsdEmitFrame* out);
+FsdEmitResult fsd_emit_build(FsdBodyAction action, int32_t arg,
+                             const FsdEmitTemplate* t, uint32_t now_ms,
+                             FsdEmitFrame* out);
 
 /** Names for logs and the serial console. Never returns NULL. */
 const char* fsd_emit_result_str(FsdEmitResult r);

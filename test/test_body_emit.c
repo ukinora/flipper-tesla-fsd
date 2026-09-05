@@ -49,7 +49,7 @@ static void test_matches_tsl_byte_for_byte(void) {
 
     FsdEmitTemplate t = car_template(1000u);
     FsdEmitFrame f;
-    CHECK(fsd_emit_build(FSD_ACT_MAP_LIGHT, &t, 1100u, &f) == FSD_EMIT_OK, "built");
+    CHECK(fsd_emit_build(FSD_ACT_MAP_LIGHT, 0, &t, 1100u, &f) == FSD_EMIT_OK, "built");
     CHECK(f.id == 0x273u, "id 0x273, got 0x%X", (unsigned)f.id);
     CHECK(f.dlc == 8, "dlc 8, got %u", f.dlc);
 
@@ -121,7 +121,7 @@ static void test_hazards_match_tsl_byte_for_byte(void) {
     for(unsigned i = 0; i < 4; i++) {
         FsdEmitTemplate t = hz_template(HZ[i].car, 1000u);
         FsdEmitFrame f;
-        CHECK(fsd_emit_build(FSD_ACT_HAZARDS, &t, 1100u, &f) == FSD_EMIT_OK,
+        CHECK(fsd_emit_build(FSD_ACT_HAZARDS, 0, &t, 1100u, &f) == FSD_EMIT_OK,
               "pair %u built", i);
         CHECK(f.id == 0x3E9u, "pair %u: id 0x3E9", i);
         CHECK(memcmp(f.data, HZ[i].tsl, 8) == 0,
@@ -164,29 +164,29 @@ static void test_hazard_refusals(void) {
     FsdEmitTemplate t;
     memset(&t, 0, sizeof(t));
     FsdEmitFrame f;
-    CHECK(fsd_emit_build(FSD_ACT_HAZARDS, &t, 1000u, &f) == FSD_EMIT_NO_TEMPLATE,
+    CHECK(fsd_emit_build(FSD_ACT_HAZARDS, 0, &t, 1000u, &f) == FSD_EMIT_NO_TEMPLATE,
           "no template -> refuse");
 
     t = hz_template(HZ[0].car, 1000u);
     t.id = 0x273u;
-    CHECK(fsd_emit_build(FSD_ACT_HAZARDS, &t, 1100u, &f) == FSD_EMIT_BAD_TEMPLATE,
+    CHECK(fsd_emit_build(FSD_ACT_HAZARDS, 0, &t, 1100u, &f) == FSD_EMIT_BAD_TEMPLATE,
           "wrong id -> refuse");
 
     /* 🔴 Staleness bites harder here than anywhere else. A copied light
      * frame that is a second old is still a valid light frame; a hazard frame
      * that old carries a counter the car has already run past. */
     t = hz_template(HZ[0].car, 1000u);
-    CHECK(fsd_emit_build(FSD_ACT_HAZARDS, &t, 1000u + 1499u, &f) == FSD_EMIT_OK,
+    CHECK(fsd_emit_build(FSD_ACT_HAZARDS, 0, &t, 1000u + 1499u, &f) == FSD_EMIT_OK,
           "1499 ms old is still usable");
-    CHECK(fsd_emit_build(FSD_ACT_HAZARDS, &t, 1000u + 1500u, &f)
+    CHECK(fsd_emit_build(FSD_ACT_HAZARDS, 0, &t, 1000u + 1500u, &f)
               == FSD_EMIT_STALE_TEMPLATE,
           "1500 ms old is not");
 
     /* And it cannot be confused with the other two commands. */
     FsdEmitTemplate light = car_template(1000u);
-    CHECK(fsd_emit_build(FSD_ACT_HAZARDS, &light, 1100u, &f) == FSD_EMIT_BAD_TEMPLATE,
+    CHECK(fsd_emit_build(FSD_ACT_HAZARDS, 0, &light, 1100u, &f) == FSD_EMIT_BAD_TEMPLATE,
           "hazards + light template -> refuse");
-    CHECK(fsd_emit_build(FSD_ACT_MAP_LIGHT, &t, 1100u, &f) == FSD_EMIT_BAD_TEMPLATE,
+    CHECK(fsd_emit_build(FSD_ACT_MAP_LIGHT, 0, &t, 1100u, &f) == FSD_EMIT_BAD_TEMPLATE,
           "light + hazard template -> refuse");
 }
 
@@ -203,7 +203,7 @@ static void test_hazard_leaves_the_other_nibble_alone(void) {
 
     FsdEmitTemplate t = hz_template(car, 1000u);
     FsdEmitFrame f;
-    CHECK(fsd_emit_build(FSD_ACT_HAZARDS, &t, 1100u, &f) == FSD_EMIT_OK, "built");
+    CHECK(fsd_emit_build(FSD_ACT_HAZARDS, 0, &t, 1100u, &f) == FSD_EMIT_OK, "built");
     CHECK((f.data[6] & 0x0Fu) == 0x02u, "low nibble survives, got 0x%X",
           f.data[6] & 0x0Fu);
     CHECK((f.data[6] >> 4) == 0x0Du, "and the counter advanced C -> D");
@@ -219,7 +219,9 @@ static void test_door_matches_tsl_byte_for_byte(void) {
 
     FsdEmitTemplate t = door_template(1000u);
     FsdEmitFrame f;
-    CHECK(fsd_emit_build(FSD_ACT_DOOR_OPEN, &t, 1100u, &f) == FSD_EMIT_OK, "built");
+    /* arg 0 is the right FRONT door -- the selector every rule stored before
+     * this argument existed already meant. */
+    CHECK(fsd_emit_build(FSD_ACT_DOOR_OPEN, 0, &t, 1100u, &f) == FSD_EMIT_OK, "built");
     CHECK(f.id == 0x1F9u, "id 0x1F9, got 0x%X", (unsigned)f.id);
     CHECK(f.dlc == 8, "dlc 8, got %u", f.dlc);
     CHECK(memcmp(f.data, TSL_DOOR, 8) == 0,
@@ -249,15 +251,15 @@ static void test_door_and_light_do_not_cross(void) {
     FsdEmitFrame f;
 
     /* Right action, wrong template: refused, not silently stamped. */
-    CHECK(fsd_emit_build(FSD_ACT_DOOR_OPEN, &light, 1100u, &f) == FSD_EMIT_BAD_TEMPLATE,
+    CHECK(fsd_emit_build(FSD_ACT_DOOR_OPEN, 0, &light, 1100u, &f) == FSD_EMIT_BAD_TEMPLATE,
           "door action + light template -> refuse");
-    CHECK(fsd_emit_build(FSD_ACT_MAP_LIGHT, &door, 1100u, &f) == FSD_EMIT_BAD_TEMPLATE,
+    CHECK(fsd_emit_build(FSD_ACT_MAP_LIGHT, 0, &door, 1100u, &f) == FSD_EMIT_BAD_TEMPLATE,
           "light action + door template -> refuse");
 
     /* And the two outputs are different frames on different ids. */
     FsdEmitFrame a, b;
-    CHECK(fsd_emit_build(FSD_ACT_DOOR_OPEN, &door, 1100u, &a) == FSD_EMIT_OK, "door built");
-    CHECK(fsd_emit_build(FSD_ACT_MAP_LIGHT, &light, 1100u, &b) == FSD_EMIT_OK, "light built");
+    CHECK(fsd_emit_build(FSD_ACT_DOOR_OPEN, 0, &door, 1100u, &a) == FSD_EMIT_OK, "door built");
+    CHECK(fsd_emit_build(FSD_ACT_MAP_LIGHT, 0, &light, 1100u, &b) == FSD_EMIT_OK, "light built");
     CHECK(a.id != b.id, "different ids");
 }
 
@@ -267,7 +269,7 @@ static void test_door_refusals(void) {
     FsdEmitTemplate t;
     memset(&t, 0, sizeof(t));
     FsdEmitFrame f;
-    CHECK(fsd_emit_build(FSD_ACT_DOOR_OPEN, &t, 1000u, &f) == FSD_EMIT_NO_TEMPLATE,
+    CHECK(fsd_emit_build(FSD_ACT_DOOR_OPEN, 0, &t, 1000u, &f) == FSD_EMIT_NO_TEMPLATE,
           "no template -> refuse");
 
     /* 🔴 We have only ever seen this frame all-zero, which is exactly why
@@ -275,13 +277,13 @@ static void test_door_refusals(void) {
      * not knowing what the other seven bytes mean. */
     t = door_template(1000u);
     t.dlc = 4;
-    CHECK(fsd_emit_build(FSD_ACT_DOOR_OPEN, &t, 1100u, &f) == FSD_EMIT_BAD_TEMPLATE,
+    CHECK(fsd_emit_build(FSD_ACT_DOOR_OPEN, 0, &t, 1100u, &f) == FSD_EMIT_BAD_TEMPLATE,
           "short frame -> refuse (this car has short frames: 0x311, 0x399, 0x3D8)");
 
     t = door_template(1000u);
-    CHECK(fsd_emit_build(FSD_ACT_DOOR_OPEN, &t, 1000u + 1499u, &f) == FSD_EMIT_OK,
+    CHECK(fsd_emit_build(FSD_ACT_DOOR_OPEN, 0, &t, 1000u + 1499u, &f) == FSD_EMIT_OK,
           "1499 ms old is still usable");
-    CHECK(fsd_emit_build(FSD_ACT_DOOR_OPEN, &t, 1000u + 1500u, &f)
+    CHECK(fsd_emit_build(FSD_ACT_DOOR_OPEN, 0, &t, 1000u + 1500u, &f)
               == FSD_EMIT_STALE_TEMPLATE,
           "1500 ms old is not");
 }
@@ -335,14 +337,14 @@ static void test_refuses_without_a_template(void) {
     FsdEmitTemplate t;
     memset(&t, 0, sizeof(t));      /* seen = false */
     FsdEmitFrame f;
-    CHECK(fsd_emit_build(FSD_ACT_MAP_LIGHT, &t, 1000u, &f) == FSD_EMIT_NO_TEMPLATE,
+    CHECK(fsd_emit_build(FSD_ACT_MAP_LIGHT, 0, &t, 1000u, &f) == FSD_EMIT_NO_TEMPLATE,
           "no template -> refuse");
 
     /* 🔴 Zeros are not a fallback. 0x273 carries mirrors, locks, horn and seat
      * heaters; a frame of zeros is a statement about all of them. */
     t = car_template(1000u);
     memset(t.data, 0, 8);
-    CHECK(fsd_emit_build(FSD_ACT_MAP_LIGHT, &t, 1100u, &f) == FSD_EMIT_OK,
+    CHECK(fsd_emit_build(FSD_ACT_MAP_LIGHT, 0, &t, 1100u, &f) == FSD_EMIT_OK,
           "a real all-zero payload is still a template (we do not judge content)");
     CHECK(f.data[7] == 0x08u, "and we only ever set our own bit");
 }
@@ -353,9 +355,9 @@ static void test_refuses_a_stale_template(void) {
     FsdEmitTemplate t = car_template(1000u);
     FsdEmitFrame f;
 
-    CHECK(fsd_emit_build(FSD_ACT_MAP_LIGHT, &t, 1000u + 1499u, &f) == FSD_EMIT_OK,
+    CHECK(fsd_emit_build(FSD_ACT_MAP_LIGHT, 0, &t, 1000u + 1499u, &f) == FSD_EMIT_OK,
           "1499 ms old is still usable");
-    CHECK(fsd_emit_build(FSD_ACT_MAP_LIGHT, &t, 1000u + 1500u, &f)
+    CHECK(fsd_emit_build(FSD_ACT_MAP_LIGHT, 0, &t, 1000u + 1500u, &f)
               == FSD_EMIT_STALE_TEMPLATE,
           "1500 ms old is not");
 
@@ -366,7 +368,7 @@ static void test_refuses_a_stale_template(void) {
     /* The millisecond clock wraps every ~49 days. A fresh template must not
      * look ancient across the wrap. */
     t.seen_ms = 0xFFFFFF00u;
-    CHECK(fsd_emit_build(FSD_ACT_MAP_LIGHT, &t, 0x00000100u, &f) == FSD_EMIT_OK,
+    CHECK(fsd_emit_build(FSD_ACT_MAP_LIGHT, 0, &t, 0x00000100u, &f) == FSD_EMIT_OK,
           "fresh across the 32-bit wrap");
 }
 
@@ -377,15 +379,15 @@ static void test_refuses_the_wrong_frame(void) {
     FsdEmitFrame f;
 
     t.id = 0x3C2u;   /* the scroll/seat/camera frame -- a plausible mix-up */
-    CHECK(fsd_emit_build(FSD_ACT_MAP_LIGHT, &t, 1100u, &f) == FSD_EMIT_BAD_TEMPLATE,
+    CHECK(fsd_emit_build(FSD_ACT_MAP_LIGHT, 0, &t, 1100u, &f) == FSD_EMIT_BAD_TEMPLATE,
           "wrong id -> refuse");
 
     t = car_template(1000u);
     t.dlc = 7;
-    CHECK(fsd_emit_build(FSD_ACT_MAP_LIGHT, &t, 1100u, &f) == FSD_EMIT_BAD_TEMPLATE,
+    CHECK(fsd_emit_build(FSD_ACT_MAP_LIGHT, 0, &t, 1100u, &f) == FSD_EMIT_BAD_TEMPLATE,
           "short frame -> refuse (byte 7 would not exist)");
 
-    CHECK(fsd_emit_build(FSD_ACT_MAP_LIGHT, NULL, 1100u, &f) == FSD_EMIT_BAD_TEMPLATE,
+    CHECK(fsd_emit_build(FSD_ACT_MAP_LIGHT, 0, NULL, 1100u, &f) == FSD_EMIT_BAD_TEMPLATE,
           "null template -> refuse");
 }
 
@@ -418,7 +420,7 @@ static void test_which_actions_have_an_encoding(void) {
     for(unsigned i = 0; i < sizeof(rest) / sizeof(rest[0]); i++) {
         CHECK(!fsd_emit_supported(rest[i]),
               "%s has no emitter", fsd_body_action_str(rest[i]));
-        CHECK(fsd_emit_build(rest[i], &t, 1100u, &f) == FSD_EMIT_NO_ENCODING,
+        CHECK(fsd_emit_build(rest[i], 0, &t, 1100u, &f) == FSD_EMIT_NO_ENCODING,
               "%s -> NO_ENCODING", fsd_body_action_str(rest[i]));
     }
 
@@ -465,7 +467,7 @@ static void test_no_action_borrows_another_encoding(void) {
         if(!fsd_emit_supported(act)) continue;
         supported++;
 
-        FsdEmitResult r = fsd_emit_build(act, &t, 1100u, &f);
+        FsdEmitResult r = fsd_emit_build(act, 0, &t, 1100u, &f);
         if(act == FSD_ACT_MAP_LIGHT) {
             CHECK(r == FSD_EMIT_OK, "map light accepts its own template");
             CHECK(f.id == FSD_EMIT_MAP_LIGHT_ID, "and emits on 0x273");
@@ -490,6 +492,130 @@ static void test_result_names(void) {
     }
 }
 
+
+/* The 4th visit's frame, byte for byte:
+ *
+ *      (7.458) 1F9#0000000000000000     <- the car
+ *      (7.459) 1F9#00C0000000000000     <- TSL, +1 ms
+ *
+ * Caught twice in that visit -- TSL's own menu entry, and the three-window-up
+ * gesture that fires the same rule -- and both produced 0xC0. */
+static const uint8_t TSL_DOOR_RR[8] = {0x00, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+
+static void test_door_selector_matches_tsl_byte_for_byte(void) {
+    printf("\n-- door: the rear door's frame == the frame TSL sent --\n");
+
+    FsdEmitTemplate t = door_template(1000u);
+    FsdEmitFrame f;
+    CHECK(fsd_emit_build(FSD_ACT_DOOR_OPEN, FSD_EMIT_DOOR_RIGHT_REAR, &t, 1100u, &f)
+              == FSD_EMIT_OK,
+          "right rear must build");
+    CHECK(f.id == 0x1F9u, "id 0x1F9, got 0x%X", (unsigned)f.id);
+    CHECK(f.dlc == 8, "dlc 8, got %u", f.dlc);
+    CHECK(memcmp(f.data, TSL_DOOR_RR, 8) == 0,
+          "bytes must equal TSL's: got %02X%02X%02X%02X%02X%02X%02X%02X",
+          f.data[0], f.data[1], f.data[2], f.data[3],
+          f.data[4], f.data[5], f.data[6], f.data[7]);
+
+    /* Two bits, both in byte 1 -- the same shape as the front door, a
+     * different pair. */
+    unsigned diff = 0;
+    for(unsigned i = 0; i < 8; i++) {
+        uint8_t x = (uint8_t)(f.data[i] ^ CAR_DOOR[i]);
+        while(x) { diff += (x & 1u); x >>= 1; }
+    }
+    CHECK(diff == 2, "exactly two bits differ, got %u", diff);
+    CHECK((f.data[1] ^ CAR_DOOR[1]) == 0xC0u, "and they are byte1 bits 6 and 7");
+
+    /* 🔴 The two doors must not produce the same frame. This is the assertion
+     * that a swapped table or an ignored argument turns red on. */
+    FsdEmitFrame front;
+    CHECK(fsd_emit_build(FSD_ACT_DOOR_OPEN, FSD_EMIT_DOOR_RIGHT_FRONT, &t, 1100u,
+                         &front) == FSD_EMIT_OK, "right front must build");
+    CHECK(memcmp(front.data, TSL_DOOR, 8) == 0, "front is still 0x03");
+    CHECK(front.data[1] != f.data[1],
+          "the two doors must differ on the wire: both are 0x%02X", f.data[1]);
+    CHECK((front.data[1] & f.data[1]) == 0u,
+          "and their fields must not overlap: 0x%02X & 0x%02X",
+          front.data[1], f.data[1]);
+}
+
+/* 🔴 THE ONE THAT MATTERS MOST. Two doors were measured; the other two are
+ * inference, and an inference here opens a door on the far side of the car. */
+static void test_unmeasured_doors_are_refused(void) {
+    printf("\n-- door: the doors nobody measured are refused, not guessed --\n");
+
+    FsdEmitTemplate t = door_template(1000u);
+    FsdEmitFrame f;
+
+    /* 0x0C and 0x30 are what "four 2-bit fields" predicts for the two LEFT
+     * doors. TSL has no left-door rule, so no capture contains one, so we do
+     * not know. The selectors that would carry them must refuse. */
+    static const int32_t UNMEASURED[] = {2, 3, 4, 99, -1, -2147483647 - 1, 2147483647};
+    for(unsigned i = 0; i < sizeof(UNMEASURED) / sizeof(UNMEASURED[0]); i++) {
+        memset(&f, 0xAA, sizeof(f));
+        CHECK(fsd_emit_build(FSD_ACT_DOOR_OPEN, UNMEASURED[i], &t, 1100u, &f)
+                  == FSD_EMIT_NO_ENCODING,
+              "door selector %ld must be refused as NO_ENCODING", (long)UNMEASURED[i]);
+        uint8_t bits = 0xAAu;
+        CHECK(!fsd_emit_door_bits(UNMEASURED[i], &bits),
+              "door selector %ld has no measured bits", (long)UNMEASURED[i]);
+        CHECK(bits == 0xAAu, "a refused lookup must not touch the output");
+    }
+
+    /* 🔴 And the refusal must be NO_ENCODING even when the template is fine,
+     * because "we do not know which bits" is a gap, not something waiting for
+     * a fresher frame. A STALE_TEMPLATE here would read as "try again". */
+    FsdEmitTemplate stale = door_template(1000u);
+    CHECK(fsd_emit_build(FSD_ACT_DOOR_OPEN, 2, &stale, 1000u + 9999u, &f)
+              == FSD_EMIT_NO_ENCODING,
+          "an unmeasured door refuses before staleness is even considered");
+
+    /* The two we did measure still work, and say so. */
+    uint8_t bits = 0;
+    CHECK(fsd_emit_door_bits(FSD_EMIT_DOOR_RIGHT_FRONT, &bits) && bits == 0x03u,
+          "right front = 0x03, got 0x%02X", bits);
+    CHECK(fsd_emit_door_bits(FSD_EMIT_DOOR_RIGHT_REAR, &bits) && bits == 0xC0u,
+          "right rear = 0xC0, got 0x%02X", bits);
+    CHECK(!fsd_emit_door_bits(FSD_EMIT_DOOR_RIGHT_FRONT, NULL), "NULL out refused");
+
+    /* Names, so a log says which door instead of a number -- and says "?" for
+     * one we cannot name rather than picking the nearest. */
+    CHECK(strcmp(fsd_emit_door_str(FSD_EMIT_DOOR_RIGHT_FRONT), "right front") == 0,
+          "name: %s", fsd_emit_door_str(FSD_EMIT_DOOR_RIGHT_FRONT));
+    CHECK(strcmp(fsd_emit_door_str(FSD_EMIT_DOOR_RIGHT_REAR), "right rear") == 0,
+          "name: %s", fsd_emit_door_str(FSD_EMIT_DOOR_RIGHT_REAR));
+    CHECK(strcmp(fsd_emit_door_str(2), "?") == 0,
+          "an unmeasured door must not borrow a name: %s", fsd_emit_door_str(2));
+    CHECK(FSD_EMIT_DOOR_COUNT == 2,
+          "two doors measured, not four; got %d", (int)FSD_EMIT_DOOR_COUNT);
+}
+
+/* An action that takes no argument ignores it. A stored rule may carry
+ * anything in that field, and refusing would break rules for a value that
+ * never meant anything. */
+static void test_argless_actions_ignore_the_argument(void) {
+    printf("\n-- actions with no argument ignore it --\n");
+
+    FsdEmitTemplate light = car_template(1000u);
+    FsdEmitTemplate haz = hz_template(HZ[0].car, 1000u);
+    FsdEmitFrame base, with_arg;
+
+    CHECK(fsd_emit_build(FSD_ACT_MAP_LIGHT, 0, &light, 1100u, &base) == FSD_EMIT_OK,
+          "light with arg 0");
+    CHECK(fsd_emit_build(FSD_ACT_MAP_LIGHT, 12345, &light, 1100u, &with_arg)
+              == FSD_EMIT_OK, "light with a stray arg still builds");
+    CHECK(memcmp(base.data, with_arg.data, 8) == 0 && base.id == with_arg.id,
+          "and builds the SAME frame");
+
+    CHECK(fsd_emit_build(FSD_ACT_HAZARDS, 0, &haz, 1100u, &base) == FSD_EMIT_OK,
+          "hazards with arg 0");
+    CHECK(fsd_emit_build(FSD_ACT_HAZARDS, -7, &haz, 1100u, &with_arg) == FSD_EMIT_OK,
+          "hazards with a stray arg still builds");
+    CHECK(memcmp(base.data, with_arg.data, 8) == 0 && base.id == with_arg.id,
+          "and builds the SAME frame");
+}
+
 int main(void) {
     printf("test_body_emit\n");
     test_matches_tsl_byte_for_byte();
@@ -500,6 +626,9 @@ int main(void) {
     test_door_matches_tsl_byte_for_byte();
     test_door_and_light_do_not_cross();
     test_door_refusals();
+    test_door_selector_matches_tsl_byte_for_byte();
+    test_unmeasured_doors_are_refused();
+    test_argless_actions_ignore_the_argument();
     test_door_row_is_open_but_narrow();
     test_no_counter_in_the_frame();
     test_refuses_without_a_template();
