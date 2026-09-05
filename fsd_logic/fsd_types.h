@@ -308,6 +308,47 @@ static inline bool fsd_decode_das_state_b0(const uint8_t* d, uint8_t dlc, uint8_
     return true;
 }
 
+/* 0x39B byte0 UPPER nibble -- the blind-spot pair, measured on this car.
+ *
+ * The SAME byte as the AP state above, whose 0x0F mask threw this half away.
+ * That is the whole reason it went missing: fsd_handle_das_state_alt() reads
+ * byte0 for AP state and stops, while the parser that DOES read blind spot
+ * (fsd_handle_das_status_common) hangs off 0x399 -- and this car's 0x399 is
+ * three bytes of zeros, so it has never run. Nothing on this car wrote
+ * das_blind_spot_* at all, and the dashboard's orange side bars stayed dark
+ * through a whole drive (owner report, 2026-09-05).
+ *
+ * 🔴 MEASURED, NOT ASSUMED -- captures/2026-09-05-4차, two drives taken for
+ * exactly this question. Each capture moves ONE pair and leaves the other at
+ * zero, which is what makes them evidence rather than a coincidence:
+ *
+ *   좌사각지대   06 10 DF 80 A0 08 62 1D   <- nothing alongside
+ *                16 10 DF A0 A0 08 A2 8D   <- 0x16, bits[5:4] = 01   LEFT
+ *
+ *   우사각지대   06 10 DF 80 A0 08 62 1D   <- nothing alongside
+ *                46 10 DF A0 A0 08 D2 ED   <- 0x46, bits[7:6] = 01   RIGHT
+ *
+ * The right-hand capture also RETURNS to 0x06 at 7.0 s as the car passes, so
+ * the field is watched going up and coming back down. Low nibble is 6 in every
+ * frame above = AP engaged, which agrees with fsd_decode_das_state_b0().
+ *
+ * Positions match SIG_DAS_BLIND_SPOT_* in esp32/.firmware/can_signals.h, which
+ * came from the DBCs for 0x399 -- so the car has now confirmed on 0x39B what
+ * the documents claimed for 0x399. Returns the raw 2-bit field untouched, same
+ * as fsd_decode_blinkers(): 0 = clear, and the higher values are the escalating
+ * warning the DBC describes. */
+#define FSD_BS_LEFT_SHIFT  4u
+#define FSD_BS_RIGHT_SHIFT 6u
+#define FSD_BS_MASK        0x03u
+
+static inline bool fsd_decode_das_blind_spot_b0(const uint8_t* d, uint8_t dlc,
+                                                uint8_t* left, uint8_t* right) {
+    if(!d || dlc < 1u) return false;
+    if(left) *left = (uint8_t)((d[0] >> FSD_BS_LEFT_SHIFT) & FSD_BS_MASK);
+    if(right) *right = (uint8_t)((d[0] >> FSD_BS_RIGHT_SHIFT) & FSD_BS_MASK);
+    return true;
+}
+
 /* 0x219 VCSEC_TPMSData -- the four live tyre pressures.
  *
  * 🔴 THE OLD READ WAS WRONG AND THE CAR SAID SO (2026-09-03).
