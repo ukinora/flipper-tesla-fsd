@@ -2792,6 +2792,67 @@ static void test_das_state_alt(void) {
     CHECK(!fsd_decode_das_state_b0(parked, 0, &st), "empty frame rejected");
 }
 
+/* 0x39B byte0 upper nibble -- bytes copied from captures/2026-09-05-4차, two
+ * drives the owner made for exactly this question.
+ *
+ * 🔴 WHY THIS EXISTS. The dashboard's orange side bars never lit on this car.
+ * Blind spot is parsed by fsd_handle_das_status_common(), which hangs off
+ * 0x399 -- and this car's 0x399 is three bytes of zeros, so that parser has
+ * never run. The 0x39B fallback that rescued the AP state read byte0 with a
+ * 0x0F mask and threw the other half of the same byte away. The result was not
+ * a wrong value: das_blind_spot_* had NO WRITER on this car.
+ *
+ * What makes these frames evidence rather than a coincidence is that each
+ * capture moves ONE pair while the other stays at zero, and the right-hand one
+ * comes back down again as the car passes. A frame built from the table could
+ * only prove the table agrees with itself. */
+static void test_das_blind_spot_alt(void) {
+    printf("\n-- 0x39B byte0 upper nibble: blind spot on a HW3 car --\n");
+    uint8_t l = 9u, r = 9u;
+
+    /* Nothing alongside. Identical first frame in BOTH captures. */
+    const uint8_t clear[8] = {0x06, 0x10, 0xDF, 0x80, 0xA0, 0x08, 0x62, 0x1D};
+    CHECK(fsd_decode_das_blind_spot_b0(clear, 8, &l, &r) && l == 0u && r == 0u,
+          "empty road reads clear both sides (l=%u r=%u)", l, r);
+
+    /* 좌사각지대 at 2.187 s -- 0x16. */
+    const uint8_t left_car[8] = {0x16, 0x10, 0xDF, 0xA0, 0xA0, 0x08, 0xA2, 0x8D};
+    CHECK(fsd_decode_das_blind_spot_b0(left_car, 8, &l, &r) && l == 1u && r == 0u,
+          "car on the LEFT sets only the left pair (l=%u r=%u)", l, r);
+
+    /* 우사각지대 at 3.187 s -- 0x46. */
+    const uint8_t right_car[8] = {0x46, 0x10, 0xDF, 0xA0, 0xA0, 0x08, 0xD2, 0xED};
+    CHECK(fsd_decode_das_blind_spot_b0(right_car, 8, &l, &r) && l == 0u && r == 1u,
+          "car on the RIGHT sets only the right pair (l=%u r=%u)", l, r);
+
+    /* 🔴 The two captures must not agree. If a mutation swapped the shifts
+     * both of the checks above would still pass individually on a symmetric
+     * reading; this is the one that pins WHICH side is which. */
+    uint8_t l2 = 9u, r2 = 9u;
+    fsd_decode_das_blind_spot_b0(left_car, 8, &l, &r);
+    fsd_decode_das_blind_spot_b0(right_car, 8, &l2, &r2);
+    CHECK(l == 1u && r2 == 1u && r == 0u && l2 == 0u,
+          "the two drives disagree with each other, as they must");
+
+    /* 우사각지대 returns to clear at 7.038 s as the car passes -- the field is
+     * watched going up AND coming back down, so it is not a latch. */
+    const uint8_t passed[8] = {0x06, 0x10, 0xDF, 0x80, 0xA0, 0x08, 0x52, 0x0D};
+    CHECK(fsd_decode_das_blind_spot_b0(passed, 8, &l, &r) && l == 0u && r == 0u,
+          "clears again once the car has passed (l=%u r=%u)", l, r);
+
+    /* The AP nibble in the SAME byte is untouched by this read, and vice
+     * versa. Both captures are AP-engaged (low nibble 6) throughout, so a
+     * shift that leaked across would show up as a wrong AP state. */
+    uint8_t st = 0u;
+    CHECK(fsd_decode_das_state_b0(left_car, 8, &st) && st == 6u,
+          "AP state still 6 while the left bar is lit, got %u", st);
+    CHECK(fsd_decode_das_state_b0(right_car, 8, &st) && st == 6u,
+          "AP state still 6 while the right bar is lit, got %u", st);
+
+    CHECK(!fsd_decode_das_blind_spot_b0(NULL, 8, &l, &r), "null rejected");
+    CHECK(!fsd_decode_das_blind_spot_b0(clear, 0, &l, &r), "empty frame rejected");
+}
+
 /* 0x3FD byte7 -- bytes copied from captures/2026-09-03/속도프로파일4단계,
  * where the owner drove the wheel up through all four and wrote the order down. */
 static void test_profile_observed(void) {
@@ -3513,6 +3574,102 @@ static void test_observer_extra_fields(void) {
     CHECK(s.ui_warning_seen, "ui_warning_seen set");
 }
 
+/* 0x311 on THIS car is TWO BYTES -- bytes copied from
+ * captures/2026-09-05-4차/좌깜빡이, where all ten frames read FF03. Same value
+ * in 우깜빡이, 운전석창문내림, 경적두번, 좌사각지대, 우사각지대.
+ *
+ * 🔴 WHAT THIS PINS, AND WHY IT IS NOT COSMETIC.
+ *
+ * ui_warning_seen is not "a 0x311 arrived". It is the claim that 0x311 is
+ * SUPPLYING the blinker fields, and fsd_handle_vcfront_lighting() reads it as
+ * exactly that: `if(!ui_warning_seen)` is the gate that lets the 0x3F5 mirror
+ * write the dashboard's indicators. Setting the flag from a frame too short to
+ * hold those fields makes that claim falsely, the gate closes for good, and
+ * the dashboard shows no indicator for a whole drive -- the owner's report of
+ * 2026-09-05.
+ *
+ * The bench missed it because the bench replayed ONE id. 0x311 never arrived,
+ * the flag stayed false, and the mirror ran. Frames only interact when they
+ * are played together. */
+static void test_ui_warning_seen_needs_blinker_bytes(void) {
+    printf("\n-- 0x311: the seen flag means 'carries blinkers', not 'arrived' --\n");
+
+    FSDState s;
+    fsd_state_init(&s, TeslaHW_HW3);
+    CANFRAME f;
+
+    /* The real frame off this car. */
+    memset(&f, 0, sizeof(f));
+    f.canId = CAN_ID_UI_WARNING;
+    f.data_lenght = 2;
+    f.buffer[0] = 0xFFu;
+    f.buffer[1] = 0x03u;
+    fsd_drive_observe_belt(&s, &f, 200);
+
+    CHECK(!s.ui_warning_seen,
+          "2-byte 0x311 must NOT claim to supply blinkers (got %u)",
+          (unsigned)s.ui_warning_seen);
+
+    /* The belt still reads -- byte 1 is present, and the supervised-drive gate
+     * depends on it. Narrowing the blinker claim must not cost the gate its
+     * input. */
+    CHECK(s.belt_seen, "belt still observed from the 2-byte frame");
+
+    /* 🔴 AND THE BUCKLE BIT READS ZERO -- measured, not a preference.
+     * BELT_SHIFT is 5 and byte1 is 0x03, so bit 5 is clear. byte1 is 0x03 in
+     * EVERY 0x311 across both visits (17 captures on 2026-09-05 plus the six
+     * on 2026-09-03, including the two drives), so on this car
+     * ui_buckle_status is a structural false and fsd_supervised_drive_why()
+     * answers FSD_SUP_BELT_UNLATCHED forever.
+     *
+     * Left alone deliberately: that is the CLOSED direction, and the gate it
+     * shuts is the camera/autonomy path, which is not wired to transmit
+     * anything. Pinned here so the next person meets it as a known measurement
+     * rather than as a mystery, and so that "the belt gate never opens on this
+     * car" cannot quietly stop being true without a red test. */
+    CHECK(!s.ui_buckle_status,
+          "byte1 0x03 has bit5 clear -> reads unbuckled on this car (got %u)",
+          (unsigned)s.ui_buckle_status);
+
+    /* And the fields it cannot carry stay untouched, so the 0x3F5 mirror
+     * writes into cleared state rather than over a stale guess. */
+    CHECK(!s.ui_left_blinker && !s.ui_right_blinker,
+          "no blinker value invented from a frame with no blinker byte");
+
+    /* A car that really does carry them still wins, exactly as before. */
+    fsd_state_init(&s, TeslaHW_HW3);
+    memset(&f, 0, sizeof(f));
+    f.canId = CAN_ID_UI_WARNING;
+    f.data_lenght = 8;
+    f.buffer[2] = (uint8_t)(1u << 6);
+    fsd_drive_observe_belt(&s, &f, 200);
+    CHECK(s.ui_warning_seen, "8-byte 0x311 still claims the fields");
+    CHECK(s.ui_left_blinker, "and still supplies them");
+
+    /* Three bytes is the boundary: byte 2 IS the blinker byte, so a frame that
+     * reaches it carries them. Pinned as a literal so moving the guard to
+     * `> 3` or `> 1` turns this red instead of sliding along with it. */
+    fsd_state_init(&s, TeslaHW_HW3);
+    f.data_lenght = 3;
+    fsd_drive_observe_belt(&s, &f, 200);
+    CHECK(s.ui_warning_seen, "3 bytes reaches the blinker byte and counts");
+
+    /* 0x3F5 is what fills the gap on this car. The bytes are the real ones
+     * from the same capture: byte0 02 = left lit (좌깜빡이), 08 = right lit
+     * (우깜빡이). The composition -- flag false, therefore the mirror runs --
+     * lives in esp32/.firmware/fsd_handler.cpp, which this host binary does
+     * not compile, so it is checked on hardware. Both halves are checked here:
+     * the flag stays false, and the frame that must fill in decodes right. */
+    uint8_t l = 9u, r = 9u;
+    bool hz = true;
+    CHECK(fsd_decode_blinkers((const uint8_t[]){0x02u}, 1, &l, &r, &hz) &&
+              l == 2u && r == 0u && !hz,
+          "capture 3F5#02000B38800D0800 -> left lit (l=%u r=%u)", l, r);
+    CHECK(fsd_decode_blinkers((const uint8_t[]){0x08u}, 1, &l, &r, &hz) &&
+              l == 0u && r == 2u && !hz,
+          "capture 3F5#08000B38800E2000 -> right lit (l=%u r=%u)", l, r);
+}
+
 int main(void) {
     printf("test_fsd_core: Tesla FSD protocol core host tests\n");
     test_set_bit();
@@ -3573,6 +3730,7 @@ int main(void) {
     test_blinker_decode();
     test_tpms_decode();
     test_das_state_alt();
+    test_das_blind_spot_alt();
     test_profile_observed();
     test_selftest_decide();
 
@@ -3581,6 +3739,7 @@ int main(void) {
     test_supervised_drive();
     test_autonomy_mode();
     test_observer_extra_fields();
+    test_ui_warning_seen_needs_blinker_bytes();
 
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

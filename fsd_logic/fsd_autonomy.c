@@ -142,6 +142,29 @@ void fsd_drive_observe_belt(FSDState* state, const CANFRAME* frame, uint32_t now
     if(frame->data_lenght > 2) {
         state->ui_left_blinker = ((frame->buffer[2] >> 6) & 0x01u) != 0u;
         state->ui_right_blinker = ((frame->buffer[2] >> 7) & 0x01u) != 0u;
+
+        /* 🔴 THE FLAG BELONGS IN HERE, NOT AT THE END OF THE FUNCTION.
+         *
+         * ui_warning_seen does not mean "a 0x311 arrived". Its one consumer,
+         * fsd_handle_vcfront_lighting(), reads it as "0x311 is SUPPLYING the
+         * blinker fields, so do not mirror 0x3F5 over them". Setting it
+         * outside this block makes that claim for frames that cannot carry
+         * them.
+         *
+         * On THIS car 0x311 is two bytes (FF03 in all 23 captures across
+         * 2026-09-03 and 2026-09-05). Those frames arrive about once a second,
+         * so the flag latched inside the first second of every drive and the
+         * 0x3F5 mirror never ran again -- no turn indicator and no hazards on
+         * the dashboard for a whole drive (owner report, 2026-09-05).
+         *
+         * A car whose 0x311 really does carry the fields still reaches this
+         * line and still wins, which was the original design.
+         *
+         * ⚠️ Why the bench passed anyway: verification replayed ONE id at a
+         * time, so 0x311 never arrived alongside 0x3F5 and the flag stayed
+         * false. Two frames can only contradict each other when they are
+         * played together. */
+        state->ui_warning_seen = true;
     }
     if(frame->data_lenght > 3) {
         /* Byte 3 packs three things side by side, which is the strongest
@@ -154,7 +177,6 @@ void fsd_drive_observe_belt(FSDState* state, const CANFRAME* frame, uint32_t now
         state->ui_right_blinker_blinking = (uint8_t)((frame->buffer[3] >> 2) & 0x03u);
         state->ui_any_door_open = ((frame->buffer[3] >> 4) & 0x01u) != 0u;
     }
-    state->ui_warning_seen = true;
 }
 
 /* Unsigned subtraction so the millisecond clock wrapping past 2^32 (~49 days of

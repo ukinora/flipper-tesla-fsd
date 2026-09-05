@@ -961,6 +961,23 @@ void fsd_handle_das_state_alt(FSDState *state, const CanFrame *frame, uint32_t n
     if (!fsd_decode_das_state_b0(frame->data, frame->dlc, &st)) return;
     state->das_ap_state = st;
     state->das_ctx_seen_ms = now_ms;
+
+    /* Blind spot, from the UPPER nibble of the SAME byte0 -- see
+     * fsd_decode_das_blind_spot_b0() for the frames that pin it.
+     *
+     * This does not widen the "byte0 only" rule above; it finishes it. The AP
+     * mask was 0x0F, so half of the one byte we do have evidence for was being
+     * dropped. Everything the narrow comment refuses -- speed limit, hands-on,
+     * counter, checksum -- lives in bytes 1, 2, 5, 6 and 7 and is still
+     * refused, which is why this does NOT call fsd_handle_das_status_common():
+     * that function would read all five on the strength of evidence for one.
+     *
+     * Without this, das_blind_spot_* has no writer at all on a car like this
+     * one, because the parser that fills it hangs off an 0x399 that never
+     * arrives in a parseable length. */
+    fsd_decode_das_blind_spot_b0(frame->data, frame->dlc,
+                                 &state->das_blind_spot_left,
+                                 &state->das_blind_spot_right);
 }
 
 void fsd_handle_das_status_hw4(FSDState *state, const CanFrame *frame, uint32_t now_ms) {
