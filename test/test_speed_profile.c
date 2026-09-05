@@ -56,18 +56,27 @@ static void test_init(void) {
     CHECK(sp.phase == FSD_SP_IDLE, "init phase=%d exp IDLE", sp.phase);
     CHECK(!fsd_sp_busy(&sp), "init must not be busy");
     CHECK(sp.last_error == FSD_SP_OK, "init error=%d exp OK", sp.last_error);
-    CHECK(sp.enc.verified == false,
-          "shipped encoding must be UNVERIFIED — this is the safety default");
+    // 🔴 The safety default MOVED on 2026-09-06, it did not go away. It used to
+    // be `verified == false`; the owner armed the table, so the default that
+    // still stops a fresh machine is tx_armed — which nothing persists and
+    // nothing in the firmware sets.
+    CHECK(sp.enc.verified == true,
+          "shipped encoding is verified (owner, 2026-09-06)");
     CHECK(sp.enc.ticks_per_step == 1, "default ticks_per_step=%u exp 1",
           sp.enc.ticks_per_step);
-    CHECK(FSD_SP_ENCODING_DEFAULT.verified == false,
-          "the exported default table must also be unverified");
+    CHECK(FSD_SP_ENCODING_DEFAULT.verified == true,
+          "the exported default table is the same one");
 }
 
 // ── refusals ────────────────────────────────────────────────────────────────
+// 🔴 The shipped table no longer takes this path, so the test builds an
+// unverified one on purpose. The refusal is still reachable and still has to
+// work: fsd_sp_encoding_ok() is what a future re-measurement would clear, and
+// an untested error path is a wrong error path.
 static void test_refuses_unverified(void) {
     FsdSpeedProfile sp;
-    fsd_sp_init(&sp); // NOT marked verified
+    fsd_sp_init(&sp);
+    sp.enc.verified = false; // as if a re-measurement had reopened the question
     FsdSpInputs in = good_inputs(0);
     FsdSpError e = fsd_sp_request(&sp, &in, 3, 1000);
     CHECK(e == FSD_SP_ERR_UNVERIFIED, "unverified encoding -> %s",
@@ -389,6 +398,55 @@ static void test_ticks_per_step(void) {
     CHECK(sp.ticks_used == 2, "ticks_used=%u exp 2", sp.ticks_used);
 }
 
+/* The settle window, in LITERAL MILLISECONDS.
+ *
+ * 🔴 Written with numbers rather than FSD_SP_SETTLE_MS on purpose. Every other
+ * timing test in this file advances by the constant, so it follows the constant
+ * wherever it goes and would pass at 5 ms or 5 s. This file has been bitten by
+ * exactly that (as have the J6 swipe threshold and the day/night hold), so the
+ * value itself gets an assertion that cannot move with it.
+ *
+ * 🔴 WHY 500 AND NOT 400 (changed 2026-09-06). The window is "how long to give
+ * the car to act on one detent before calling it a stall", and the car was
+ * measured: 2nd visit, three +1 detents, the profile field followed at
+ *
+ *      +1 @ 6.401 -> 6.699   298 ms
+ *      +1 @ 7.501 -> 7.722   221 ms
+ *      +1 @ 8.901 -> 9.198   297 ms
+ *
+ * 400 ms left 102 ms of margin over the slowest of three samples. Three
+ * samples do not bound a distribution, and the cost of being wrong is
+ * asymmetric: too short and the machine calls a car that IS responding a
+ * stall, then ticks again -- an extra detent the driver did not ask for. Too
+ * long only costs a slower give-up, which nobody is waiting on. */
+static void test_settle_window_is_500ms(void) {
+    CHECK(FSD_SP_SETTLE_MS == 500u,
+          "the settle window is 500 ms (measured max 298 ms), got %u",
+          (unsigned)FSD_SP_SETTLE_MS);
+
+    FsdSpeedProfile sp;
+    ready(&sp);
+    FsdSpInputs in = good_inputs(0);
+    CHECK(fsd_sp_request(&sp, &in, 3, 1000) == FSD_SP_OK, "request ok");
+    CHECK(fsd_sp_poll(&sp, &in, 1000) == FSD_SP_ACT_TICK_UP, "first detent");
+    CHECK(sp.phase == FSD_SP_SETTLE, "one detent is one step -> SETTLE");
+
+    /* The measured worst case must still be inside the window: at +298 ms the
+     * machine is waiting, not stepping again. This is the assertion that would
+     * catch someone tightening the constant back below what the car does. */
+    CHECK(fsd_sp_poll(&sp, &in, 1000 + 298) == FSD_SP_ACT_NONE,
+          "at +298 ms (the slowest measured response) the machine must wait");
+    CHECK(sp.stalls == 0, "and it must not have counted a stall yet");
+
+    /* 499 in, 500 out. */
+    CHECK(fsd_sp_poll(&sp, &in, 1000 + 499) == FSD_SP_ACT_NONE,
+          "at +499 ms the machine must still wait");
+    CHECK(sp.stalls == 0, "no stall at +499 ms");
+    CHECK(fsd_sp_poll(&sp, &in, 1000 + 500) == FSD_SP_ACT_TICK_UP,
+          "at +500 ms the window is over and the next detent goes out");
+    CHECK(sp.stalls == 1, "and exactly one stall was counted, got %u", sp.stalls);
+}
+
 // ── null safety ─────────────────────────────────────────────────────────────
 static void test_null_safe(void) {
     FsdSpeedProfile sp;
@@ -552,11 +610,14 @@ static void test_bad_encoding_refuses_requests(void) {
     CHECK(fsd_sp_request(&sp, &in, 3, 1000) == FSD_SP_ERR_UNVERIFIED,
           "zero ticks per step must refuse the request");
 
-    // And the shipped default is still refused for the original reason.
+    // The shipped default passes the ENCODING gate now (owner, 2026-09-06).
+    // That is a statement about the table, not about permission to transmit —
+    // test_table_is_verified_and_arming_still_gates() holds the other half.
     fsd_sp_init(&sp);
-    CHECK(!fsd_sp_encoding_ok(&sp.enc), "shipped table is unverified");
-    ready(&sp);
-    CHECK(fsd_sp_encoding_ok(&sp.enc), "a verified, in-range table passes");
+    CHECK(fsd_sp_encoding_ok(&sp.enc), "shipped table is complete and verified");
+    sp.enc.verified = false;
+    CHECK(!fsd_sp_encoding_ok(&sp.enc),
+          "and clearing that one field still shuts it, from any other state");
 }
 
 
@@ -739,12 +800,28 @@ static void test_detent_writer_is_gated_and_bounded(void) {
     // perfectly legal count. This is the flag that stands between us and a car
     // with a recorded emergency-braking incident; a new function must not
     // become the way around it.
+    // 🔴 THIS ASSERTION FLIPPED ON 2026-09-06, AND THE ACCOUNTING IS THE POINT.
+    // It used to read "the shipped (unverified) encoding must refuse to build a
+    // frame". The owner verified the table, so the shipped machine now BUILDS
+    // the bytes — and that is the whole of what verifying opened. Building is
+    // not transmitting: fsd_sp_apply_detents() writes into the caller's buffer
+    // and there is no caller anywhere in the firmware (fsd_sp_request,
+    // fsd_sp_poll and both apply_ functions have none), exactly like the body
+    // emitters. The gate that stops the state machine is tx_armed, which
+    // nothing persists and nothing sets.
     FsdSpeedProfile shipped;
     fsd_sp_init(&shipped);
     uint8_t buf[8];
     memcpy(buf, CAR_IDLE, sizeof(buf));
+    CHECK(fsd_sp_apply_detents(&shipped, 1, buf, 8),
+          "the shipped encoding is verified, so it builds the frame");
+    CHECK(buf[3] == 0x01u, "and the detent lands in byte3: 0x%02X exp 0x01", buf[3]);
+
+    // The refusal itself is still reachable and still leaves the frame alone.
+    shipped.enc.verified = false;
+    memcpy(buf, CAR_IDLE, sizeof(buf));
     CHECK(!fsd_sp_apply_detents(&shipped, 1, buf, 8),
-          "the shipped (unverified) encoding must refuse to build a frame");
+          "an unverified encoding must refuse to build a frame");
     CHECK(memcmp(buf, CAR_IDLE, sizeof(buf)) == 0,
           "a refused write must not touch the frame");
 
@@ -805,9 +882,24 @@ static void test_detent_writer_is_gated_and_bounded(void) {
     CHECK(buf[3] == 0xC5u, "must preserve byte3 bits 6-7: 0x%02X exp 0xC5", buf[3]);
 }
 
-// 🔴 Filling the table in is NOT the same as arming it. Every field above is
-// measured, and the gate must still be shut.
-static void test_measured_table_is_still_not_verified(void) {
+// 🔴 THE TABLE IS VERIFIED NOW, AND THE SECOND LOCK IS WHAT STILL HOLDS.
+//
+// This test used to assert `verified == false` and that a request was refused
+// as UNVERIFIED. That was right for as long as the two reasons the header gave
+// were open, and on 2026-09-06 both closed:
+//
+//   1. The top end. The 4th visit sent +1 and +5 at Hurry and nothing moved,
+//      but the car was PARKED, so "saturated" and "ignored while parked" were
+//      the same picture. The OWNER then reported the same thing from the
+//      driver's seat: at 신속, one more up stays at 신속. A person watching the
+//      screen while driving can tell those two apart; the capture could not.
+//   2. Arming was the owner's decision to make, and the owner made it.
+//
+// 🔴 So the assertions are not deleted, they MOVE: what used to be "the gate
+// is shut because the table is unverified" is now "the table is verified and
+// the gate is STILL shut, by tx_armed". One lock opened; the machine must not
+// have become one that emits.
+static void test_table_is_verified_and_arming_still_gates(void) {
     FsdSpeedProfile sp;
     fsd_sp_init(&sp);
 
@@ -818,27 +910,32 @@ static void test_measured_table_is_still_not_verified(void) {
           "measured: one detent, one step, got %u",
           FSD_SP_ENCODING_DEFAULT.ticks_per_step);
     CHECK(FSD_SP_ENCODING_DEFAULT.wrap == false,
-          "the ends saturate; and with the top end unobserved, false is also "
-          "the conservative value");
+          "the ends saturate — bottom measured 2026-09-03, top reported by the "
+          "owner 2026-09-06 (one more up at 신속 stays at 신속)");
 
-    CHECK(FSD_SP_ENCODING_DEFAULT.verified == false,
-          "the shipped table must stay UNVERIFIED — the top end was never "
-          "observed (the car was parked) and arming is the owner's decision");
-    CHECK(!fsd_sp_encoding_ok(&FSD_SP_ENCODING_DEFAULT),
-          "an unverified table must not pass the gate, however complete it is");
-    CHECK(!fsd_sp_encoding_ok(&sp.enc),
-          "a freshly initialised machine must not pass the gate");
+    CHECK(FSD_SP_ENCODING_DEFAULT.verified == true,
+          "the table is verified: every field measured, and the owner armed it");
+    CHECK(fsd_sp_encoding_ok(&FSD_SP_ENCODING_DEFAULT),
+          "a complete, verified table passes the encoding gate");
+    CHECK(fsd_sp_encoding_ok(&sp.enc),
+          "a freshly initialised machine carries that same table");
 
+    // 🔴 AND HERE IS THE HALF THAT DID NOT MOVE. The default machine is armed
+    // in the encoding sense and NOT in the transmit sense, and a request still
+    // gets nowhere. tx_armed is per session and is never persisted, so this is
+    // the state every boot starts in.
     FsdSpInputs in = good_inputs(0);
-    CHECK(fsd_sp_request(&sp, &in, FSD_SP_PROFILE_MAX, 1000) == FSD_SP_ERR_UNVERIFIED,
-          "a request against the shipped table must be refused as UNVERIFIED");
+    in.tx_armed = false;
+    CHECK(fsd_sp_request(&sp, &in, FSD_SP_PROFILE_MAX, 1000) == FSD_SP_ERR_NOT_ARMED,
+          "verified table, unarmed operator -> NOT_ARMED, not a converging run");
+    CHECK(!fsd_sp_busy(&sp), "a refused request must not start");
+    CHECK(fsd_sp_poll(&sp, &in, 2000) == FSD_SP_ACT_NONE,
+          "and polling an unarmed machine emits nothing");
 
-    // ...and flipping just that one field is what opens it. Stated here so the
-    // day someone flips it, this test says out loud what changed.
-    FsdSpEncoding armed = FSD_SP_ENCODING_DEFAULT;
-    armed.verified = true;
-    CHECK(fsd_sp_encoding_ok(&armed),
-          "the measured table is complete: `verified` is the only thing left");
+    // Both locks open is what it takes, and nothing less.
+    in.tx_armed = true;
+    CHECK(fsd_sp_request(&sp, &in, FSD_SP_PROFILE_MAX, 3000) == FSD_SP_OK,
+          "verified AND armed is the only combination that is accepted");
 }
 
 int main(void) {
@@ -871,7 +968,8 @@ int main(void) {
     test_detents_match_the_captured_frames();
     test_negative_detents_are_twos_complement();
     test_detent_writer_is_gated_and_bounded();
-    test_measured_table_is_still_not_verified();
+    test_table_is_verified_and_arming_still_gates();
+    test_settle_window_is_500ms();
 
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

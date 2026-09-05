@@ -1970,17 +1970,28 @@ static void process_frame(CanBusId bus, const CanFrame &frame) {
     if (frame.id == CAN_ID_AP_CONTROL) {
         camera_task_observe_profile(hw_uses_hw4_das_status(das_state.hw_version),
                                     frame.data, frame.dlc, millis());
-        /* 🔴 Same frame, different reader, and it has to be a different reader.
+        /* 🔴 Same frame, same BITS as of 2026-09-06, and still two readers.
          *
-         * The call above feeds the camera policy through fsd_sp_decode_profile(),
-         * which knows two layouts and neither fits this car: the HW3 one reads
-         * a field that sat at 0 for a whole drive, the HW4 one collides two of
-         * the four profiles into the same number. Measured 2026-09-03.
+         * This comment used to say the two readers had to disagree, because
+         * they did: fsd_sp_decode_profile() knew two layouts and neither fit
+         * this car — the non-HW4 one read a field that sat at 0 for a whole
+         * drive, the HW4 one collides two of the four profiles onto the same
+         * number. That is fixed; its non-HW4 branch now delegates to
+         * fsd_decode_profile_obs(), the very function called below, so there is
+         * one definition of where this car keeps the profile.
          *
-         * This one is for the DASHBOARD, and it is deliberately not wired into
-         * the policy. The policy's clamp is a safety behaviour with its own
-         * evidence bar; a display is not. Mixing them is how one gets changed
-         * for the other's reasons.
+         * What still differs is what each side PRODUCES, and that part must
+         * stay separate:
+         *
+         *   this line          -> g_state.observed_profile, the RAW number, for
+         *                         the dashboard to name.
+         *   camera_task_...()  -> converts to a speed RANK before the policy
+         *                         sees it, because the policy compares numbers
+         *                         and raw Sloth is 4.
+         *
+         * The policy's clamp is a safety behaviour with its own evidence bar; a
+         * display is not. Sharing a decoder is not mixing them — handing the
+         * policy a display's number would be.
          */
         uint8_t prof;
         if (fsd_decode_profile_obs(frame.data, frame.dlc, &prof)) {

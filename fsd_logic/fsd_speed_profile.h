@@ -20,9 +20,9 @@
  *  * No dependency on FSDState. Callers pass a small FsdSpInputs snapshot, so
  *    the state machine is testable on the host without the firmware.
  *  * The wire encoding (which tick value moves which way, how many ticks per
- *    step, whether the ends wrap) is isolated in FsdSpEncoding. None of it is
- *    confirmed on-car yet — see `verified`. After a capture, only that table
- *    changes; the state machine does not.
+ *    step, whether the ends wrap) is isolated in FsdSpEncoding. All of it is
+ *    now confirmed on-car — see `verified`. Only that table changed; the state
+ *    machine did not.
  *
  * SAFETY
  * ------
@@ -30,19 +30,35 @@
  * injection, and this project's car is that exact hardware combination.
  * Therefore FsdSpInputs.tx_armed defaults to false at every call site: the
  * machine will plan and converge in simulation but refuse to emit a tick until
- * a capture of the reference implementation has been taken and the operator
- * explicitly arms it. Arming is deliberately not persisted.
+ * the operator explicitly arms it. Arming is deliberately not persisted.
+ *
+ * 🔴 THERE WERE TWO LOCKS AND ONE OPENED (2026-09-06). `verified` is now true
+ * — see FSD_SP_ENCODING_DEFAULT for what closed the last open question and who
+ * decided it. tx_armed did not move, and it is the one that matters at
+ * runtime: nothing persists it, and NOTHING IN THE FIRMWARE SETS IT. Together
+ * with the fact that fsd_sp_request / fsd_sp_poll / fsd_sp_apply_scroll /
+ * fsd_sp_apply_detents still have no caller outside the tests, this module
+ * remains structurally unable to put a frame on a bus.
+ *
+ * What verifying DID open is narrow and worth naming: the two apply_ functions
+ * are gated on fsd_sp_encoding_ok() alone, so they now build bytes into a
+ * caller's buffer where before they refused. That is the same posture as the
+ * body emitters — bytes exist, no caller, nothing transmits.
  */
 
 /*
  * INTEGRATION (not wired yet — deliberately)
  * ------------------------------------------
- * Three things are still missing, and each depends on measurements we do not
- * have. Wiring them on guesses would mean tearing them out later.
+ * 🔴 Item 1 was CORRECTED on 2026-09-06 and it had been wrong, not merely
+ * incomplete: it told the next person to feed "the 2-bit field (byte 6, mask
+ * 0x06, shift 1)" to fsd_sp_observe(), and both halves of that would have hurt.
+ * The field is at mux 2 byte 7 bits [6:4] on this car, and fsd_sp_observe()
+ * takes a RANK, not the raw number.
  *
- *   1. 0x3FD RX decode. Nothing currently READS the profile off the bus; the
- *      existing path only writes it. Feed the 2-bit field (byte 6, mask 0x06,
- *      shift 1) to fsd_sp_observe() once a capture confirms it.
+ *   1. 0x3FD RX decode. ✅ DONE. camera_task_observe_profile() reads the frame
+ *      through fsd_sp_decode_profile() and converts with fsd_sp_rank_from_raw()
+ *      before anything numeric sees it. A new caller should use
+ *      fsd_sp_observe_raw(), which does both in one step.
  *   2. Freshness. FsdSpInputs.status_fresh needs a timestamp of the last
  *      0x3FD. FSDState has no such field yet.
  *   3. Tick emission. Whether a detent is injected by writing our own 0x3C2 or
@@ -99,10 +115,12 @@ extern "C" {
  * — and must never be fed straight into fsd_sp_observe().
  * fsd_sp_observe_raw() does both in one call and is the safer entry point.
  *
- * ⚠️ fsd_sp_decode_profile() still reads the WRONG BITS for this car (see its
- * own note). Fixing that read site is a separate decision, and this table is
- * its prerequisite: fixing the read alone would start feeding raw 4 into a
- * numeric clamp, which is worse than reading nothing at all.
+ * 🟢 fsd_sp_decode_profile() READS THE RIGHT BITS NOW (fixed 2026-09-06). This
+ * paragraph used to warn that it did not, and that fixing the read alone would
+ * be worse than leaving it broken — raw 4 arriving at a numeric clamp. Both
+ * halves landed in the same change, which is the only way either was safe:
+ * the decoder moved to mux 2 byte 7 bits [6:4], and every consumer converts
+ * through fsd_sp_rank_from_raw() at the boundary.
  */
 #define FSD_SP_RAW_SLOTH 4u
 #define FSD_SP_RAW_CHILL 0u
@@ -123,7 +141,18 @@ bool fsd_sp_raw_from_rank(uint8_t rank, uint8_t* raw_out);
 // Bounds. Generous enough for a slow car, tight enough that a broken loop
 // gives up instead of scrolling forever.
 #define FSD_SP_MAX_TICKS 6u        // 3 steps would do; 2x headroom for a miss
-#define FSD_SP_SETTLE_MS 400u      // wait for the car to act on one tick
+/* How long to give the car to act on one detent before counting a stall.
+ *
+ * MEASURED, 2nd visit (2026-09-03): three +1 detents, and 0x3FD followed at
+ * 298 / 221 / 297 ms. Raised 400 -> 500 on 2026-09-06.
+ *
+ * 🔴 400 left 102 ms over the slowest of THREE samples, and three samples do
+ * not bound a distribution. The two ways of being wrong are not symmetric:
+ * too short and the machine calls a car that IS responding a stall and ticks
+ * again — an extra detent nobody asked for, on a car with a recorded
+ * emergency-braking incident. Too long only means a slower give-up, and the
+ * whole-request ceiling (FSD_SP_TIMEOUT_MS) still bounds that. */
+#define FSD_SP_SETTLE_MS 500u
 #define FSD_SP_STALL_LIMIT 3u      // settles with no observed change -> retry
 #define FSD_SP_TIMEOUT_MS 4000u    // whole-request ceiling
 #define FSD_SP_COOLDOWN_MS 1000u   // after finishing, before accepting another
@@ -206,22 +235,35 @@ typedef struct {
 //       Same capture: one detent, one step. Three for three, no doubles.
 //
 //   wrap = false
-//       Bottom end measured (2nd visit): at Sloth a -5 detent moved nothing.
-//       Top end NOT measured — see `verified`. false is the conservative value
-//       either way: with wrap off the machine only ever ticks toward the
-//       target and stops on equality, so it cannot be steered past an end.
+//       BOTH ENDS MEASURED NOW.
+//         bottom — 2nd visit (2026-09-03): at Sloth a -5 detent moved nothing.
+//         top    — the OWNER, 2026-09-06: "신속에서 한 번 더 올려도 신속 그대로
+//                  유지되는 것을 관측했다" (at Hurry, one more up stays at
+//                  Hurry). Observed from the driver's seat, while driving.
 //
-//   verified = false
-//       🔴 Deliberate, and the only thing still holding the gate shut. Two
-//       reasons, and neither is a coding task:
-//         1. The top end is unobserved. The 4th visit sent +1 and +5 while the
-//            car was already at Hurry and it stayed at Hurry — but the car was
-//            PARKED (no 0x118, no 0x257: the drive inverter was silent), so
-//            "saturated at the top" and "parked, so ignored" are the same
-//            picture. Nothing in that capture can tell them apart.
-//         2. Flipping it opens scroll injection on a car with a recorded Intel
-//            HW3 emergency-braking incident. That is the owner's call, not a
-//            side effect of filling in a table.
+//       🔴 That report is not the same evidence as the 4th visit's capture,
+//       and that is exactly why it settles the question. The capture sent +1
+//       and +5 at Hurry and nothing moved — but the car was PARKED (no 0x118,
+//       no 0x257: the drive inverter was silent), so "saturated at the top" and
+//       "parked, so ignored" were the same picture and nothing in the file
+//       could separate them. A person watching the screen in a moving car can.
+//
+//       false stays the conservative value either way: with wrap off the
+//       machine only ever ticks toward the target and stops on equality, so it
+//       cannot be steered past an end.
+//
+//   verified = true
+//       🔴 Flipped 2026-09-06 by the OWNER, and only the owner could: both
+//       reasons this field stayed false were closed, and only one of them was
+//       a measurement.
+//         1. The top end — see `wrap` above. Closed by the owner's own
+//            observation, not by a capture.
+//         2. Arming scroll injection on a car with a recorded Intel HW3
+//            emergency-braking incident was never a coding decision. Asked and
+//            answered: "허용한다".
+//
+//       ⚠️ This opens the ENCODING gate, not the transmit gate. See SAFETY at
+//       the top of this file for what that does and does not change.
 //
 // The frame shape is measured too, and lives in the .c next to the constants:
 // 0x3C2 mux 1, byte 3, 6-bit two's complement, one frame carries the WHOLE
@@ -258,20 +300,31 @@ bool fsd_sp_encoding_ok(const FsdSpEncoding* e);
 FsdSpError fsd_sp_request(FsdSpeedProfile* sp, const FsdSpInputs* in,
                           uint8_t target, uint32_t now_ms);
 
-/** Pull the speed profile out of a 0x3FD DAS_autopilotControl frame.
+/** Pull the RAW speed profile out of a 0x3FD DAS_autopilotControl frame.
  *
- *  This is not guesswork and never needed a capture: the WRITE path in
- *  fsd_handler.c has been putting the value in these exact bits for as long as
- *  the project has existed, so reading the same bits is symmetric with code
- *  that is already known to work on this car.
+ *    !hw4   mux 2, byte 7 bits [6:4]  (3 bits) — THIS CAR, measured 2026-09-03
+ *    hw4    mux 2, byte 7 bits [7:5]  (3 bits) — the documented HW4 layout
  *
- *    HW3   mux 0, byte 6 bits [2:1]  (2 bits, 0..3)
- *    HW4   mux 2, byte 7 bits [7:5]  (3 bits, 0..7)
+ *  🔴 THE FIRST LINE USED TO SAY "HW3: mux 0, byte 6 bits [2:1]" AND THAT WAS
+ *  WRONG FOR THIS CAR (corrected 2026-09-06). The old position was not a
+ *  guess — it is the DBC's, and it is where fsd_handler.c's WRITE path has
+ *  always put the value — but symmetry with our own writes is not evidence
+ *  about what the car SENDS. The 2nd visit measured it: mux 0 byte 6 sat at 0
+ *  for an entire drive while mux 2 byte 7 bits [6:4] followed the scroll wheel
+ *  tick for tick, 221-298 ms behind each one. One bit below the HW4 field,
+ *  which is the difference between four distinct values and two (the HW4
+ *  layout collides Chill and Standard onto the same number here).
  *
- *  What DOES need measuring is which value carries which name (is 0 Sloth?)
- *  and which scroll direction raises it. Neither is needed here: the
- *  convergence loop only compares values, and the direction lives in
- *  FsdSpEncoding behind its own `verified` flag.
+ *  The non-hw4 branch delegates to fsd_decode_profile_obs() in fsd_types.h so
+ *  there is ONE definition of where this car keeps the profile. The dashboard
+ *  reads it through that function too; what the two paths still do differently
+ *  is what they produce, which is the part that has to stay separate.
+ *
+ *  🔴 THE RETURNED VALUE IS RAW AND IS NOT A RANK. Raw Sloth is 4, so feeding
+ *  this straight to anything that compares numbers — fsd_sp_observe(), the
+ *  camera policy's never-raise clamp — makes Sloth the fastest profile there
+ *  is. Convert at the boundary with fsd_sp_rank_from_raw(), or use
+ *  fsd_sp_observe_raw() which does both.
  *
  *  Returns false — leaving *out untouched — when the frame is the wrong mux or
  *  too short to hold the field. */
