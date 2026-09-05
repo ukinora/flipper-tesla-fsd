@@ -295,6 +295,176 @@ static void test_refuses_rather_than_guesses(void) {
           "an empty frame carries nothing");
 }
 
+
+/* ── 0x3C2 byte 0: the buttons that share a byte with the selector ──────────
+ *
+ * Every frame below is copied out of a capture. These four byte-0 values are
+ * the only ones this car was seen to send on 0x3C2 mux 0 across three visits.
+ */
+static void test_byte0_buttons(void) {
+    /* 4차 경적두번 (2026-09-05): three presses of 60-130 ms. */
+    const uint8_t horn[8]  = {0x04, 0x55, 0x55, 0x55, 0x00, 0x00, 0x69, 0x85};
+    /* 3차 좌우비상등 (2026-09-05). */
+    const uint8_t hazbtn[8]= {0x08, 0x55, 0x55, 0x55, 0x00, 0x00, 0x69, 0x85};
+    /* 3차 후진: the owner was in the seat and driving. */
+    const uint8_t seated[8]= {0x10, 0x55, 0x55, 0x55, 0x00, 0x00, 0x69, 0x85};
+    /* Nothing pressed. */
+    const uint8_t idle[8]  = {0x00, 0x55, 0x55, 0x55, 0x00, 0x00, 0x69, 0x85};
+
+    expect(FSD_SIG_HORN_SW, 0x3C2u, horn, 8, 1, "horn pressed");
+    expect(FSD_SIG_HORN_SW, 0x3C2u, idle, 8, 0, "horn released");
+    expect(FSD_SIG_HAZARD_BTN, 0x3C2u, hazbtn, 8, 1, "hazard button pressed");
+    expect(FSD_SIG_HAZARD_BTN, 0x3C2u, idle, 8, 0, "hazard button released");
+    expect(FSD_SIG_DRIVER_PRESENT, 0x3C2u, seated, 8, 1, "driver present");
+    expect(FSD_SIG_DRIVER_PRESENT, 0x3C2u, idle, 8, 0, "seat empty");
+
+    /* One button at a time: each frame must set its own signal and no other. */
+    expect(FSD_SIG_HAZARD_BTN, 0x3C2u, horn, 8, 0, "horn frame: hazard button clear");
+    expect(FSD_SIG_DRIVER_PRESENT, 0x3C2u, horn, 8, 0, "horn frame: seat clear");
+    expect(FSD_SIG_HORN_SW, 0x3C2u, hazbtn, 8, 0, "hazard frame: horn clear");
+    expect(FSD_SIG_HORN_SW, 0x3C2u, seated, 8, 0, "seated frame: horn clear");
+}
+
+/* 🔴 THE ONE THAT WAS BROKEN, AND THE REASON THE MASK CHANGED.
+ *
+ * The selector lives in byte 0 and so do those three buttons. A six-bit mask
+ * over that byte swallowed two of them: while the horn or the hazard button was
+ * held, every mux-0 signal came back WRONG_MUX -- all eight windows, the belt,
+ * driver-present. Nothing logged it and no test looked.
+ */
+static void test_a_pressed_button_does_not_hide_the_rest_of_the_frame(void) {
+    /* Same frame twice: the second one has the horn down. Byte 4 = 0x02 is the
+     * driver's window at its second detent, from 4차 운전석창문올림. */
+    const uint8_t quiet[8] = {0x00, 0x55, 0x55, 0x55, 0x02, 0x00, 0x69, 0x85};
+    const uint8_t honking[8] = {0x04, 0x55, 0x55, 0x55, 0x02, 0x00, 0x69, 0x85};
+    const uint8_t hazarding[8] = {0x08, 0x55, 0x55, 0x55, 0x02, 0x00, 0x69, 0x85};
+    const uint8_t seated[8] = {0x10, 0x55, 0x55, 0x55, 0x02, 0x00, 0x69, 0x85};
+
+    expect(FSD_SIG_WIN_UP_FL, 0x3C2u, quiet, 8, 2, "window up, nothing else pressed");
+    expect(FSD_SIG_WIN_UP_FL, 0x3C2u, honking, 8, 2, "window up while the horn is down");
+    expect(FSD_SIG_WIN_UP_FL, 0x3C2u, hazarding, 8, 2,
+           "window up while the hazard button is down");
+    expect(FSD_SIG_WIN_UP_FL, 0x3C2u, seated, 8, 2, "window up with a driver in the seat");
+
+    /* 🔴 And the signal a pressed button carries must be readable in the very
+     * frame that carries it -- otherwise setting the bit is what stops it being
+     * read, which is a signal that can never be true. */
+    expect(FSD_SIG_HORN_SW, 0x3C2u, honking, 8, 1, "the horn frame reports the horn");
+    expect(FSD_SIG_HAZARD_BTN, 0x3C2u, hazarding, 8, 1,
+           "the hazard frame reports the hazard button");
+
+    /* The scroll frame still is not the switch pack, and vice versa. Narrowing
+     * the mask must not make the two multiplexes interchangeable. */
+    const uint8_t scroll[8] = {0x29, 0x55, 0x00, 0x05, 0x00, 0x00, 0x00, 0x80};
+    int32_t v = 0x5A5A;
+    CHECK(fsd_signal_extract(FSD_SIG_WIN_UP_FL, 0x3C2u, scroll, 8, &v) == FSD_SIGV_WRONG_MUX,
+          "a window switch is still not in the scroll frame");
+    CHECK(v == 0x5A5A, "and the refusal still writes nothing");
+    CHECK(fsd_signal_extract(FSD_SIG_HORN_SW, 0x3C2u, scroll, 8, &v) == FSD_SIGV_WRONG_MUX,
+          "the horn is not in the scroll frame either");
+    expect(FSD_SIG_SCROLL_TICKS, 0x3C2u, scroll, 8, 5, "and the scroll frame still reads");
+
+    /* ⚠️ TWO BITS, NOT ONE. Our captures cannot tell those apart on their own
+     * — only indexes 0 and 1 were ever seen, and a 1-bit mask partitions those
+     * two identically. The width comes from opendbc, which declares
+     *
+     *      VCLEFT_switchStatusIndex M: 0|2   with  2 = INVALID
+     *
+     * so index 2 exists and means "do not read this frame". At one bit it
+     * would fold into index 0 and we would read the switch pack out of a frame
+     * the car has marked unusable.
+     *
+     * That is not a capture, so it is written as the behaviour it implies
+     * rather than as a value copied out of one. */
+    const uint8_t invalid[8] = {0x02, 0x55, 0x55, 0x55, 0x02, 0x00, 0x69, 0x85};
+    v = 0x5A5A;
+    CHECK(fsd_signal_extract(FSD_SIG_WIN_UP_FL, 0x3C2u, invalid, 8, &v) == FSD_SIGV_WRONG_MUX,
+          "index 2 is INVALID and must not be read as the switch pack");
+    CHECK(v == 0x5A5A, "and it writes nothing");
+    CHECK(fsd_signal_extract(FSD_SIG_HORN_SW, 0x3C2u, invalid, 8, &v) == FSD_SIGV_WRONG_MUX,
+          "nor as a button");
+    CHECK(fsd_signal_extract(FSD_SIG_SCROLL_TICKS, 0x3C2u, invalid, 8, &v) == FSD_SIGV_WRONG_MUX,
+          "nor as the scroll wheel");
+    const uint8_t index3[8] = {0x03, 0x55, 0x55, 0x55, 0x02, 0x00, 0x69, 0x85};
+    CHECK(fsd_signal_extract(FSD_SIG_WIN_UP_FL, 0x3C2u, index3, 8, &v) == FSD_SIGV_WRONG_MUX,
+          "index 3 has no meaning at all and must not be read");
+    CHECK(fsd_signal_extract(FSD_SIG_SCROLL_TICKS, 0x3C2u, index3, 8, &v) == FSD_SIGV_WRONG_MUX,
+          "index 3 is not the scroll frame");
+}
+
+/* ── 0x249: the turn stalk ───────────────────────────────────────────────────
+ *
+ * 🔴 One bit left of where opendbc puts it. These are the byte-2 values the
+ * capture holds, and the value table they have to line up with:
+ *
+ *      1 UP_1   2 UP_2   3 DOWN_1   4 DOWN_2
+ */
+static void test_turn_stalk_is_one_bit_left_of_the_dbc(void) {
+    /* 4차 우깜빡이 (by hand): 0x02 twice, then 0x04, then back to 0. */
+    const uint8_t up1[4]  = {0x9B, 0x00, 0x02, 0x00};
+    const uint8_t up2[4]  = {0xA3, 0x00, 0x04, 0x00};
+    /* 4차 좌깜빡이 (by hand): 0x06 twice, then 0x08. */
+    const uint8_t dn1[4]  = {0x5E, 0x09, 0x06, 0x00};
+    const uint8_t dn2[4]  = {0x92, 0x0A, 0x08, 0x00};
+    const uint8_t idle[4] = {0x5E, 0x09, 0x00, 0x00};
+
+    expect(FSD_SIG_TURN_STALK, 0x249u, idle, 4, 0, "stalk idle");
+    expect(FSD_SIG_TURN_STALK, 0x249u, up1, 4, 1, "0x02 -> UP_1");
+    expect(FSD_SIG_TURN_STALK, 0x249u, up2, 4, 2, "0x04 -> UP_2 (right indicator)");
+    expect(FSD_SIG_TURN_STALK, 0x249u, dn1, 4, 3, "0x06 -> DOWN_1");
+    expect(FSD_SIG_TURN_STALK, 0x249u, dn2, 4, 4, "0x08 -> DOWN_2 (left indicator)");
+
+    /* 🔴 The whole point, said as an assertion: at the DBC's 16|3 the left
+     * indicator's own frame would read as IDLE -- 0x08 & 0x07 == 0 -- at the
+     * exact moment 0x3F5 says the left lamp came on. */
+    CHECK((dn2[2] & 0x07u) == 0u,
+          "at 16|3 the left indicator reads as idle, which is why 17|3");
+    CHECK(((dn2[2] >> 1) & 0x07u) == 4u, "and at 17|3 it reads as DOWN_2");
+
+    /* Four distinct values, so no two stalk positions collide. */
+    int32_t seen[4] = {0, 0, 0, 0};
+    const uint8_t* frames[4] = {up1, up2, dn1, dn2};
+    for (int i = 0; i < 4; i++)
+        fsd_signal_extract(FSD_SIG_TURN_STALK, 0x249u, frames[i], 4, &seen[i]);
+    for (int a = 0; a < 4; a++)
+        for (int b = a + 1; b < 4; b++)
+            CHECK(seen[a] != seen[b], "stalk values %d and %d collide at %ld", a, b,
+                  (long)seen[a]);
+
+    /* The frame is four bytes on this car, and byte 2 is the last one we need. */
+    int32_t v = 0;
+    CHECK(fsd_signal_extract(FSD_SIG_TURN_STALK, 0x249u, dn2, 2, &v) == FSD_SIGV_SHORT,
+          "two bytes cannot hold byte 2");
+}
+
+/* ── 0x3F5 byte 0 bit 4: the hazards, and the bit that does not blink ───────*/
+static void test_hazards_do_not_blink_on_bit_4(void) {
+    /* By hand, 3차 좌우비상등: both phases. */
+    const uint8_t hand_a[8] = {0x1A, 0xC8, 0x44, 0x39, 0x80, 0x0C, 0x28, 0x00};
+    const uint8_t hand_b[8] = {0x15, 0xC8, 0x44, 0x39, 0x80, 0x0C, 0x28, 0x00};
+    /* By the commercial device, 3차 후진: both phases, different byte 0. */
+    const uint8_t auto_a[8] = {0x7A, 0xC8, 0x44, 0x39, 0x80, 0x0C, 0x28, 0x00};
+    const uint8_t auto_b[8] = {0x75, 0xC8, 0x44, 0x39, 0x80, 0x0C, 0x28, 0x00};
+    /* 4차 좌깜빡이 / 우깜빡이: an indicator on, hazards off. */
+    const uint8_t left_a[8]  = {0x02, 0x00, 0x0B, 0x38, 0x80, 0x0D, 0x08, 0x00};
+    const uint8_t left_b[8]  = {0x01, 0x00, 0x0B, 0x38, 0x80, 0x0D, 0x04, 0x00};
+    const uint8_t right_a[8] = {0x08, 0x00, 0x0B, 0x38, 0x80, 0x0E, 0x20, 0x00};
+    const uint8_t off[8]     = {0x00, 0x00, 0x0B, 0x38, 0x80, 0x0E, 0x00, 0x00};
+
+    expect(FSD_SIG_HAZARD_ON, 0x3F5u, hand_a, 8, 1, "hazards, lit phase");
+    expect(FSD_SIG_HAZARD_ON, 0x3F5u, hand_b, 8, 1, "hazards, dark phase");
+    expect(FSD_SIG_HAZARD_ON, 0x3F5u, auto_a, 8, 1, "hazards by the device, lit");
+    expect(FSD_SIG_HAZARD_ON, 0x3F5u, auto_b, 8, 1, "hazards by the device, dark");
+
+    /* 🟢 That is the finding: the bit held through both phases, in both
+     * sources. A rule watching it fires once, not three times a second. */
+
+    expect(FSD_SIG_HAZARD_ON, 0x3F5u, left_a, 8, 0, "left indicator is not hazards");
+    expect(FSD_SIG_HAZARD_ON, 0x3F5u, left_b, 8, 0, "left indicator, dark phase");
+    expect(FSD_SIG_HAZARD_ON, 0x3F5u, right_a, 8, 0, "right indicator is not hazards");
+    expect(FSD_SIG_HAZARD_ON, 0x3F5u, off, 8, 0, "nothing on");
+}
+
 int main(void) {
     printf("test_signal\n");
     test_map_light_walk();
@@ -302,6 +472,10 @@ int main(void) {
     test_belt_and_driver();
     test_scroll_accumulates();
     test_multiplex_is_not_guessed();
+    test_byte0_buttons();
+    test_a_pressed_button_does_not_hide_the_rest_of_the_frame();
+    test_turn_stalk_is_one_bit_left_of_the_dbc();
+    test_hazards_do_not_blink_on_bit_4();
     test_doors_and_gear();
     test_table_is_well_formed();
     test_refuses_rather_than_guesses();

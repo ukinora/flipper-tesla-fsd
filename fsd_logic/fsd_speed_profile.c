@@ -16,22 +16,65 @@
 
 #include <string.h>
 
-// Provisional. `verified = false` is what actually gates transmission — see
-// fsd_sp_request(). Fix these three fields from a capture, flip verified, and
-// the state machine needs no changes.
+// MEASURED. See the header for which capture supplied each number and why
+// `verified` is still false — it is not a leftover, it is the one field a
+// capture could not settle.
 const FsdSpEncoding FSD_SP_ENCODING_DEFAULT = {
-    .tick_toward_higher = 1, // assumption: +1 detent raises the profile
-    .ticks_per_step = 1,
-    .wrap = false, // assumption: the ends stop rather than wrap
-    .verified = false,
+    .tick_toward_faster = 1, // measured: +1 detent = one step toward FASTER
+    .ticks_per_step = 1,     // measured: one detent, one step
+    .wrap = false,           // measured at the bottom; top end unobserved
+    .verified = false,       // top end unobserved + owner has not armed this
+};
+
+// The car's own 0x3FD values, slowest first. Measured 2026-09-03; see header.
+//
+// Order is the contract here, not membership: reading it as an unordered set
+// loses the whole point, which is that raw 4 is the SLOWEST profile.
+const uint8_t FSD_SP_RAW_BY_RANK[FSD_SP_PROFILE_COUNT] = {
+    FSD_SP_RAW_SLOTH,    // rank 0 — slowest
+    FSD_SP_RAW_CHILL,    // rank 1
+    FSD_SP_RAW_STANDARD, // rank 2
+    FSD_SP_RAW_HURRY,    // rank 3 — fastest
 };
 
 // swcRightScrollTicks: 0x3C2 mux=1, byte 3 bits 0-5, 6-bit signed.
+//
+// Confirmed against the wire twice. The car's idle frame and the commercial
+// device's injected one differ in byte 3 and nowhere else:
+//
+//   3C2#2955000000000080   car
+//   3C2#2955000100000080   device, +1 ms later   -> byte3 = 0x01  (+1 detent)
+//   3C2#2955000500000080   device, +0 ms later   -> byte3 = 0x05  (+5 detents)
+//
+// byte0 = 0x29, and 0x29 & 0x03 = 1, which is why the mux mask is 2 bits and
+// not 3: the other bits of byte0 are separate switches (horn, hazard button,
+// driver-present), not part of the selector.
 #define SCROLL_TICKS_BYTE 3u
 #define SCROLL_TICKS_MASK 0x3Fu
+#define SCROLL_TICKS_SIGN 0x20u
 #define SCROLL_MUX_BYTE 0u
 #define SCROLL_MUX_MASK 0x03u
 #define SCROLL_MUX_SWITCHES 1u
+
+bool fsd_sp_rank_from_raw(uint8_t raw, uint8_t* rank_out) {
+    if(!rank_out) return false;
+    for(unsigned i = 0; i < FSD_SP_PROFILE_COUNT; i++) {
+        if(FSD_SP_RAW_BY_RANK[i] == raw) {
+            *rank_out = (uint8_t)i;
+            return true;
+        }
+    }
+    // Not one of the four. Say so rather than guessing: a mis-decoded frame
+    // that looks like a profile is worse than one that looks like nothing.
+    return false;
+}
+
+bool fsd_sp_raw_from_rank(uint8_t rank, uint8_t* raw_out) {
+    if(!raw_out) return false;
+    if(rank > FSD_SP_PROFILE_MAX) return false;
+    *raw_out = FSD_SP_RAW_BY_RANK[rank];
+    return true;
+}
 
 void fsd_sp_init(FsdSpeedProfile* sp) {
     if(!sp) return;
@@ -60,9 +103,9 @@ void fsd_sp_abort(FsdSpeedProfile* sp, FsdSpError why, uint32_t now_ms) {
 bool fsd_sp_encoding_ok(const FsdSpEncoding* e) {
     if(!e) return false;
     if(!e->verified) return false;
-    if(e->tick_toward_higher == 0) return false;
-    if(e->tick_toward_higher > FSD_SP_DETENT_MAX) return false;
-    if(e->tick_toward_higher < FSD_SP_DETENT_MIN) return false;
+    if(e->tick_toward_faster == 0) return false;
+    if(e->tick_toward_faster > FSD_SP_DETENT_MAX) return false;
+    if(e->tick_toward_faster < FSD_SP_DETENT_MIN) return false;
     // A step that cannot fit in the budget could never complete, and the budget
     // is now spent per whole step.
     if(e->ticks_per_step == 0 || e->ticks_per_step > FSD_SP_MAX_TICKS) return false;
@@ -145,6 +188,17 @@ bool fsd_sp_decode_profile(const uint8_t* data, uint8_t dlc, bool hw4, uint8_t* 
     }
     if(mux != 0u || dlc < 7u) return false;
     *out = (uint8_t)((data[6] >> 1) & 0x03u);
+    return true;
+}
+
+bool fsd_sp_observe_raw(FsdSpeedProfile* sp, uint8_t raw, uint32_t now_ms) {
+    // The return value means "this was observed", so a machine that cannot
+    // hold it has to say no. Returning true here would report a reading that
+    // went nowhere.
+    if(!sp) return false;
+    uint8_t rank = 0;
+    if(!fsd_sp_rank_from_raw(raw, &rank)) return false;
+    fsd_sp_observe(sp, rank, now_ms);
     return true;
 }
 
@@ -244,18 +298,32 @@ FsdSpAction fsd_sp_poll(FsdSpeedProfile* sp, const FsdSpInputs* in,
     return emit(sp, direction(sp), now_ms);
 }
 
-bool fsd_sp_apply_scroll(const FsdSpeedProfile* sp, FsdSpAction act,
-                         uint8_t* buf, uint8_t len) {
-    if(!sp || !buf || act == FSD_SP_ACT_NONE) return false;
+bool fsd_sp_read_detents(const uint8_t* buf, uint8_t len, int8_t* out) {
+    if(!buf || !out) return false;
     if(len <= SCROLL_TICKS_BYTE) return false;
     if((buf[SCROLL_MUX_BYTE] & SCROLL_MUX_MASK) != SCROLL_MUX_SWITCHES) return false;
+
+    uint8_t raw = (uint8_t)(buf[SCROLL_TICKS_BYTE] & SCROLL_TICKS_MASK);
+    // Sign-extend the 6-bit field. Without this 0x3F reads as +63 instead of
+    // -1, i.e. a scroll DOWN would be reported as a large scroll UP.
+    int8_t v = (raw & SCROLL_TICKS_SIGN) ? (int8_t)((int)raw - 64) : (int8_t)raw;
+    *out = v;
+    return true;
+}
+
+bool fsd_sp_apply_detents(const FsdSpeedProfile* sp, int8_t detents,
+                          uint8_t* buf, uint8_t len) {
+    if(!sp || !buf) return false;
+    if(len <= SCROLL_TICKS_BYTE) return false;
+    if((buf[SCROLL_MUX_BYTE] & SCROLL_MUX_MASK) != SCROLL_MUX_SWITCHES) return false;
+
     // Last line of defence. check_inputs() already rejects a bad table, but this
     // is the function that actually writes to the wire, so it re-checks rather
     // than trusting a caller to have gone through the state machine.
     //
-    // 🔴 It only re-checked the RANGE. The comment claimed a re-check and the
-    // code delivered a third of one: FSD_SP_ENCODING_DEFAULT has
-    // tick_toward_higher = 1, which passes every bound below, so calling this
+    // 🔴 It once only re-checked the RANGE. The comment claimed a full re-check
+    // and the code delivered a third of one: FSD_SP_ENCODING_DEFAULT has
+    // tick_toward_faster = 1, which passes every bound below, so calling this
     // directly built a modified 0x3C2 out of an UNVERIFIED encoding — the exact
     // thing FsdSpEncoding.verified exists to prevent. The Intel HW3
     // emergency-brake incident is why that flag is there.
@@ -263,17 +331,35 @@ bool fsd_sp_apply_scroll(const FsdSpeedProfile* sp, FsdSpAction act,
     // fsd_sp_encoding_ok() is the same predicate check_inputs() uses, so the two
     // paths can no longer disagree about what "safe to emit" means.
     if(!fsd_sp_encoding_ok(&sp->enc)) return false;
-    if(sp->enc.tick_toward_higher == 0) return false;
-    if(sp->enc.tick_toward_higher > FSD_SP_DETENT_MAX) return false;
-    if(sp->enc.tick_toward_higher < FSD_SP_DETENT_MIN) return false;
 
-    int8_t tick = sp->enc.tick_toward_higher;
-    if(act == FSD_SP_ACT_TICK_DOWN) tick = (int8_t)(-tick);
+    // The count itself, not just the table it came from. A caller may ask for
+    // an arbitrary number of detents here, and a value that does not fit the
+    // 6-bit field would be MASKED rather than clamped: +40 lands on the wire as
+    // -24, i.e. the car scrolls the opposite way from what was asked.
+    if(detents == 0) return false;
+    if(detents > FSD_SP_DETENT_MAX) return false;
+    if(detents < FSD_SP_DETENT_MIN) return false;
 
     buf[SCROLL_TICKS_BYTE] =
         (uint8_t)((buf[SCROLL_TICKS_BYTE] & (uint8_t)~SCROLL_TICKS_MASK) |
-                  ((uint8_t)tick & SCROLL_TICKS_MASK));
+                  ((uint8_t)detents & SCROLL_TICKS_MASK));
     return true;
+}
+
+bool fsd_sp_apply_scroll(const FsdSpeedProfile* sp, FsdSpAction act,
+                         uint8_t* buf, uint8_t len) {
+    if(!sp || act == FSD_SP_ACT_NONE) return false;
+
+    // Negate in int, not in int8_t: an unchecked table could hold -128, whose
+    // negation does not fit an int8_t. apply_detents() rejects the result on
+    // range, but only if the value that reaches it is the one we meant.
+    int tick = (int)sp->enc.tick_toward_faster;
+    if(act == FSD_SP_ACT_TICK_DOWN) tick = -tick;
+    if(tick > FSD_SP_DETENT_MAX || tick < FSD_SP_DETENT_MIN) return false;
+
+    // One writer for the field. Two would eventually disagree about the mask,
+    // the mux check, or the range — and only one of them would be gated.
+    return fsd_sp_apply_detents(sp, (int8_t)tick, buf, len);
 }
 
 const char* fsd_sp_error_str(FsdSpError e) {

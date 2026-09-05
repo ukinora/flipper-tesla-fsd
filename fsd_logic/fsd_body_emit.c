@@ -26,6 +26,36 @@ bool fsd_emit_supported(FsdBodyAction action) {
     return false;
 }
 
+/* Door selector -> byte1 value. A switch, not a table lookup, so that adding
+ * a door to FsdEmitDoor without measuring its bits is a compiler warning here
+ * rather than an index into whatever follows the array. */
+bool fsd_emit_door_bits(int32_t door, uint8_t* bits_out) {
+    if(!bits_out) return false;
+    switch((FsdEmitDoor)door) {
+    case FSD_EMIT_DOOR_RIGHT_FRONT:
+        *bits_out = FSD_EMIT_DOOR_RF_BITS;
+        return true;
+    case FSD_EMIT_DOOR_RIGHT_REAR:
+        *bits_out = FSD_EMIT_DOOR_RR_BITS;
+        return true;
+    case FSD_EMIT_DOOR_COUNT:
+        break;
+    }
+    /* 🔴 Includes the two LEFT doors. The bit pattern makes 0x0C and 0x30 look
+     * obvious, and obvious is not measured. Guessing wrong here opens a door on
+     * the other side of the car. */
+    return false;
+}
+
+const char* fsd_emit_door_str(int32_t door) {
+    switch((FsdEmitDoor)door) {
+    case FSD_EMIT_DOOR_RIGHT_FRONT: return "right front";
+    case FSD_EMIT_DOOR_RIGHT_REAR: return "right rear";
+    case FSD_EMIT_DOOR_COUNT: break;
+    }
+    return "?";
+}
+
 /* byte 7 = (sum of bytes 0..6 + 0xEC) & 0xFF.
  *
  * Checked against every distinct 0x3E9 payload we hold -- 162, zero
@@ -74,8 +104,9 @@ static FsdEmitResult emit_hazards(const FsdEmitTemplate* t, uint32_t now_ms,
     return FSD_EMIT_OK;
 }
 
-FsdEmitResult fsd_emit_build(FsdBodyAction action, const FsdEmitTemplate* t,
-                             uint32_t now_ms, FsdEmitFrame* out) {
+FsdEmitResult fsd_emit_build(FsdBodyAction action, int32_t arg,
+                             const FsdEmitTemplate* t, uint32_t now_ms,
+                             FsdEmitFrame* out) {
     if(!t || !out) return FSD_EMIT_BAD_TEMPLATE;
     if(!fsd_emit_supported(action)) return FSD_EMIT_NO_ENCODING;
 
@@ -87,6 +118,7 @@ FsdEmitResult fsd_emit_build(FsdBodyAction action, const FsdEmitTemplate* t,
      * counter and a check field, so the frame is not a copy with a bit set, it
      * is a copy REWRITTEN. Kept separate so nobody has to read the shared path
      * wondering which of its steps apply. */
+    /* Hazards take no argument. Ignored, not refused -- see the header. */
     if(action == FSD_ACT_HAZARDS) return emit_hazards(t, now_ms, out);
 
     /* 🔴 NO `default:` HERE, AND THAT IS THE WHOLE POINT.
@@ -119,12 +151,18 @@ FsdEmitResult fsd_emit_build(FsdBodyAction action, const FsdEmitTemplate* t,
     uint8_t want_dlc = 0, byte_ix = 0, bits = 0;
     switch(action) {
     case FSD_ACT_DOOR_OPEN:
+        /* 🔴 The ONLY place a door is chosen, and it refuses before it knows
+         * the template is good. An unmeasured selector must not get as far as
+         * "the template was stale" -- that reads like a retryable problem, and
+         * this one is not: no amount of waiting will make us know which bits
+         * open the driver's door. */
+        if(!fsd_emit_door_bits(arg, &bits)) return FSD_EMIT_NO_ENCODING;
         want_id = FSD_EMIT_DOOR_ID;
         want_dlc = FSD_EMIT_DOOR_DLC;
         byte_ix = FSD_EMIT_DOOR_BYTE;
-        bits = FSD_EMIT_DOOR_MASK;
         break;
     case FSD_ACT_MAP_LIGHT:
+        /* Takes no argument. Ignored, not refused -- see the header. */
         want_id = FSD_EMIT_MAP_LIGHT_ID;
         want_dlc = FSD_EMIT_MAP_LIGHT_DLC;
         byte_ix = FSD_EMIT_MAP_LIGHT_BYTE;

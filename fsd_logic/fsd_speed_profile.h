@@ -61,11 +61,64 @@
 extern "C" {
 #endif
 
-// FSD v14 Lite exposes four profiles. 0x3FD carries them in 2 bits, which
-// matches — but the value-to-name mapping is NOT established for this build.
+/* ---- THE SCALE THIS MACHINE SPEAKS ----------------------------------------
+ *
+ * Everything below (target, observed, FsdSpInputs.observed_profile) is a SPEED
+ * RANK, not the number the car puts on the wire:
+ *
+ *     rank 0 = slowest ... rank 3 = fastest
+ *
+ * That has always been the machine's scale — direction() takes the sign of a
+ * difference and `wrap` treats it as a ring, and neither means anything unless
+ * the numbers rise with speed. What was missing was WHICH raw value is which
+ * rank. The capture supplies it; see FSD_SP_RAW_BY_RANK below.
+ *
+ * It is the same scale fsd_cam_policy.h uses (FSD_POL_PROFILE_SLOTH..HURRY),
+ * deliberately: the two modules must not disagree about which way is faster.
+ */
 #define FSD_SP_PROFILE_MIN 0u
 #define FSD_SP_PROFILE_MAX 3u
 #define FSD_SP_PROFILE_COUNT (FSD_SP_PROFILE_MAX - FSD_SP_PROFILE_MIN + 1u)
+
+/* ---- THE CAR'S OWN VALUES, IN ORDER OF SPEED ------------------------------
+ *
+ * MEASURED, not assumed. 2nd visit capture (2026-09-03, gear D, 872 frames):
+ * one right-scroll detent walked the car up one profile at a time and
+ * 0x3FD mux 2 byte7 bits[6:4] read back
+ *
+ *     Sloth 4  ->  Chill 0  ->  Standard 1  ->  Hurry 2
+ *
+ * 🔴 The raw scale is NOT monotonic in speed. Sloth is 4 and Hurry is 2, so
+ * the sign of (target - observed) computed on RAW values points the wrong way
+ * whenever Sloth is one of the two — it makes Sloth look like the fastest
+ * profile there is. That is the finding the 5th red team pinned down on
+ * 2026-09-04, and test_camera.c's test_policy_scale_is_not_the_raw_can_value
+ * guards the same fact from the policy side.
+ *
+ * So a raw value has to become a rank at the BOUNDARY — fsd_sp_rank_from_raw()
+ * — and must never be fed straight into fsd_sp_observe().
+ * fsd_sp_observe_raw() does both in one call and is the safer entry point.
+ *
+ * ⚠️ fsd_sp_decode_profile() still reads the WRONG BITS for this car (see its
+ * own note). Fixing that read site is a separate decision, and this table is
+ * its prerequisite: fixing the read alone would start feeding raw 4 into a
+ * numeric clamp, which is worse than reading nothing at all.
+ */
+#define FSD_SP_RAW_SLOTH 4u
+#define FSD_SP_RAW_CHILL 0u
+#define FSD_SP_RAW_STANDARD 1u
+#define FSD_SP_RAW_HURRY 2u
+
+/** Raw 0x3FD value for each speed rank, slowest first. */
+extern const uint8_t FSD_SP_RAW_BY_RANK[FSD_SP_PROFILE_COUNT];
+
+/** Raw 0x3FD value -> speed rank. False (and *rank_out untouched) for a value
+ *  this car has never been seen to send — a mis-decode has to look like
+ *  silence, not like a profile. */
+bool fsd_sp_rank_from_raw(uint8_t raw, uint8_t* rank_out);
+
+/** Speed rank -> raw 0x3FD value. False for a rank outside 0..3. */
+bool fsd_sp_raw_from_rank(uint8_t rank, uint8_t* raw_out);
 
 // Bounds. Generous enough for a slow car, tight enough that a broken loop
 // gives up instead of scrolling forever.
@@ -111,8 +164,11 @@ typedef enum {
 
 typedef enum {
     FSD_SP_ACT_NONE = 0,
-    FSD_SP_ACT_TICK_UP,   // toward a HIGHER profile value
-    FSD_SP_ACT_TICK_DOWN, // toward a LOWER profile value
+    // "UP" is a higher RANK, i.e. a FASTER profile. It is NOT a higher raw CAN
+    // value: on this car the fastest profile (Hurry) is raw 2 and the slowest
+    // (Sloth) is raw 4. See FSD_SP_RAW_BY_RANK.
+    FSD_SP_ACT_TICK_UP,   // toward a FASTER profile
+    FSD_SP_ACT_TICK_DOWN, // toward a SLOWER profile
 } FsdSpAction;
 
 // Everything the state machine needs to know about the car right now. The
@@ -123,30 +179,54 @@ typedef struct {
     bool ota_in_progress;
     bool scroll_bus_present; // 0x3C2 has been seen -> direct Vehicle CAN
     bool status_fresh;       // 0x3FD seen within FSD_SP_STATE_FRESH_MS
-    uint8_t observed_profile;// last value decoded from 0x3FD (0..3)
+    uint8_t observed_profile;// last profile as a SPEED RANK (0..3), not the raw
+                             // 0x3FD value — convert with fsd_sp_rank_from_raw()
 } FsdSpInputs;
 
-// Wire encoding. NOTHING here is confirmed on this car yet.
+// Wire encoding. Every field except `verified` is now MEASURED — see the
+// default table's comment for which capture supplied which number.
 typedef struct {
-    int8_t tick_toward_higher; // 6-bit signed detent that raises the profile
+    int8_t tick_toward_faster; // 6-bit signed detent count for ONE step toward
+                               // a faster profile. Negated for the slow way.
     uint8_t ticks_per_step;    // detents needed for one profile step
     bool wrap;                 // do the ends wrap around?
-    bool verified;             // confirmed against a real capture?
+    bool verified;             // every field confirmed, including the ends?
 } FsdSpEncoding;
 
-// Provisional table: +1 detent assumed to raise the profile, one detent per
-// step, no wrap.
+// MEASURED from captures of the commercial device driving this exact path on
+// this exact car. Field by field, with the evidence:
 //
-// `wrap` is no longer a guess. Observed on the car (2026-08-11) through a
-// commercial device driving this exact path: UP walks Sloth -> Chill ->
-// Standard -> Hurry and STAYS at Hurry when pressed again; DOWN walks back and
-// stays at Sloth. The ends saturate, they do not wrap around.
+//   tick_toward_faster = +1
+//       2nd visit (2026-09-03, gear D). Three consecutive +1 detents walked
+//       0x3FD from Sloth to Chill to Standard to Hurry, 221-298 ms behind each
+//       tick. Positive is the FAST way. (Raw values 4 -> 0 -> 1 -> 2, which is
+//       why this field is named after speed and not after the number.)
 //
-// That matters beyond bookkeeping: a request can never be steered past an end,
-// so an overshoot means our own encoding is wrong rather than the car wrapping.
+//   ticks_per_step = 1
+//       Same capture: one detent, one step. Three for three, no doubles.
 //
-// Direction and ticks-per-step are still open, so `verified` stays false until
-// a capture settles them.
+//   wrap = false
+//       Bottom end measured (2nd visit): at Sloth a -5 detent moved nothing.
+//       Top end NOT measured — see `verified`. false is the conservative value
+//       either way: with wrap off the machine only ever ticks toward the
+//       target and stops on equality, so it cannot be steered past an end.
+//
+//   verified = false
+//       🔴 Deliberate, and the only thing still holding the gate shut. Two
+//       reasons, and neither is a coding task:
+//         1. The top end is unobserved. The 4th visit sent +1 and +5 while the
+//            car was already at Hurry and it stayed at Hurry — but the car was
+//            PARKED (no 0x118, no 0x257: the drive inverter was silent), so
+//            "saturated at the top" and "parked, so ignored" are the same
+//            picture. Nothing in that capture can tell them apart.
+//         2. Flipping it opens scroll injection on a car with a recorded Intel
+//            HW3 emergency-braking incident. That is the owner's call, not a
+//            side effect of filling in a table.
+//
+// The frame shape is measured too, and lives in the .c next to the constants:
+// 0x3C2 mux 1, byte 3, 6-bit two's complement, one frame carries the WHOLE
+// count (the device sent 0x05 once for +5, not 0x01 five times), inserted
+// 0-1 ms after the car's own frame. No counter, no checksum.
 extern const FsdSpEncoding FSD_SP_ENCODING_DEFAULT;
 
 typedef struct {
@@ -197,8 +277,19 @@ FsdSpError fsd_sp_request(FsdSpeedProfile* sp, const FsdSpInputs* in,
  *  too short to hold the field. */
 bool fsd_sp_decode_profile(const uint8_t* data, uint8_t dlc, bool hw4, uint8_t* out);
 
-/** Feed a profile value decoded from 0x3FD. Cheap; call on every frame. */
+/** Feed a profile SPEED RANK (0..3). Cheap; call on every frame.
+ *  Values outside 0..3 are ignored.
+ *
+ *  🔴 Do not hand this the value fsd_sp_decode_profile() returns — that is a
+ *  raw CAN value, and raw Sloth is 4, which this function drops. Use
+ *  fsd_sp_observe_raw(). */
 void fsd_sp_observe(FsdSpeedProfile* sp, uint8_t profile, uint32_t now_ms);
+
+/** Same, but takes the RAW 0x3FD value and converts it. Returns false when the
+ *  car sent a value that is not one of the four this car is known to use — in
+ *  which case nothing is observed, which is the honest outcome for a frame we
+ *  cannot interpret. This is the entry point a caller should wire. */
+bool fsd_sp_observe_raw(FsdSpeedProfile* sp, uint8_t raw, uint32_t now_ms);
 
 /** Advance the machine. Returns the tick to emit right now, or ACT_NONE.
  *  Emitting is the caller's job — see fsd_sp_apply_scroll(). */
@@ -207,9 +298,35 @@ FsdSpAction fsd_sp_poll(FsdSpeedProfile* sp, const FsdSpInputs* in,
 
 /** Write `act` into a 0x3C2 mux=1 frame body (swcRightScrollTicks, byte3
  *  bits 0-5, 6-bit signed). Returns false if the frame is not mux=1, too
- *  short, or act is ACT_NONE — in which case buf is untouched. */
+ *  short, or act is ACT_NONE — in which case buf is untouched.
+ *
+ *  One step's worth of detents, taken from the encoding table. For an
+ *  arbitrary count in a single frame, see fsd_sp_apply_detents(). */
 bool fsd_sp_apply_scroll(const FsdSpeedProfile* sp, FsdSpAction act,
                          uint8_t* buf, uint8_t len);
+
+/** Write an arbitrary detent count into a 0x3C2 mux=1 frame body.
+ *
+ *  The commercial device puts the whole count in ONE frame: for "+5" it sent
+ *  byte3 = 0x05 exactly once, not 0x01 five times (4th visit, 2026-09-05 —
+ *  80 mux-1 frames in the file and precisely one with byte3 != 0). So an
+ *  emitter never needs to repeat itself, and this is the function that says so.
+ *
+ *  Gated identically to fsd_sp_apply_scroll(): the encoding table must pass
+ *  fsd_sp_encoding_ok(), which today it does not. That is on purpose — this
+ *  builds the bytes that scroll a car with a recorded emergency-braking
+ *  incident, so it must not become the easy way around the flag.
+ *
+ *  `detents` must be non-zero and within FSD_SP_DETENT_MIN..MAX. Returns false
+ *  and leaves buf untouched otherwise. */
+bool fsd_sp_apply_detents(const FsdSpeedProfile* sp, int8_t detents,
+                          uint8_t* buf, uint8_t len);
+
+/** Read a detent count back out of a 0x3C2 mux=1 frame body, sign-extending
+ *  the 6-bit field. Ungated: reading a frame the car (or the commercial
+ *  device) sent is how we check our own work, and it puts nothing on the wire.
+ *  False — *out untouched — if the frame is not mux=1 or too short. */
+bool fsd_sp_read_detents(const uint8_t* buf, uint8_t len, int8_t* out);
 
 /** End the current request. `why == FSD_SP_OK` finishes as DONE, anything else
  *  as FAILED. Stamps finished_ms so the cooldown applies to failures too —
