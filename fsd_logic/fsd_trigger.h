@@ -64,9 +64,10 @@ extern "C" {
 #endif
 
 /* Switch-kind signals get a button slot each: four map lights, eight window
- * switches. Asserted against the table in the .c so adding a switch signal
- * without a slot is a build error rather than a silent drop. */
-#define FSD_TRIG_SWITCH_COUNT 12
+ * switches, the horn and the hazard button. Asserted against the table in the
+ * .c so adding a switch signal without a slot is a build error rather than a
+ * silent drop. */
+#define FSD_TRIG_SWITCH_COUNT 14
 
 /* 🔴 And they do NOT fit in one FsdButtons.
  *

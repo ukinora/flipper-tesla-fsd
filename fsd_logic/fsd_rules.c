@@ -6,11 +6,14 @@
 
 /* Which signals each action disturbs.
  *
- * Only the map light has any: it is the one action that changes something this
- * firmware watches as a STATE, so it is the only one that can trigger its own
- * rules. Doors change 0x102/0x103, which we do watch — but no action opens a
- * door yet, and an entry for an action that cannot happen would be a guess
- * about which door.
+ * Doors change 0x102/0x103, which we do watch — but the door emitter writes
+ * 0x1F9 and the latch that answers is a consequence, not our frame, so an
+ * entry there would be a guess about how long the car takes to agree.
+ *
+ * ⚠️ The turn stalk (FSD_SIG_TURN_STALK) has no row because no action replays
+ * it yet. The day one does, it needs one: the commercial device turns the
+ * indicators on by writing that exact field, so our own frame would come back
+ * as a trigger.
  *
  * 🔴 An empty row is correct, not missing. The gear moves DI_gear and the
  * camera moves nothing we read, so neither can feed itself. */
@@ -29,6 +32,12 @@ static const FsdRuleAffects FSD_AFFECTS[] = {
      * lands in it. Without this, "on scroll up, scroll up" would run away. */
     {FSD_ACT_SCROLL, 1, {FSD_SIG_SCROLL_TICKS}},
     {FSD_ACT_GEAR_D, 1, {FSD_SIG_GEAR}},
+    /* Hazards now have a signal to disturb. 0x3F5 byte0 bit 4 reports them as
+     * the car sees them, so it cannot tell our command from the owner's
+     * button -- "on hazards, hazards" would hold itself on forever. Added the
+     * moment the signal existed, not the moment the emitter got a caller: the
+     * feedback path is what makes the loop, and it is complete now. */
+    {FSD_ACT_HAZARDS, 1, {FSD_SIG_HAZARD_ON}},
 };
 
 uint8_t fsd_rule_affects(FsdBodyAction a, FsdSignal* out, uint8_t max_out) {

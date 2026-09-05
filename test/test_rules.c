@@ -344,6 +344,39 @@ static void test_affects_is_honest(void) {
     CHECK(fsd_rule_affects(FSD_ACT_GEAR_D, out, FSD_RULE_MAX_AFFECTS) == 1 &&
               out[0] == FSD_SIG_GEAR,
           "the gear moves the gear");
+    CHECK(fsd_rule_affects(FSD_ACT_HAZARDS, out, FSD_RULE_MAX_AFFECTS) == 1 &&
+              out[0] == FSD_SIG_HAZARD_ON,
+          "🔴 the hazards land in 0x3F5 bit 4, which we now read — the car "
+          "cannot tell our command from the owner's button, so 'on hazards, "
+          "hazards' would hold itself on");
+
+    /* 🔴 THE RULE THAT MADE THAT ROW NECESSARY, AND WHY IT IS NOT OPTIONAL.
+     *
+     * An action that changes a STATE signal we watch must name it. The row
+     * above appeared the day FSD_SIG_HAZARD_ON did; before that the hazards
+     * changed nothing this firmware read, and an empty row was correct.
+     *
+     * Stated as a loop rather than as three more lines, so the day somebody
+     * adds a signal for something an action already does, this turns red
+     * instead of staying quiet. */
+    struct {
+        FsdBodyAction action;
+        FsdSignal must_name;
+        const char *why;
+    } feedback[] = {
+        {FSD_ACT_MAP_LIGHT, FSD_SIG_MAP_ON_FL, "the map light lights the lamp we read"},
+        {FSD_ACT_HAZARDS, FSD_SIG_HAZARD_ON, "the hazards set the bit we read"},
+        {FSD_ACT_SCROLL, FSD_SIG_SCROLL_TICKS, "the scroll writes the field we read"},
+        {FSD_ACT_GEAR_D, FSD_SIG_GEAR, "the gear moves the gear we read"},
+    };
+    for (unsigned i = 0; i < sizeof(feedback) / sizeof(feedback[0]); i++) {
+        const uint8_t n = fsd_rule_affects(feedback[i].action, out, FSD_RULE_MAX_AFFECTS);
+        int found = 0;
+        for (uint8_t k = 0; k < n; k++)
+            if (out[k] == feedback[i].must_name) found = 1;
+        CHECK(found, "action %d must name signal %d: %s", (int)feedback[i].action,
+              (int)feedback[i].must_name, feedback[i].why);
+    }
 
     // An empty answer is correct, not a gap: the camera changes nothing this
     // firmware reads as a state, so it cannot feed itself.

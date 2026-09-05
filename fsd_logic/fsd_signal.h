@@ -25,8 +25,8 @@
  * somebody wrote; a table makes it a property of what we measured. The app can
  * enumerate this table and the answer is the truth.
  *
- * 🔴 EVERY BIT POSITION HERE WAS MEASURED ON THIS CAR, 2026-09-01
- * ---------------------------------------------------------------
+ * 🔴 EVERY BIT POSITION HERE WAS MEASURED ON THIS CAR, 2026-09-01 AND -09-05
+ * --------------------------------------------------------------------------
  * Not read off a DBC. The owner pressed each map light and each window switch
  * in a fixed order, one per second, so the capture shows one field moving at a
  * time — 차량-캡처-2026-09-01.md §8-C. Where a borrowed DBC had a prediction it
@@ -104,6 +104,56 @@ typedef enum {
 
     FSD_SIG_GEAR, // 1 P, 2 R, 3 N, 4 D
     FSD_SIG_SCROLL_TICKS, // signed detents, accumulating
+
+    /* ---- measured on the 4th visit, 2026-09-05 -----------------------------
+     *
+     * 🔴 APPENDED, NEVER INSERTED. These numbers are what a stored rule keeps
+     * in NVS and what the app matches on. Slot one in the middle and every
+     * rule the owner already wrote points at a different input, silently.
+     */
+
+    /* 0x3C2 mux 0, byte 0. The same byte that carries the multiplex selector,
+     * which is why the mask over that selector had to narrow to two bits
+     * before these could be read at all -- see fsd_signal.c.
+     *
+     * Three button presses are the only non-idle byte-0 values in 32 captures
+     * across three visits, and all three land where the borrowed DBC says:
+     * horn 2|1, hazard button 3|1, driver present 4|1. */
+    FSD_SIG_HORN_SW,
+    FSD_SIG_HAZARD_BTN,
+
+    /* 0x249 SCCM_leftStalk, byte 2 bits [3:1].
+     *   0 idle, 1 UP_1, 2 UP_2 (right), 3 DOWN_1, 4 DOWN_2 (left)
+     *
+     * ⚠️ ONE BIT LEFT OF WHERE THE DBC PUTS IT. opendbc writes 16|3, which
+     * makes the captured 0x08 read as 0 (idle) at the exact moment the left
+     * indicator came on. At 17|3 the four captured values are 1,2,3,4 -- the
+     * value table, exactly. The frames decide, not the DBC.
+     *
+     * 🔴 STATE, not SWITCH, for two reasons and the second one is the one that
+     * matters. First, direction is the whole point: a SWITCH row would report
+     * "non-zero" and lose left-vs-right. Second, THIS FILE'S DEFINITION OF
+     * STATE IS "we can cause it" -- the commercial device turns the indicators
+     * on by replaying this very field, so the day we build that emitter our own
+     * frame lands here. STATE gets the suppression machinery; SWITCH is exempt
+     * from it on the grounds that "we cannot press one", which would stop being
+     * true. */
+    FSD_SIG_TURN_STALK,
+
+    /* 0x3F5 byte 0 bit 4. The hazards, as the car reports them.
+     *
+     * 🟢 This bit does NOT blink. The two indicator fields beside it alternate
+     * (0x02/0x01 left, 0x08/0x04 right, about three times a second) but bit 4
+     * held through both phases in every hazard capture we have -- 0x1A/0x15
+     * when a person pressed the button, 0x7A/0x75 when the device turned them
+     * on for reverse. So it is a state a rule can watch without firing on
+     * every flash.
+     *
+     * 🔴 The indicator fields themselves are deliberately NOT here. They are
+     * measured just as well, but a STATE rule on a blinking field fires on
+     * every flash, and whether that is what an owner means is a design
+     * question rather than a reading. */
+    FSD_SIG_HAZARD_ON,
 
     FSD_SIG_COUNT,
 } FsdSignal;

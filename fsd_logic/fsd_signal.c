@@ -11,20 +11,49 @@
  *   0x102 VCLEFT_doorStatus    8 bytes, 10 Hz
  *   0x103 VCRIGHT_doorStatus   8 bytes, 10 Hz
  *   0x118 DI_systemStatus      8 bytes, 100 Hz
+ *   0x249 SCCM_leftStalk       4 bytes
+ *   0x3F5 VCFRONT_lighting     8 bytes
  */
 #define ID_LIGHT 0x3E2u
 #define ID_SWITCH 0x3C2u
 #define ID_DOOR_L 0x102u
 #define ID_DOOR_R 0x103u
 #define ID_DRIVE 0x118u
+#define ID_STALK 0x249u
+#define ID_LAMPS 0x3F5u
 
-/* The two multiplexes of 0x3C2, both verbatim from the capture:
- *   0x00 ... switch pack (windows, belt, occupancy)
- *   0x29 ... scroll wheel and the camera bit
- * Byte 0 also carries other flags, so the mux comparison is masked. */
+/* The two multiplexes of 0x3C2:
+ *   0 ... switch pack (windows, belt, occupancy, buttons)
+ *   1 ... scroll wheel and the camera bit
+ *
+ * 🔴 THE SELECTOR IS TWO BITS, AND THIS MASK USED TO BE SIX.
+ *
+ * The frames read 0x00 and 0x29 in byte 0, and 0x2F was the mask that told
+ * those two apart. It worked for as long as byte 0 held nothing else. The 4th
+ * visit (2026-09-05) showed that it does:
+ *
+ *      3C2#0455555500006985    horn pressed
+ *      3C2#0855555500006985    hazard button pressed
+ *      3C2#1055555500006985    driver present
+ *
+ * Those are mux 0 with a button down, not three multiplexes nobody had seen.
+ * 0x29 & 3 = 1, and every one of the above & 3 = 0, so a 2-bit selector reads
+ * all of them correctly.
+ *
+ * ⚠️ The old mask was not merely imprecise, it silently dropped frames: 0x04
+ * and 0x08 are INSIDE 0x2F, so while the horn or the hazard button was held,
+ * every mux-0 signal -- all eight windows, the belt, driver-present --
+ * returned WRONG_MUX. Sixty to a hundred and thirty milliseconds at a time,
+ * and never in a way anything logged.
+ *
+ * And it made the two new byte-0 signals impossible on their face: setting the
+ * bit you want to read would have been what stopped the frame being read.
+ *
+ * 🟢 fsd_speed_profile.c has used a 2-bit mask on this frame all along. The
+ * two files now agree; they did not before. */
 #define MUX_PACK 0x00u
-#define MUX_SCROLL 0x29u
-#define MUX_MASK 0x2Fu
+#define MUX_SCROLL 0x01u
+#define MUX_MASK 0x03u
 
 #define SW(n, nm, bit)                                                     \
     [n] = {.signal = (n), .name = (nm), .can_id = ID_LIGHT,                \
@@ -129,6 +158,53 @@ static const FsdSignalDef FSD_SIGNALS[] = {
                               .start_bit = 24,
                               .bit_len = 6,
                               .kind = FSD_SIGK_DELTA},
+
+    /* The other two things byte 0 of 0x3C2 carries. Measured 2026-09-05: the
+     * owner pressed the horn twice (three presses actually reached the bus,
+     * 60-130 ms each) and the hazard button once, and those are the only
+     * non-idle values byte 0 took in 32 captures. */
+    [FSD_SIG_HORN_SW] = {.signal = FSD_SIG_HORN_SW,
+                         .name = "horn switch",
+                         .can_id = ID_SWITCH,
+                         .mux_byte = 0,
+                         .mux_mask = MUX_MASK,
+                         .mux_value = MUX_PACK,
+                         .start_bit = 2,
+                         .bit_len = 1,
+                         .kind = FSD_SIGK_SWITCH},
+    [FSD_SIG_HAZARD_BTN] = {.signal = FSD_SIG_HAZARD_BTN,
+                            .name = "hazard button",
+                            .can_id = ID_SWITCH,
+                            .mux_byte = 0,
+                            .mux_mask = MUX_MASK,
+                            .mux_value = MUX_PACK,
+                            .start_bit = 3,
+                            .bit_len = 1,
+                            .kind = FSD_SIGK_SWITCH},
+
+    /* 🔴 17|3, not the DBC's 16|3. The owner moved the stalk left and right in
+     * separate captures and the field took 6 then 8 (left) and 2 then 4
+     * (right); at 17|3 those are 3,4 and 1,2 -- DOWN_1, DOWN_2, UP_1, UP_2, the
+     * value table in order. At 16|3 the left indicator's 0x08 would read as
+     * IDLE at the moment 0x3F5 says the lamp came on. */
+    [FSD_SIG_TURN_STALK] = {.signal = FSD_SIG_TURN_STALK,
+                            .name = "turn stalk",
+                            .can_id = ID_STALK,
+                            .mux_byte = FSD_SIG_NO_MUX,
+                            .start_bit = 17,
+                            .bit_len = 3,
+                            .kind = FSD_SIGK_STATE},
+
+    /* Held across both flash phases in every hazard capture: 0x1A/0x15 by hand,
+     * 0x7A/0x75 when the device did it. The indicator bits beside it alternate;
+     * this one does not. */
+    [FSD_SIG_HAZARD_ON] = {.signal = FSD_SIG_HAZARD_ON,
+                           .name = "hazards on",
+                           .can_id = ID_LAMPS,
+                           .mux_byte = FSD_SIG_NO_MUX,
+                           .start_bit = 4,
+                           .bit_len = 1,
+                           .kind = FSD_SIGK_STATE},
 };
 
 _Static_assert(sizeof(FSD_SIGNALS) / sizeof(FSD_SIGNALS[0]) == FSD_SIG_COUNT,
