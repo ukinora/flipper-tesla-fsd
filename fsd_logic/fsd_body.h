@@ -45,10 +45,18 @@
  * bus. The first real write is a decision to be made in the car, with something
  * reversible, and it is not made in code.
  *
- * The other four rows have armable_at_runtime = false. Each row says in its
- * comment what evidence flips its bool — and each of the four that opened did
- * so because the condition it wrote for itself was met, not because somebody
+ * Every OTHER row has armable_at_runtime = false. Each one says in its comment
+ * what evidence flips its bool — and each of the ones that opened did so
+ * because the condition it wrote for itself was met, not because somebody
  * wanted it open.
+ *
+ * ⚠️ THAT SENTENCE USED TO COUNT ("the other four rows"), AND THE COUNT WAS
+ * WRONG THE DAY IT WAS WRITTEN — nine actions minus four armable is five, not
+ * four. The heading above counts too, and it will go stale the same way. A
+ * hand-written number in a comment has no test behind it; the two things that
+ * do are the _Static_assert on the table's length and the host test that makes
+ * armable_at_runtime and fsd_emit_supported() agree for EVERY action. Prefer
+ * saying "every other" to saying a number.
  *
  * 🔴 The two statements must move together. armable_at_runtime and "has an
  * emitter" describe the same fact from two sides, and test_body_emit.c asserts
