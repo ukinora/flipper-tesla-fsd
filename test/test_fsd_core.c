@@ -30,6 +30,7 @@
 #include "fsd_checksum.h"
 #include "fsd_events.h"
 #include "fsd_handler.h"
+#include "fsd_ota.h"
 #include "fsd_power.h"
 #include "fsd_owner.h"
 #include "fsd_selftest.h"
@@ -1220,21 +1221,41 @@ static void test_candump_format(void) {
     CHECK(strcmp(buf, "(0.000000) can0 3FD#00112233445566AA\n") == 0, "candump dlc clamp: [%s]", buf);
 }
 
-// ── 0x318 GTW_carState OTA detection (gates TX) ───────────────────────────────
+// ── 0x318 GTW_carState OTA detection (gates TX) ─────────────────────────────
+// 🔴 This used to assert that ONE installing frame latches the gate, and that
+// one non-installing frame releases it again. Both were true of the old
+// no-hysteresis Flipper copy, and both are now wrong: the decision moved to
+// fsd_ota.c, which requires a run in either direction. The assertions were not
+// deleted — they were made stronger, because a single frame flipping a gate
+// that stops all transmission is exactly what a dropped or corrupted frame
+// produces. See test_ota_gate() for the car's real byte-6 sequence.
 static void test_gtw_car_state(void) {
     FSDState s;
     memset(&s, 0, sizeof(s));
     CANFRAME f;
     zero(&f);
     f.data_lenght = 7;
+
     f.buffer[6] = 2; // installing
     fsd_handle_gtw_car_state(&s, &f);
-    CHECK(s.tesla_ota_in_progress, "OTA installing(2) -> in_progress");
-    f.buffer[6] = 1; // available — must NOT pause TX (issue #19 false positive)
-    fsd_handle_gtw_car_state(&s, &f);
+    CHECK(!s.tesla_ota_in_progress, "OTA installing(2) x1 -> still clear");
+    for(unsigned i = 1; i < FSD_OTA_ASSERT_FRAMES; i++)
+        fsd_handle_gtw_car_state(&s, &f);
+    CHECK(s.tesla_ota_in_progress, "OTA installing(2) x%u -> in_progress",
+          (unsigned)FSD_OTA_ASSERT_FRAMES);
+
+    // available — must NOT pause TX (issue #19 false positive), and must not
+    // keep an existing pause alive either.
+    f.buffer[6] = 1;
+    for(unsigned i = 0; i < FSD_OTA_CLEAR_FRAMES; i++)
+        fsd_handle_gtw_car_state(&s, &f);
     CHECK(!s.tesla_ota_in_progress, "OTA available(1) -> not in_progress");
+    for(int i = 0; i < 100; i++) fsd_handle_gtw_car_state(&s, &f);
+    CHECK(!s.tesla_ota_in_progress, "OTA available(1) never asserts, ever");
+
     f.buffer[6] = 0;
-    fsd_handle_gtw_car_state(&s, &f);
+    for(unsigned i = 0; i < FSD_OTA_CLEAR_FRAMES; i++)
+        fsd_handle_gtw_car_state(&s, &f);
     CHECK(!s.tesla_ota_in_progress, "OTA none(0) -> not in_progress");
 }
 
@@ -3398,6 +3419,139 @@ static void test_belt_gate_uses_a_live_source(void) {
 }
 
 // ── DI_gear / buckleStatus observers ─────────────────────────────────────────
+/* The OTA gate reads a counter on this car — regression test for that.
+ *
+ * The old ESP32 copy treated raw == 1 ("update available") as "installing".
+ * On this car 0x318 byte 6 is a rolling counter whose bit 0 is stuck at 1, so
+ * bits [1:0] alternate 1, 3, 1, 3 and a single dropped frame puts three 1s in
+ * a row. That latched tesla_ota_in_progress on the bench and every downstream
+ * gate closed until the board was rebooted.
+ *
+ * The byte values below are copied out of captures/2026-09-05/돌아오는길 —
+ * a real driving capture — not invented here. A table built from the
+ * implementation would only prove the table agrees with itself. */
+static void test_ota_gate(void) {
+    printf("\n-- OTA gate (0x318 GTW_updateInProgress) --\n");
+
+    /* Sixteen consecutive byte-6 values as the car actually sends them.
+     * Note every one is odd: bit 0 never clears, so raw is never 0 or 2. */
+    static const uint8_t kCarByte6[16] = {
+        0x21u, 0x23u, 0x25u, 0x27u, 0x29u, 0x2Bu, 0x2Du, 0x2Fu,
+        0x31u, 0x33u, 0x35u, 0x37u, 0x39u, 0x3Bu, 0x3Du, 0x3Fu};
+
+    FSDState s;
+    fsd_state_init(&s, TeslaHW_HW3);
+    CHECK(!s.tesla_ota_in_progress, "OTA clear after init");
+
+    /* 1. The car's own counter, six full wraps. Never an update. */
+    for(int i = 0; i < 96; i++) {
+        fsd_ota_observe_raw(&s, kCarByte6[i % 16]);
+        CHECK(!s.tesla_ota_in_progress, "counter sample %d is not an update", i);
+    }
+    /* And the two values it produces are exactly the two we expected. */
+    CHECK(s.ota_raw_state == FSD_OTA_RAW_AVAILABLE ||
+              s.ota_raw_state == FSD_OTA_RAW_SCHEDULED,
+          "counter only ever yields raw 1 or 3");
+
+    /* 2. "Update available" is not "installing", however long it runs.
+     * This is the assertion that was false in the shipped ESP32 copy. */
+    fsd_state_init(&s, TeslaHW_HW3);
+    for(int i = 0; i < 100; i++) fsd_ota_observe_raw(&s, FSD_OTA_RAW_AVAILABLE);
+    CHECK(!s.tesla_ota_in_progress, "raw 1 (available) never suspends TX");
+
+    /* 3. Nor is "scheduled". */
+    fsd_state_init(&s, TeslaHW_HW3);
+    for(int i = 0; i < 100; i++) fsd_ota_observe_raw(&s, FSD_OTA_RAW_SCHEDULED);
+    CHECK(!s.tesla_ota_in_progress, "raw 3 (scheduled) never suspends TX");
+
+    /* 4. A real install still trips it, and takes a run to do so. */
+    fsd_state_init(&s, TeslaHW_HW3);
+    for(unsigned i = 1; i < FSD_OTA_ASSERT_FRAMES; i++) {
+        fsd_ota_observe_raw(&s, FSD_OTA_RAW_INSTALLING);
+        CHECK(!s.tesla_ota_in_progress, "one short of the run: still clear");
+    }
+    fsd_ota_observe_raw(&s, FSD_OTA_RAW_INSTALLING);
+    CHECK(s.tesla_ota_in_progress, "raw 2 x %u suspends TX",
+          (unsigned)FSD_OTA_ASSERT_FRAMES);
+
+    /* 5. Clearing takes its own run, and takes longer than asserting. */
+    for(unsigned i = 1; i < FSD_OTA_CLEAR_FRAMES; i++) {
+        fsd_ota_observe_raw(&s, FSD_OTA_RAW_NO_UPDATE);
+        CHECK(s.tesla_ota_in_progress, "one short of the clear run: still set");
+    }
+    fsd_ota_observe_raw(&s, FSD_OTA_RAW_NO_UPDATE);
+    CHECK(!s.tesla_ota_in_progress, "raw 0 x %u releases TX",
+          (unsigned)FSD_OTA_CLEAR_FRAMES);
+
+    /* 6. Only bits [1:0] are read. Upper bits are the counter and must not
+     * reach the comparison — 0xFE has raw 2 in it, 0xFF does not. */
+    fsd_state_init(&s, TeslaHW_HW3);
+    for(int i = 0; i < 10; i++) fsd_ota_observe_raw(&s, 0xFEu);
+    CHECK(s.tesla_ota_in_progress, "high bits ignored: 0xFE reads as 2");
+    CHECK(s.ota_raw_state == FSD_OTA_RAW_INSTALLING, "raw masked to 2 bits");
+
+    /* 7. The frame-level entry point agrees with the raw one, and a frame too
+     * short to hold byte 6 changes nothing at all. */
+    fsd_state_init(&s, TeslaHW_HW3);
+    CANFRAME f;
+    memset(&f, 0, sizeof(f));
+    f.canId = CAN_ID_GTW_CAR_STATE;
+    f.data_lenght = 8;
+    for(int i = 0; i < 16; i++) {
+        f.buffer[6] = kCarByte6[i];
+        fsd_handle_gtw_car_state(&s, &f);
+        CHECK(!s.tesla_ota_in_progress, "frame path: counter is not an update");
+    }
+    f.buffer[6] = FSD_OTA_RAW_INSTALLING;
+    f.data_lenght = 6; /* one byte short of byte 6 */
+    uint8_t raw_before = s.ota_raw_state;
+    uint8_t assert_before = s.ota_assert_count;
+    for(int i = 0; i < 10; i++) fsd_handle_gtw_car_state(&s, &f);
+    CHECK(!s.tesla_ota_in_progress, "short frame cannot assert OTA");
+    CHECK(s.ota_raw_state == raw_before, "short frame leaves raw untouched");
+    CHECK(s.ota_assert_count == assert_before, "short frame leaves count alone");
+
+    /* 7b. The frame path must go through the same decision, not a private
+     * copy of it. Both halves of this failed before fsd_ota.c existed: the
+     * Flipper copy latched on a single raw == 2 frame (no run required) and
+     * never recorded ota_raw_state at all, so the diagnostic byte the app
+     * shows was frozen at zero. */
+    fsd_state_init(&s, TeslaHW_HW3);
+    f.data_lenght = 8;
+    f.buffer[6] = FSD_OTA_RAW_INSTALLING;
+    fsd_handle_gtw_car_state(&s, &f);
+    CHECK(!s.tesla_ota_in_progress, "frame path: one raw 2 is not enough");
+    CHECK(s.ota_raw_state == FSD_OTA_RAW_INSTALLING,
+          "frame path records the raw value");
+    for(unsigned i = 1; i < FSD_OTA_ASSERT_FRAMES; i++)
+        fsd_handle_gtw_car_state(&s, &f);
+    CHECK(s.tesla_ota_in_progress, "frame path: a full run does assert");
+
+    /* 7c. "A run" has to mean consecutive, in both directions. An intermittent
+     * value must not accumulate into a run — that is how a frame that appears
+     * once in a while would forge one. The mutation that dropped the assert
+     * reset survived every other assertion in this file, which is why these
+     * two exist. */
+    fsd_state_init(&s, TeslaHW_HW3);
+    for(int i = 0; i < 40; i++)
+        fsd_ota_observe_raw(
+            &s, (i % 2) ? FSD_OTA_RAW_NO_UPDATE : FSD_OTA_RAW_INSTALLING);
+    CHECK(!s.tesla_ota_in_progress, "alternating 2/0 never asserts");
+
+    fsd_state_init(&s, TeslaHW_HW3);
+    for(unsigned i = 0; i < FSD_OTA_ASSERT_FRAMES; i++)
+        fsd_ota_observe_raw(&s, FSD_OTA_RAW_INSTALLING);
+    CHECK(s.tesla_ota_in_progress, "latched before the flicker check");
+    for(int i = 0; i < 40; i++)
+        fsd_ota_observe_raw(
+            &s, (i % 2) ? FSD_OTA_RAW_INSTALLING : FSD_OTA_RAW_NO_UPDATE);
+    CHECK(s.tesla_ota_in_progress, "alternating 0/2 never releases");
+
+    /* 8. NULL is survivable — main.cpp calls this from the RX path. */
+    fsd_ota_observe_raw(NULL, FSD_OTA_RAW_INSTALLING);
+    CHECK(1, "NULL state does not crash");
+}
+
 static void test_drive_observers(void) {
     printf("\n-- drive-state observers --\n");
 
@@ -3857,6 +4011,7 @@ int main(void) {
     test_selftest_decide();
 
     test_tx_allowlist();
+    test_ota_gate();
     test_drive_observers();
     test_belt_gate_uses_a_live_source();
     test_supervised_drive();
