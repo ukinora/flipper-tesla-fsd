@@ -38,6 +38,21 @@ static const FsdRuleAffects FSD_AFFECTS[] = {
      * moment the signal existed, not the moment the emitter got a caller: the
      * feedback path is what makes the loop, and it is complete now. */
     {FSD_ACT_HAZARDS, 1, {FSD_SIG_HAZARD_ON}},
+    /* 🔴 THE MOST DIRECT LOOP IN THIS TABLE, because the emitter writes the
+     * signal's own frame. FSD_SIG_TURN_STALK reads 0x249 byte 2, and
+     * fsd_emit_build(FSD_ACT_TURN_SIGNAL) puts a 0x249 with byte 2 set on the
+     * bus. There is no body controller in between to interpret anything: our
+     * command IS the observation, one frame later.
+     *
+     * fsd_signal.h says exactly this in the signal's own comment -- "the day we
+     * build that emitter our own frame lands here" -- and the day arrived. So
+     * "on left stalk, indicate left" would re-fire on its own output forever,
+     * at the 50 ms interval the caps row allows.
+     *
+     * Only the stalk. 0x3F5's indicator fields are what the LAMP does, and they
+     * are deliberately not signals (they blink), so there is nothing else of
+     * ours for this action to disturb. */
+    {FSD_ACT_TURN_SIGNAL, 1, {FSD_SIG_TURN_STALK}},
 };
 
 uint8_t fsd_rule_affects(FsdBodyAction a, FsdSignal* out, uint8_t max_out) {
