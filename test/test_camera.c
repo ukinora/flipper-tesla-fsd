@@ -1721,10 +1721,30 @@ static void test_gps_feeds_the_tracker(void) {
 static void test_policy_scale_is_not_the_raw_can_value(void) {
     printf("\n-- policy scale is not the raw CAN value --\n");
 
-    /* Slowest to fastest, as driven. */
+    /* Slowest to fastest, as driven. LITERALS on purpose: written from the
+     * capture, not read out of the code under test, so this test cannot be
+     * made vacuous by editing the table it is describing. */
     const uint8_t raw[4]    = {4u, 0u, 1u, 2u};
     const uint8_t policy[4] = {FSD_POL_PROFILE_SLOTH, FSD_POL_PROFILE_CHILL,
                                FSD_POL_PROFILE_STANDARD, FSD_POL_PROFILE_HURRY};
+
+    /* 🔴 ...and BECAUSE they are literals, somebody has to compare them with
+     * the table the firmware actually uses. Independent literals catch a
+     * vacuous test; they do not catch FSD_SP_RAW_BY_RANK quietly ceasing to
+     * describe the car, and that table is what converts every reading the
+     * policy receives. Two statements of one measurement with nothing between
+     * them is the shape this repository has paid for before (the CAN-id lists,
+     * the 12-byte rule layout). This is the thing between them.
+     *
+     * Without it, making FSD_SP_RAW_BY_RANK monotonic -- the exact mistake the
+     * rest of this test warns about -- leaves this test green and is caught
+     * only over in test_speed_profile.c, which is not where someone editing
+     * the policy would look. */
+    for(unsigned i = 0; i < 4; i++) {
+        CHECK(FSD_SP_RAW_BY_RANK[i] == raw[i],
+              "FSD_SP_RAW_BY_RANK[%u] = %u, but the car sent %u for that rank",
+              i, (unsigned)FSD_SP_RAW_BY_RANK[i], (unsigned)raw[i]);
+    }
 
     /* The policy scale is monotonic in speed. That is what lower_only() and
      * steps_from() assume, and it is true. */
