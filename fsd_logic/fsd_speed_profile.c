@@ -10,20 +10,25 @@
 
 #include "fsd_speed_profile.h"
 
-// Header-only inline (tesla_read_mux); adds no translation unit, so this file
-// still links on its own.
+// Header-only inlines (tesla_read_mux, fsd_decode_profile_obs); they add no
+// translation unit, so this file still links on its own.
 #include "fsd_can_ops.h"
+#include "fsd_types.h"
 
 #include <string.h>
 
-// MEASURED. See the header for which capture supplied each number and why
-// `verified` is still false — it is not a leftover, it is the one field a
-// capture could not settle.
+// MEASURED. See the header for which capture supplied each number, and for
+// what closed the last open question — the top end, which no capture could
+// settle because the car was parked. The owner settled it from the driver's
+// seat on 2026-09-06 and armed the table in the same breath.
 const FsdSpEncoding FSD_SP_ENCODING_DEFAULT = {
     .tick_toward_faster = 1, // measured: +1 detent = one step toward FASTER
     .ticks_per_step = 1,     // measured: one detent, one step
-    .wrap = false,           // measured at the bottom; top end unobserved
-    .verified = false,       // top end unobserved + owner has not armed this
+    .wrap = false,           // both ends measured: bottom 2026-09-03, top by
+                             // the owner 2026-09-06 (one more up at Hurry
+                             // stays at Hurry)
+    .verified = true,        // owner, 2026-09-06. tx_armed still gates every
+                             // emission and nothing in the firmware sets it.
 };
 
 // The car's own 0x3FD values, slowest first. Measured 2026-09-03; see header.
@@ -177,18 +182,25 @@ FsdSpError fsd_sp_request(FsdSpeedProfile* sp, const FsdSpInputs* in,
 bool fsd_sp_decode_profile(const uint8_t* data, uint8_t dlc, bool hw4, uint8_t* out) {
     if(!data || !out || dlc == 0) return false;
 
-    // Mux is byte 0 bits [2:0] — same accessor the write path uses, and it is a
-    // header-only inline, so this file stays standalone (see test/Makefile).
-    uint8_t mux = tesla_read_mux(data);
-
     if(hw4) {
-        if(mux != 2u || dlc < 8u) return false;
+        // Mux is byte 0 bits [2:0] — same accessor the write path uses, and it
+        // is a header-only inline, so this file stays standalone (see
+        // test/Makefile). Untouched: the HW4 layout is documented, not
+        // measured here, and this car does not take this branch.
+        if(tesla_read_mux(data) != 2u || dlc < 8u) return false;
         *out = (uint8_t)((data[7] >> 5) & 0x07u);
         return true;
     }
-    if(mux != 0u || dlc < 7u) return false;
-    *out = (uint8_t)((data[6] >> 1) & 0x03u);
-    return true;
+
+    /* 🔴 THIS CAR. mux 2, byte 7 bits [6:4] — see the header for the three
+     * scroll ticks that pinned it, and for why the old mux-0 byte-6 read
+     * returned a field that was 0 for an entire drive.
+     *
+     * Delegated rather than open-coded so the bit position has exactly ONE
+     * definition (fsd_types.h). Two copies of a measured offset is how the
+     * dashboard and the policy end up reading different bytes and nobody
+     * notices; this repository has paid for that shape before. */
+    return fsd_decode_profile_obs(data, dlc, out);
 }
 
 bool fsd_sp_observe_raw(FsdSpeedProfile* sp, uint8_t raw, uint32_t now_ms) {

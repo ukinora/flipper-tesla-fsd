@@ -952,24 +952,36 @@ static void test_profile_decode(void) {
     uint8_t f[8];
     uint8_t out = 0xFF;
 
-    // HW3: mux 0, byte 6 bits [2:1]. Built from the DBC position, then checked
-    // against what the write path in fsd_handler.c actually emits.
-    for (uint8_t v = 0; v <= 3; v++) {
+    /* 🔴 THE NON-HW4 BRANCH READS THIS CAR'S LAYOUT, NOT THE DOCUMENTED HW3
+     * ONE (changed 2026-09-06).
+     *
+     * This block used to assert mux 0, byte 6 bits [2:1] -- the DBC position,
+     * cross-checked against what the write path in fsd_handler.c emits. Both
+     * of those are still true statements about the DBC and about our own
+     * writes; neither is a statement about what this car SENDS, and the 2nd
+     * visit measured that: mux 0 byte 6 sat at 0 for the entire drive while
+     * mux 2 byte 7 bits [6:4] tracked the scroll wheel tick for tick.
+     *
+     * So the old assertions are not deleted, they are inverted -- mux 0 is now
+     * asserted to be refused, which is the fact that replaced them. */
+    for (uint8_t v = 0; v <= 7; v++) {
         memset(f, 0, sizeof(f));
-        f[0] = 0; // mux 0
-        f[6] = (uint8_t)(v << 1);
-        f[6] |= 0xF9; // every neighbouring bit set
-        CHECK(fsd_sp_decode_profile(f, 8, false, &out), "hw3 mux0 decodes");
-        CHECK(out == v, "hw3 profile %u decoded as %u", v, out);
+        f[0] = 2; // mux 2
+        f[7] = (uint8_t)(v << 4);
+        f[7] |= 0x8Fu; // every neighbouring bit set, above and below
+        CHECK(fsd_sp_decode_profile(f, 8, false, &out), "mux2 byte7 decodes");
+        CHECK(out == v, "profile raw %u decoded as %u", v, out);
     }
 
     // Other muxes on the same ID carry different fields entirely.
     memset(f, 0, sizeof(f));
-    f[0] = 1;
+    f[0] = 0;
     f[6] = 0x06;
-    CHECK(!fsd_sp_decode_profile(f, 8, false, &out), "hw3 mux1 is not the profile");
-    f[0] = 2;
-    CHECK(!fsd_sp_decode_profile(f, 8, false, &out), "hw3 mux2 is not the profile");
+    f[7] = 0xA0;
+    CHECK(!fsd_sp_decode_profile(f, 8, false, &out),
+          "mux 0 is not the profile on this car -- it is the field that sat at 0");
+    f[0] = 1;
+    CHECK(!fsd_sp_decode_profile(f, 8, false, &out), "mux1 is not the profile");
 
     // HW4: mux 2, byte 7 bits [7:5], three bits wide.
     for (uint8_t v = 0; v <= 7; v++) {
@@ -984,15 +996,98 @@ static void test_profile_decode(void) {
     f[0] = 0;
     CHECK(!fsd_sp_decode_profile(f, 8, true, &out), "hw4 mux0 is not the profile");
 
-    // Short frames must be refused rather than read past.
+    // Short frames must be refused rather than read past. Both layouts live in
+    // byte 7 now, so both need all eight.
     memset(f, 0, sizeof(f));
-    f[0] = 0;
-    CHECK(!fsd_sp_decode_profile(f, 6, false, &out), "hw3 needs 7 bytes");
     f[0] = 2;
+    CHECK(!fsd_sp_decode_profile(f, 7, false, &out), "byte 7 needs 8 bytes");
+    CHECK(!fsd_sp_decode_profile(f, 6, false, &out), "and a 6-byte frame too");
     CHECK(!fsd_sp_decode_profile(f, 7, true, &out), "hw4 needs 8 bytes");
     CHECK(!fsd_sp_decode_profile(NULL, 8, false, &out), "NULL data refused");
     CHECK(!fsd_sp_decode_profile(f, 8, false, NULL), "NULL out refused");
     CHECK(!fsd_sp_decode_profile(f, 0, false, &out), "zero dlc refused");
+}
+
+/* The decoder and the rank conversion, driven by the CAR'S OWN BYTES.
+ *
+ * Every frame below is copied out of captures/2026-09-03/속도프로파일4단계 --
+ * the one drive where the owner ticked the right scroll wheel through all four
+ * profiles and wrote down the order. Six distinct 0x3FD payloads exist in that
+ * file; these are the four mux-2 ones, which is all four profiles.
+ *
+ * 🔴 THE TWO HALVES HAVE TO BE TESTED TOGETHER, because either one alone is
+ * harmless and the pair is not. Reading the right bits and handing the raw
+ * number to the policy is the failure test_policy_scale_is_not_the_raw_can_value
+ * exists to warn about: raw Sloth is 4, so a numeric clamp calls it the fastest
+ * profile there is. Converting a number nobody read is a no-op. It is
+ * decode-THEN-rank that has to be right, so that is what this asserts.
+ *
+ * The last two lines are the whole point in two numbers: the slowest profile
+ * this car has must come out as rank 0, and the fastest as rank 3. */
+static void test_profile_frames_from_the_car(void) {
+    printf("\n-- 0x3FD: the car's own frames, decoded and ranked --\n");
+
+    /* Slowest first, which is NOT the order the raw numbers are in. */
+    static const struct {
+        const char* name;
+        uint8_t frame[8];
+        uint8_t raw;  /* what the wire says */
+        uint8_t rank; /* what the policy must be given */
+    } DRIVEN[4] = {
+        {"나무늘보", {0x82, 0x00, 0x5A, 0x20, 0x00, 0x00, 0x00, 0xC0}, 4u,
+         FSD_POL_PROFILE_SLOTH},
+        {"컴포트", {0x82, 0x00, 0x5A, 0x20, 0x00, 0x00, 0x00, 0x80}, 0u,
+         FSD_POL_PROFILE_CHILL},
+        {"스탠더드", {0x82, 0x00, 0x5A, 0x20, 0x00, 0x00, 0x00, 0x90}, 1u,
+         FSD_POL_PROFILE_STANDARD},
+        {"신속", {0x82, 0x00, 0x5A, 0x20, 0x00, 0x00, 0x00, 0xA0}, 2u,
+         FSD_POL_PROFILE_HURRY},
+    };
+
+    for(unsigned i = 0; i < 4; i++) {
+        uint8_t raw = 0xFFu;
+        CHECK(fsd_sp_decode_profile(DRIVEN[i].frame, 8, false, &raw),
+              "%s: the car's frame decodes", DRIVEN[i].name);
+        CHECK(raw == DRIVEN[i].raw, "%s: raw %u, expected %u", DRIVEN[i].name,
+              (unsigned)raw, (unsigned)DRIVEN[i].raw);
+
+        uint8_t rank = 0xFFu;
+        CHECK(fsd_sp_rank_from_raw(raw, &rank), "%s: raw %u has a rank",
+              DRIVEN[i].name, (unsigned)raw);
+        CHECK(rank == DRIVEN[i].rank, "%s: rank %u, expected %u", DRIVEN[i].name,
+              (unsigned)rank, (unsigned)DRIVEN[i].rank);
+        /* Slowest first, so the rank must equal the index. Stated separately
+         * from the table so that reordering the table cannot make it vacuous. */
+        CHECK(rank == (uint8_t)i, "%s is profile %u counting from the slowest",
+              DRIVEN[i].name, i);
+    }
+
+    /* The two that matter, spelled out. */
+    uint8_t r = 0xFFu;
+    CHECK(fsd_sp_decode_profile(DRIVEN[0].frame, 8, false, &r) &&
+              fsd_sp_rank_from_raw(r, &r) && r == FSD_POL_PROFILE_SLOTH,
+          "raw 4 (나무늘보) must become the SLOWEST rank, got %u", (unsigned)r);
+    CHECK(fsd_sp_decode_profile(DRIVEN[3].frame, 8, false, &r) &&
+              fsd_sp_rank_from_raw(r, &r) && r == FSD_POL_PROFILE_HURRY,
+          "raw 2 (신속) must become the FASTEST rank, got %u", (unsigned)r);
+
+    /* The mux-0 frame the old decoder read, from the same file. It is a real
+     * frame and it decodes to nothing here -- which is the correction. */
+    static const uint8_t MUX0[8] = {0x00, 0x00, 0x00, 0xBC, 0x20, 0xC3, 0x08, 0x80};
+    uint8_t ignored = 0xFFu;
+    CHECK(!fsd_sp_decode_profile(MUX0, 8, false, &ignored),
+          "the mux-0 frame carries no profile, and used to be the only one read");
+
+    /* And the values this car never sends must not be invented into a rank.
+     * 3, 5, 6, 7 fit the 3-bit field; none was ever observed. */
+    const uint8_t UNSEEN[4] = {3u, 5u, 6u, 7u};
+    for(unsigned i = 0; i < 4; i++) {
+        uint8_t rank = 0xEEu;
+        CHECK(!fsd_sp_rank_from_raw(UNSEEN[i], &rank),
+              "raw %u was never observed and must not become a rank",
+              (unsigned)UNSEEN[i]);
+        CHECK(rank == 0xEEu, "a refused conversion must not write *rank_out");
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1605,22 +1700,24 @@ static void test_gps_feeds_the_tracker(void) {
  *      policy  (fsd_cam_policy.h)    0      1         2      3
  *      car     (0x3FD mux2 b7[6:4])  4      0         1      2
  *
- * Today this is latent: on this car fsd_sp_decode_profile() takes the HW3
- * branch, which reads 0x3FD mux 0 byte 6 -- a field that sat at 0 for a whole
- * drive -- so the policy never receives a real reading at all.
- *
- * 🔴 The point of this test is the NEXT change, not this one. Correcting that
- * decoder alone would be WORSE than leaving it broken: raw values would start
- * arriving on a scale lower_only() does not understand, and the failure is
- * silent and in the dangerous direction.
+ * 🟢 THE CHANGE THIS TEST WAS WRITTEN FOR HAS LANDED (2026-09-06), AND THE
+ * TEST IS UNCHANGED. It used to end "pinned here so that whoever fixes the
+ * decoder is told about the mapping by a red test instead of finding out in
+ * the car", and it said the decoder correction alone would be WORSE than
+ * leaving it broken: raw values arriving on a scale lower_only() does not
+ * understand, failing silently in the dangerous direction.
  *
  * Sloth is raw 4 and Chill is raw 0, so a numeric "never raise" comparison
  * decides Sloth is the FASTEST of the four. At a speed camera, with the car in
  * Sloth, the clamp would pass a request for Standard straight through -- the
  * function's own comment calls that "a defect, not a trade-off".
  *
- * Pinned here so that whoever fixes the decoder is told about the mapping by a
- * red test instead of finding out in the car. */
+ * Both halves landed together: fsd_sp_decode_profile() now reads mux 2 byte 7
+ * bits [6:4], and camera_task_observe_profile() converts through
+ * fsd_sp_rank_from_raw() before the policy sees anything. This test keeps
+ * asserting the FACT that made the pairing necessary -- that the two scales are
+ * different and the raw one is not ordered by speed -- so it goes on being the
+ * red test for anyone who later tries to shorten the path between them. */
 static void test_policy_scale_is_not_the_raw_can_value(void) {
     printf("\n-- policy scale is not the raw CAN value --\n");
 
@@ -1693,6 +1790,7 @@ int main(void) {
     test_learning_persistence();
     test_learning_rejects_damage();
     test_profile_decode();
+    test_profile_frames_from_the_car();
     test_override_detection();
     test_session_budgets();
     test_entry_does_not_survive_a_drive();

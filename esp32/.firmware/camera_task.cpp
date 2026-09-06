@@ -89,8 +89,9 @@ static uint8_t g_gps_verdict = (uint8_t)FSD_GPS_NO_POSITION;
 static FsdPolDecision g_decision;
 static uint16_t g_nearest_m = 0xFFFFu;
 
-static uint8_t g_observed_profile = 0;
-static uint8_t g_raw_profile = 0xFFu; // published before the range check
+static uint8_t g_observed_profile = 0; // a speed RANK, converted at the boundary
+static uint8_t g_raw_profile = 0xFFu;  // the wire's own number, published even
+                                       // when it has no rank (that is the point)
 static uint32_t g_prof_ms = 0;
 static bool g_prof_seen = false;
 
@@ -142,28 +143,53 @@ bool camera_task_observe(uint32_t id, const uint8_t* data, uint8_t dlc, uint32_t
 }
 
 void camera_task_observe_profile(bool hw4, const uint8_t* data, uint8_t dlc, uint32_t now_ms) {
-    uint8_t v = 0;
-    if(!fsd_sp_decode_profile(data, dlc, hw4, &v)) return;
+    uint8_t raw = 0;
+    if(!fsd_sp_decode_profile(data, dlc, hw4, &raw)) return;
 
     /* Published whatever it is, so a bring-up drive can see a mis-decode
-     * instead of just seeing the policy never run. */
-    g_raw_profile = v;
+     * instead of just seeing the policy never run. RAW on purpose: this is the
+     * diagnostic field, and its whole job is to show the number that actually
+     * came off the wire. CamStat carries it as `raw_profile`. */
+    g_raw_profile = raw;
 
-    /* HW4 carries three bits, and a wrong mux or a wrong car gives values above
-     * Hurry. Storing one would defeat the never-raise clamp in fsd_pol_tick():
-     * it compares the request against this number, and a request is always <= 3,
-     * so an observed 5 would make every clamp inert. Not stored, not stamped —
-     * the tick then sees no read-back and releases. */
-    if(v > FSD_POL_PROFILE_HURRY) return;
+    /* 🔴 THE CONVERSION IS THE SAFETY STEP, AND IT REPLACED A RANGE CHECK
+     * (2026-09-06). What stood here was
+     *
+     *     if(v > FSD_POL_PROFILE_HURRY) return;   // then stored v
+     *
+     * which passed the RAW number straight through to the policy. On this car
+     * that is wrong in the dangerous direction: raw Sloth is 4 and raw Hurry
+     * is 2, so fsd_pol_tick()'s never-raise clamp — a numeric comparison —
+     * decides Sloth is the FASTEST profile there is. Ask it to lower for a
+     * speed camera while the car is in Sloth and it passes Standard straight
+     * through. lower_only()'s own comment calls that "a defect, not a
+     * trade-off", and test_policy_scale_is_not_the_raw_can_value pins it.
+     *
+     * It was latent only because the decoder read a field that was always 0.
+     * Fixing the decoder without fixing this would have made it live, which is
+     * why the two changes had to land together.
+     *
+     * fsd_sp_rank_from_raw() also subsumes the old range check, and is
+     * stricter: it accepts only the four values this car was measured to send.
+     * 3, 5, 6 and 7 fit the field and were never observed, so they are refused
+     * rather than ranked — nothing stored, nothing stamped, and the tick then
+     * sees no read-back and releases. Same closed-fails-safe outcome as before.
+     *
+     * ⚠️ On an hw4 car the raw scale is not measured at all, so a value that
+     * happens to be one of the four gets this car's rank. That is an
+     * extrapolation, and it is still strictly better than the raw number it
+     * replaced; the honest fix is a measurement on such a car. */
+    uint8_t rank = 0;
+    if(!fsd_sp_rank_from_raw(raw, &rank)) return;
 
-    g_observed_profile = v;
+    g_observed_profile = rank;
     g_prof_ms = now_ms;
     g_prof_seen = true;
 
     /* Override detection is direction-based and needs EVERY sample, not one per
      * judgement tick: at 1 Hz a driver's turn of the wheel and our own
      * convergence become indistinguishable. */
-    fsd_pol_observe_profile(&g_pol, v);
+    fsd_pol_observe_profile(&g_pol, rank);
 }
 
 // ── the tick ─────────────────────────────────────────────────────────────────
