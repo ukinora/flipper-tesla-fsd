@@ -2987,6 +2987,27 @@ static void test_tpms_decode(void) {
     CHECK(out[0] == 0x75 && out[1] == 0x76 && out[2] == 0x74 && out[3] == 0x75,
           "four pressures, got %u %u %u %u", out[0], out[1], out[2], out[3]);
 
+    /* 🟢 out4[0] IS THE DRIVER'S WHEEL (front left; this car is LHD).
+     *
+     * 2026-09-06: the owner let air out of that one tyre and captured. Exactly
+     * one byte moved. The frame below is copied from that capture -- it is the
+     * evidence, not an illustration -- and this assertion is what stops the
+     * decoder's byte order from being "tidied" later. Reverse d[2..5] and the
+     * dashboard still shows four plausible numbers with the low one in the
+     * wrong corner, which is the kind of wrong nobody notices.
+     *
+     * ⚠️ Only index 0 is pinned. d[3..5] is presumably FR/RL/RR but
+     * nothing has separated them, so nothing here claims it. */
+    const uint8_t mux5_one_low[7] = {0x05, 0x00, 0x6D, 0x74, 0x73, 0x74, 0x00};
+    CHECK(fsd_decode_tpms(mux5_one_low, 7, out), "2026-09-06 frame accepted");
+    CHECK(out[0] == 0x6Du, "driver's wheel is out4[0], got 0x%02X", out[0]);
+    CHECK(out[1] == 0x74u && out[2] == 0x73u && out[3] == 0x74u,
+          "the other three are unchanged, got %u %u %u",
+          out[1], out[2], out[3]);
+    /* And it is the LOW one -- the whole point of the experiment. */
+    CHECK(out[0] < out[1] && out[0] < out[2] && out[0] < out[3],
+          "the deflated wheel reads lowest");
+
     /* Two days earlier the same mux read 44.3 psi on all four. The value MOVED,
      * which is what says it is a live measurement and not a constant. */
     const uint8_t mux5_older[7] = {0x05, 0x00, 0x7A, 0x7A, 0x7A, 0x7A, 0x00};
