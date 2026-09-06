@@ -50,6 +50,28 @@
 #define BELT_BYTE 1u
 #define BELT_SHIFT 5u
 
+/* 🔴 frontBuckleSwitch (0x3C2 VCLEFT_switchStatus, mux 0)
+ *   opendbc:  SG_ frontBuckleSwitch m0 : 48|2  ->  byte 6, bits [1:0]
+ *   values:   0 = SNA · 1 = unlatched · 2 = latched · 3 = invalid
+ *
+ * THE BELT LIVES HERE ON THIS CAR. 0x311 is two bytes and its buckle bit is
+ * always clear -- 286 frames across 32 captures, three visits -- so the
+ * supervised gate answered BELT_UNLATCHED forever and the camera and
+ * autonomy paths could never arm. Measured 2026-09-06, the owner buckling
+ * and unbuckling in the same seat with nothing else changing:
+ *
+ *     벨트착용   6.752   byte6 [1:0]  1 -> 2
+ *     벨트풀기   6.659   byte6 [1:0]  2 -> 1
+ *
+ * fsd_signal.c had already documented the position and the value meanings
+ * from the DBC; the capture confirmed both directions. */
+#define BELT_SW_BYTE 6u
+#define BELT_SW_MASK 0x03u
+#define BELT_SW_UNLATCHED 1u
+#define BELT_SW_LATCHED 2u
+#define BELT_SW_MUX_MASK 0x03u
+#define BELT_SW_MUX_VALUE 0x00u
+
 /* A frame shorter than the byte we need is not a short read, it is a different
  * frame: same ID, different layout, or a truncated capture. Parsing it would
  * invent a gear. Return without stamping so freshness keeps reporting the last
@@ -129,9 +151,17 @@ void fsd_drive_observe_belt(FSDState* state, const CANFRAME* frame, uint32_t now
     if(frame->id != CAN_ID_UI_WARNING) return; // same reason as the gear observer
     if(frame->data_lenght <= BELT_BYTE) return;
 
-    state->ui_buckle_status = ((frame->buffer[BELT_BYTE] >> BELT_SHIFT) & 0x01u) != 0u;
-    state->belt_seen_ms = now_ms;
-    state->belt_seen = true;
+    /* 🔴 The switch wins once it has spoken. 0x311 keeps arriving about
+     * once a second; on a car where it does not really carry the belt, letting
+     * it write here would flicker the field to false between switch frames and
+     * shut the gate. On a car where it does, nothing has set belt_from_switch
+     * and this line still runs -- the original design, unchanged. */
+    if(!state->belt_from_switch) {
+        state->ui_buckle_status =
+            ((frame->buffer[BELT_BYTE] >> BELT_SHIFT) & 0x01u) != 0u;
+        state->belt_seen_ms = now_ms;
+        state->belt_seen = true;
+    }
 
     /* Same reasoning as the cruise state above: the blinker bits ride in this
      * frame, this is the ESP32's only parser for it, and the BLE State packet
@@ -177,6 +207,34 @@ void fsd_drive_observe_belt(FSDState* state, const CANFRAME* frame, uint32_t now
         state->ui_right_blinker_blinking = (uint8_t)((frame->buffer[3] >> 2) & 0x03u);
         state->ui_any_door_open = ((frame->buffer[3] >> 4) & 0x01u) != 0u;
     }
+}
+
+/**
+ * The belt, from the switch itself.
+ *
+ * ⚠️ SNA (0) and invalid (3) are refused outright -- they do not move the
+ * field and do not refresh freshness. A safety gate handed an unknown must not
+ * be told the belt is fine, and must not be told the reading is recent either:
+ * staleness is the only thing left that can notice the switch went quiet.
+ *
+ * 🔴 The mux is checked. byte 6 of mux 1 is the scroll-wheel pack and its
+ * low bits are not a belt -- reading them as one would let a camera toggle open
+ * a gate. Same reason fsd_signal.c narrowed this frame's mux mask to two bits.
+ */
+void fsd_drive_observe_belt_switch(FSDState* state, const CANFRAME* frame,
+                                   uint32_t now_ms) {
+    if(!state || !frame) return;
+    if(frame->id != CAN_ID_VCLEFT_SWITCH) return;
+    if(frame->data_lenght <= BELT_SW_BYTE) return;
+    if((frame->buffer[0] & BELT_SW_MUX_MASK) != BELT_SW_MUX_VALUE) return;
+
+    uint8_t v = (uint8_t)(frame->buffer[BELT_SW_BYTE] & BELT_SW_MASK);
+    if(v != BELT_SW_UNLATCHED && v != BELT_SW_LATCHED) return;
+
+    state->ui_buckle_status = (v == BELT_SW_LATCHED);
+    state->belt_seen_ms = now_ms;
+    state->belt_seen = true;
+    state->belt_from_switch = true;
 }
 
 /* Unsigned subtraction so the millisecond clock wrapping past 2^32 (~49 days of

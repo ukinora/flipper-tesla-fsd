@@ -110,6 +110,10 @@ void fsd_drive_observe_cruise(FSDState* state, const CANFRAME* frame);
  *  Writes the same ui_buckle_status the Flipper parser writes; on that build
  *  both run and agree, on the ESP32 this is the only writer.
  *  Refuses any other CAN ID, for the same reason the gear observer does. */
+/** The belt from 0x3C2 mux 0 (frontBuckleSwitch). Wins over 0x311. */
+void fsd_drive_observe_belt_switch(FSDState* state, const CANFRAME* frame,
+                                   uint32_t now_ms);
+
 void fsd_drive_observe_belt(FSDState* state, const CANFRAME* frame, uint32_t now_ms);
 
 /**
