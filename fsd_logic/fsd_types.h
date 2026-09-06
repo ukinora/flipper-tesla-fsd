@@ -388,6 +388,10 @@ static inline bool fsd_decode_das_blind_spot_b0(const uint8_t* d, uint8_t dlc,
 #define FSD_TPMS_FIRST_BYTE    2u   /* d[2]..d[5] = four wheels */
 #define FSD_TPMS_MIN_DLC       6u
 
+/* out4[0..3] = d[2..5], in that order and no other. out4[0] is the
+ * DRIVER'S wheel -- front left on this LHD car -- pinned on 2026-09-06
+ * by letting air out of that one tyre and watching exactly that byte
+ * move. The other three are still an inference; see can_signals.h. */
 static inline bool fsd_decode_tpms(const uint8_t* d, uint8_t dlc, uint8_t* out4) {
     if(!d || !out4 || dlc < FSD_TPMS_MIN_DLC) return false;
     if(d[FSD_TPMS_MUX_BYTE] != FSD_TPMS_PRESSURE_MUX) return false;

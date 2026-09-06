@@ -151,20 +151,35 @@
  * is the strongest evidence available short of a capture -- and it is the
  * opposite of the blinker case, where the two definitions contradicted each
  * other. Still unconfirmed on THIS car; 0x399 is in the capture filter. */
-/* 0x219 VCSEC_TPMSData -- one wheel per frame, cycling.
- *   byte 0 bits[1:0] index    which sensor this frame is about
- *   byte 1           pressure x0.025 bar  (x14.5038 for psi)
- *   byte 4 bits[2:0] location which CORNER it belongs to
+/* 0x219 VCSEC_TPMSData.
  *
- * Only the pressure is carried to the phone. Temperature and sensor battery
- * are in the same frame and deliberately left alone: nothing asks for them,
- * and a field nobody reads is a field nobody notices breaking.
+ * 🔴 THIS BLOCK USED TO SAY "one wheel per frame, cycling", with byte 0
+ * bits[1:0] as the wheel index and byte 1 as that wheel's pressure. That was
+ * wrong and it showed on the dashboard: 0x219 cycles six MUXES, not four
+ * wheels, so mux 4 overwrote wheel 0 and mux 5 overwrote wheel 1 -- the owner
+ * saw one corner flickering between 42 and 46 and two stuck at 46 (2026-09-03).
  *
- * 🔴 The location values 0..4 have NO meaning attached anywhere -- the source
- * DBC gives no value table. So the corner mapping is a guess until a capture
- * compares these against what the car shows on its own screen. The value is
- * parsed and kept so the serial log can show it; the phone lays the four
- * readings out by INDEX for now. */
+ * What is actually true: MUX 5 CARRIES ALL FOUR PRESSURES AT ONCE, in bytes
+ * 2..5, each x0.025 bar (x14.5038 for psi). See fsd_decode_tpms(), which is the
+ * only reader. Mux 4 is the placard pressure and holds still; the other muxes
+ * are something else again.
+ *
+ * 🟢 AND ONE CORNER IS NOW PINNED: d[2] IS THE DRIVER'S WHEEL (front
+ * left; this car is LHD). The owner let air out of that one tyre before the
+ * 2026-09-06 capture and exactly that byte moved -- 0x6D (39.5 psi) against
+ * 0x74/0x73/0x74 (42.1/41.7/42.1). One wheel changed, one byte changed.
+ *
+ * ⚠️ The other three are STILL an inference. d[3..5] is presumably
+ * front-right, rear-left, rear-right, but nothing has separated them: on every
+ * other capture the four readings sit within half a psi of each other. Pinning
+ * them needs the same experiment, one wheel at a time. Until then the phone
+ * lays the four out by index and does not name any corner -- a plausible wrong
+ * label is worse than no label, which this repo has already paid for once with
+ * the tyre display itself.
+ *
+ * Only pressure is carried to the phone. Temperature and sensor battery are in
+ * the same frame and deliberately left alone: nothing asks for them, and a
+ * field nobody reads is a field nobody notices breaking. */
 #define SIG_TPMS_INDEX_BYTE                 0
 #define SIG_TPMS_INDEX_MASK              0x03u
 #define SIG_TPMS_PRESSURE_BYTE              1
