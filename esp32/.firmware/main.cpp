@@ -1936,6 +1936,22 @@ static void process_frame(CanBusId bus, const CanFrame &frame) {
 
     if (camera_task_observe(frame.id, frame.data, frame.dlc, millis())) return;
 
+    // 🔴 The seatbelt, from the switch itself (0x3C2 mux 0, byte 6 [1:0]).
+    //
+    // The supervised gate used to read it from 0x311, which on THIS car is two
+    // bytes whose buckle bit is always clear — 286 frames across 32 captures,
+    // three visits. fsd_supervised_drive() therefore answered BELT_UNLATCHED for
+    // the life of the car and the camera and autonomy paths could never arm.
+    // Measured 2026-09-06 with the owner buckling and unbuckling in one seat.
+    //
+    // NON-RETURNING, and placed before the body detectors so the frame still
+    // reaches them. The observer checks id, length, mux and value itself.
+    {
+        state_enter();
+        fsd_drive_observe_belt_switch(&g_state, &frame, millis());
+        state_exit();
+    }
+
     // Body detectors (0x102, 0x103, 0x3C2). NON-RETURNING on purpose: 0x3C2 is
     // shared with the scroll path and the door frames may gain other readers,
     // so this offers the frame and gets out of the way. Read-only — the whole

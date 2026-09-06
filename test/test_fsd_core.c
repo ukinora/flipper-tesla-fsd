@@ -3275,6 +3275,128 @@ static void test_tx_allowlist(void) {
           "profile replay: undeclared mode 3 (was: allowed)");
 }
 
+/**
+ * 🔴🔴 THE BELT GATE READS A DEAD SOURCE ON THIS CAR.
+ *
+ * fsd_drive_observe_belt() reads 0x311 byte 1 bit 5. On this car 0x311 is
+ * TWO BYTES and byte 1 is 0x03 in every frame we hold -- 286 frames across
+ * 32 captures from three visits. Bit 5 is therefore always clear, so
+ * ui_buckle_status is false forever and fsd_supervised_drive() answers
+ * FSD_SUP_BELT_UNLATCHED for the life of the car.
+ *
+ * That is not a safe default, it is a stuck one: the camera and autonomy
+ * paths can never arm, and the reason never appears anywhere a person looks.
+ *
+ * The belt IS on this bus. 0x3C2 mux 0 carries frontBuckleSwitch (48|2),
+ * and fsd_signal.c has documented it as "1 unlatched, 2 latched" since the
+ * signal table was written. Measured 2026-09-06, the owner buckling and
+ * unbuckling in the same seat with nothing else changing:
+ *
+ *     벨트착용   6.752   0x3C2 mux0 byte6 [1:0]   1 -> 2
+ *     벨트풀기   6.659   0x3C2 mux0 byte6 [1:0]   2 -> 1
+ *
+ * Frames below are copied from those two captures.
+ */
+static void test_belt_gate_uses_a_live_source(void) {
+    printf("\n-- 벨트 게이트는 살아 있는 출처를 본다 --\n");
+
+    FSDState s;
+    memset(&s, 0, sizeof(s));
+
+    /* This car's 0x311, byte for byte. Two bytes, FF 03. */
+    CANFRAME warn;
+    memset(&warn, 0, sizeof(warn));
+    warn.canId = CAN_ID_UI_WARNING;
+    warn.data_lenght = 2;
+    warn.buffer[0] = 0xFFu;
+    warn.buffer[1] = 0x03u;
+
+    /* 0x3C2 mux 0 as the car sends it while BUCKLED (byte6 low bits = 2). */
+    CANFRAME sw_on;
+    memset(&sw_on, 0, sizeof(sw_on));
+    sw_on.canId = CAN_ID_VCLEFT_SWITCH;
+    sw_on.data_lenght = 8;
+    sw_on.buffer[6] = 0x6Au; /* 0110 1010 -> [1:0] = 2 = latched */
+
+    /* The same frame while UNBUCKLED. One nibble apart. */
+    CANFRAME sw_off = sw_on;
+    sw_off.buffer[6] = 0x69u; /* [1:0] = 1 = unlatched */
+
+    /* 1. The dead source alone must not claim to have seen a belt. Its
+     *    frames arrive about once a second, so before this fix the gate
+     *    latched "seen but unlatched" inside the first second and stayed. */
+    fsd_drive_observe_belt(&s, &warn, 1000);
+    CHECK(!s.ui_buckle_status, "2-byte 0x311 cannot report a latched belt");
+
+    /* 2. The live source, buckled. */
+    fsd_drive_observe_belt_switch(&s, &sw_on, 1100);
+    CHECK(s.belt_seen, "0x3C2 supplies the belt");
+    CHECK(s.ui_buckle_status, "byte6 [1:0] = 2 is latched");
+
+    /* 3. 🔴 AND THE DEAD SOURCE MUST NOT UNDO IT. 0x311 keeps arriving
+     *    every second; if it still wrote the field, the belt would flicker
+     *    to false between switch frames and the gate would slam shut. */
+    fsd_drive_observe_belt(&s, &warn, 1200);
+    CHECK(s.ui_buckle_status, "0x311 must not overwrite a live switch reading");
+
+    /* 4. Unbuckling is seen. */
+    fsd_drive_observe_belt_switch(&s, &sw_off, 1300);
+    CHECK(!s.ui_buckle_status, "byte6 [1:0] = 1 is unlatched");
+
+    /* 5. SNA (0) and invalid (3) are not readings. Neither may move the
+     *    field nor refresh freshness -- a gate fed an unknown must not be
+     *    told the belt is fine. */
+    fsd_drive_observe_belt_switch(&s, &sw_on, 1400);
+    CHECK(s.ui_buckle_status, "buckled again before the SNA check");
+    CANFRAME sna = sw_on;
+    sna.buffer[6] = 0x68u; /* [1:0] = 0 */
+    fsd_drive_observe_belt_switch(&s, &sna, 9000);
+    CHECK(s.ui_buckle_status, "SNA must not clear the belt");
+    CHECK(s.belt_seen_ms == 1400u, "SNA must not refresh freshness");
+    CANFRAME bad = sw_on;
+    bad.buffer[6] = 0x6Bu; /* [1:0] = 3 */
+    fsd_drive_observe_belt_switch(&s, &bad, 9100);
+    CHECK(s.belt_seen_ms == 1400u, "invalid must not refresh freshness");
+
+    /* Park the state at UNLATCHED so the refusals below have something to
+     * flip. 🔴 A refusal means "do not change the field", not "set it
+     * false" -- so a frame that agrees with the current state proves nothing.
+     * Both frames below claim LATCHED against an unlatched state: if either
+     * were read, the field would move and the gate would open. */
+    fsd_drive_observe_belt_switch(&s, &sw_off, 1500);
+    CHECK(!s.ui_buckle_status && s.belt_seen_ms == 1500u, "parked at unlatched");
+
+    /* 6. Wrong mux is not this signal. mux 1 is the scroll-wheel pack, whose
+     *    byte 6 carries the camera bit -- reading it as a belt would let a
+     *    camera toggle open a safety gate. */
+    CANFRAME mux1 = sw_on; /* says LATCHED */
+    mux1.buffer[0] = 0x29u; /* mux 1 */
+    fsd_drive_observe_belt_switch(&s, &mux1, 9200);
+    CHECK(!s.ui_buckle_status, "mux 1 must not be read as a belt");
+    CHECK(s.belt_seen_ms == 1500u, "mux 1 must not refresh freshness");
+
+    /* 7. Wrong id, same shape, also claiming LATCHED. */
+    CANFRAME wrong = sw_on;
+    wrong.canId = CAN_ID_UI_WARNING;
+    fsd_drive_observe_belt_switch(&s, &wrong, 9300);
+    CHECK(!s.ui_buckle_status, "another id must not be read as a belt");
+    CHECK(s.belt_seen_ms == 1500u, "another id must not refresh freshness");
+
+    /* 8. 🔴 A car whose 0x311 really does carry the belt is unchanged.
+     *    Eight bytes, bit 5 set: the original design still wins there,
+     *    because nothing has taught this state a switch reading. */
+    FSDState other;
+    memset(&other, 0, sizeof(other));
+    CANFRAME warn8;
+    memset(&warn8, 0, sizeof(warn8));
+    warn8.canId = CAN_ID_UI_WARNING;
+    warn8.data_lenght = 8;
+    warn8.buffer[1] = 0x20u; /* bit 5 */
+    fsd_drive_observe_belt(&other, &warn8, 2000);
+    CHECK(other.ui_buckle_status, "8-byte 0x311 still supplies the belt");
+    CHECK(other.belt_seen, "and still stamps freshness");
+}
+
 // ── DI_gear / buckleStatus observers ─────────────────────────────────────────
 static void test_drive_observers(void) {
     printf("\n-- drive-state observers --\n");
@@ -3736,6 +3858,7 @@ int main(void) {
 
     test_tx_allowlist();
     test_drive_observers();
+    test_belt_gate_uses_a_live_source();
     test_supervised_drive();
     test_autonomy_mode();
     test_observer_extra_fields();

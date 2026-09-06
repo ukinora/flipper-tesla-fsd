@@ -111,8 +111,16 @@ typedef struct FSDState {
                                  //  frame does not carry it. See fsd_autonomy.c)
     uint32_t di_gear_ms;         // ms clock at the last 0x118 parse
     bool     di_gear_seen;
-    uint32_t belt_seen_ms;       // ms clock at the last 0x311 parse (buckle freshness)
+    uint32_t belt_seen_ms;       // ms clock at the last belt parse (freshness)
     bool     belt_seen;
+    /* 🔴 Which frame is supplying the belt. 0x3C2 mux 0 carries
+     * frontBuckleSwitch (48|2) and is the switch itself; 0x311 carries a UI
+     * warning derived from it. On this car 0x311 is two bytes and its bit is
+     * always clear, so the gate answered BELT_UNLATCHED for the life of the
+     * car. When the switch has spoken it wins and 0x311 stops writing --
+     * otherwise the once-a-second warning frame would flicker the belt off
+     * between switch frames and slam the gate. */
+    bool     belt_from_switch;
 
     // Operator intent, persisted in NVS. This is the ONE thing about autonomy
     // that survives a power cycle, and it can be persisted precisely because it
