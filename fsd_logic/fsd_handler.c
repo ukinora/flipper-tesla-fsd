@@ -1,4 +1,5 @@
 #include "fsd_handler.h"
+#include "fsd_ota.h"
 #include "fsd_checksum.h"
 #include "fsd_can_ops.h"
 #include <string.h>
@@ -27,17 +28,11 @@ void fsd_state_init(FSDState* state, TeslaHWVersion hw) {
 
 void fsd_handle_gtw_car_state(FSDState* state, const CANFRAME* frame) {
     if(frame->data_lenght < 7) return;
-    // GTW_updateInProgress: bits 1:0 of byte 6.
-    // 0=No update, 1=Update available, 2=Installing, 3=Scheduled.
-    // Only value 2 (installing) should suspend TX. Value 1 (available) caused
-    // false positives on some firmware builds (issue #19).
-    uint8_t raw = (frame->buffer[6] >> 0) & 0x03;
-    bool in_progress = (raw == 2);
-    if(in_progress) {
-        state->tesla_ota_in_progress = true;
-    } else {
-        state->tesla_ota_in_progress = false;
-    }
+    // GTW_updateInProgress lives in bits 1:0 of byte 6. What those bits
+    // mean, and how many frames it takes to believe them, is fsd_ota.c's
+    // business — shared with the ESP32 so the two platforms cannot drift
+    // apart again. This function's only job is to find the byte.
+    fsd_ota_observe_raw(state, frame->buffer[6]);
 }
 
 bool fsd_rx_is_stale(const FSDState* state, uint32_t now_ms) {

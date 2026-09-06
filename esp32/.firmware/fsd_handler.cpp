@@ -11,6 +11,7 @@
 
 #include "fsd_handler.h"
 #include "can_signals.h"
+#include "../../fsd_logic/fsd_ota.h"       // shared OTA decision (single impl, both platforms)
 #include "../../fsd_logic/fsd_checksum.h"  // shared Tesla additive checksum (single impl, both platforms)
 #include "../../fsd_logic/fsd_can_ops.h"   // shared stateless frame primitives (set_bit / mux / fsd-selected)
 #include <string.h>
@@ -186,24 +187,15 @@ TeslaHWVersion fsd_detect_hw_version(const CanFrame *frame) {
 
 void fsd_handle_gtw_car_state(FSDState *state, const CanFrame *frame) {
     if (frame->dlc < 7) return;
-    // GTW_updateInProgress: bits 1:0 of byte 6.
-    // Filter transient / incompatible values to avoid false positives.
-    uint8_t raw = frame->data[SIG_GTW_UPDATE_IN_PROGRESS_BYTE] &
-                  SIG_GTW_UPDATE_IN_PROGRESS_MASK;
-    state->ota_raw_state = raw;
-
-    bool in_progress = (raw == OTA_IN_PROGRESS_RAW_VALUE);
-    if (in_progress) {
-        if (state->ota_assert_count < 255u) state->ota_assert_count++;
-        state->ota_clear_count = 0;
-        if (state->ota_assert_count >= OTA_ASSERT_FRAMES)
-            state->tesla_ota_in_progress = true;
-    } else {
-        if (state->ota_clear_count < 255u) state->ota_clear_count++;
-        state->ota_assert_count = 0;
-        if (state->ota_clear_count >= OTA_CLEAR_FRAMES)
-            state->tesla_ota_in_progress = false;
-    }
+    // 🔴 This used to hold its own copy of the decision, and its own
+    // constant: OTA_IN_PROGRESS_RAW_VALUE was 1 ("update available"), while the
+    // Flipper copy had already moved to 2 ("installing"). Upstream b3e5eef even
+    // says it aligned the two. It did not. On 2026-09-07 the drift latched
+    // tesla_ota_in_progress on the bench off this car's rolling counter and
+    // every downstream gate shut until reboot.
+    //
+    // One decision now, in fsd_logic, where the host tests can reach it.
+    fsd_ota_observe_raw(state, frame->data[SIG_GTW_UPDATE_IN_PROGRESS_BYTE]);
 }
 
 // ── Follow distance → speed profile (DAS_followDistance 0x3F8) ───────────────
