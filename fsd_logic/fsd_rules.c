@@ -10,10 +10,16 @@
  * 0x1F9 and the latch that answers is a consequence, not our frame, so an
  * entry there would be a guess about how long the car takes to agree.
  *
- * ⚠️ The turn stalk (FSD_SIG_TURN_STALK) has no row because no action replays
- * it yet. The day one does, it needs one: the commercial device turns the
- * indicators on by writing that exact field, so our own frame would come back
- * as a trigger.
+ * ⚠️ THIS PARAGRAPH USED TO SAY THE TURN STALK HAS NO ROW, and it was a
+ * prediction: "no action replays it yet -- the day one does, it needs one,
+ * because the commercial device turns the indicators on by writing that exact
+ * field, so our own frame would come back as a trigger." That day was
+ * 2026-09-06. FSD_ACT_TURN_SIGNAL now has the row this comment asked for, at
+ * the bottom of the table.
+ *
+ * 🔴 Left here rather than deleted because the reasoning is the general rule,
+ * not a fact about one action: an emitter that writes a frame we also READ
+ * feeds itself, and this table is the only thing that stops it.
  *
  * 🔴 An empty row is correct, not missing. The gear moves DI_gear and the
  * camera moves nothing we read, so neither can feed itself. */
