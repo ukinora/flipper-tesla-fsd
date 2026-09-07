@@ -42,6 +42,7 @@
 #include "camera_store.h"
 #include "camera_task.h"
 #include "body_task.h"
+#include "rule_task.h"
 #include "ble_server.h"
 #include "ble_owner.h"
 #include "ble_central.h"
@@ -389,6 +390,32 @@ static void serial_command_tick() {
                     Serial.println("[BB]    먼저 폰이나 USB 로 받아 두었는지 확인한다.");
                     Serial.println("[BB]    정말 지우려면: bbclear yes");
                 }
+            } else if (strncmp(buf, "rulearm", 7) == 0) {
+                // 🔴 THE SWITCH THAT LETS THE RULE ENGINE WRITE TO THE CAR.
+                //
+                // Session-only by construction — rule_task.cpp keeps it in a
+                // static bool and nothing writes it to NVS. A board that
+                // reboots comes back disarmed, which is the only honest
+                // default for a thing that can operate the body of a car.
+                //
+                // Arming is NOT sufficient. It sets the per-action enables the
+                // permission axis reads; the axis still asks about mode, bus,
+                // OTA, RX freshness, driver, gear, speed and the drive
+                // session, and the emitter and the chokepoint still have to
+                // agree afterwards. `ruleq` shows what actually happened.
+                const char *arg = buf + 7;
+                while (*arg == ' ') arg++;
+                if (strcmp(arg, "on") == 0) {
+                    rule_task_set_armed(true);
+                } else if (strcmp(arg, "off") == 0) {
+                    rule_task_set_armed(false);
+                } else {
+                    Serial.printf("[RULE] 지금 %s — 켜려면 'rulearm on', "
+                                  "끄려면 'rulearm off'\n",
+                                  rule_task_armed() ? "무장됨" : "해제됨");
+                }
+            } else if (serial_cmd_equals(buf, "ruleq")) {
+                rule_task_print();
             } else if (serial_cmd_equals(buf, "rules")) {
                 // 🔴 The rule table's only window that is not the phone app.
                 //
@@ -755,6 +782,28 @@ static bool send_on_bus(CanBusId bus, const CanFrame &frame) {
     // no-op when the recorder is off. Recording never gates the send.
     if (ok) blackbox_record_tx(bus, frame, millis());
     return ok;
+}
+
+/* The rule engine's way onto the bus.
+ *
+ * 🔴 THE ONLY CALLER THAT EXISTS FOR THIS PURPOSE, and it is four gates deep
+ * already: the owner's rule matched, fsd_body_allows() said yes, the emitter
+ * built the frame from one the car sent, and the bit-granularity chokepoint
+ * compared the two. This adds the fifth and sixth — send_on_bus() still
+ * applies its own ID refusals, and the driver still refuses in Listen-Only.
+ *
+ * Vehicle CAN, because that is the bus every body frame we have measured lives
+ * on and the only one this car is wired to today. A second bus would need this
+ * to carry the bus the template came from, which is a change to make when
+ * there is a second bus, not before. */
+static bool rule_send_frame(uint32_t can_id, const uint8_t *data, uint8_t dlc) {
+    if (!data || dlc > 8u) return false;
+    CanFrame f;
+    memset(&f, 0, sizeof(f));
+    f.canId = can_id;
+    f.data_lenght = dlc;
+    memcpy(f.buffer, data, dlc);
+    return send_on_bus(CAN_BUS_PRIMARY, f);
 }
 
 static bool send_generated_frame(CanBusId bus, const CanFrame &frame) {
@@ -1958,6 +2007,12 @@ static void process_frame(CanBusId bus, const CanFrame &frame) {
     // feature has no emitter, and send_on_bus() refuses these IDs outright.
     (void)body_task_observe(frame.id, frame.data, frame.dlc, millis());
 
+    // The rule engine. Feeds the trigger layer and stores templates, and — when
+    // the operator has armed it this session — is the one path in this firmware
+    // that puts a body frame on the bus. Disarmed it decides and logs, exactly
+    // as everything above it has always done.
+    rule_task_observe(frame.id, frame.data, frame.dlc, millis());
+
     if (frame.id == CAN_ID_ESP_STATUS) {
         uint32_t now_ms = millis();
         state_enter();
@@ -2337,6 +2392,10 @@ void setup() {
     // filesystem), before ble_server_init() (its packer reads the accessors).
     camera_task_init(&g_state, &g_state_mux);
     body_task_init(&g_state, &g_state_mux);   // T1/T2 detectors — read-only
+    // The rule engine. Starts DISARMED and there is no way to persist
+    // otherwise: the switch lives in RAM only, so a board that comes back
+    // from a power cut comes back unable to write to the car.
+    rule_task_init(&g_state, &g_state_mux, rule_send_frame);
     capability_init(&g_state, &g_state_mux);  // tap capability checker (#125)
     ble_server_init(&g_state, &g_state_mux);  // GATT server for the phone app
     // Client role, for a generic button. AFTER the server: NimBLEDevice::init()
@@ -2814,6 +2873,7 @@ void loop() {
         body_task_set_bus_tx_open(tx_open);
     }
     body_task_tick(now);   // T1/T2 detectors — measures, logs, sends nothing
+    rule_task_tick(now);   // held switches: LONG and STUCK arrive from here
     // Survived long enough? Then these buses are not the reason for any
     // future panic, and must not be quarantined for one.
     can_quar_prove(now);

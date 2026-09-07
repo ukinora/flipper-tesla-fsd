@@ -40,11 +40,13 @@
  * Without this the timing window has to be guessed, or the car visited again.
  */
 
+#include "../../fsd_logic/fsd_body.h"   // FsdBodyInputs, for the permission accessor
 #include "../../fsd_logic/fsd_state.h"
 
 #include <freertos/FreeRTOS.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <string.h>  // the no-BLE stub zeroes an FsdBodyInputs
 
 #ifdef BLE_SERVER_ENABLED
 
@@ -89,6 +91,15 @@ uint8_t  body_task_t2_last_reject(void);
 uint32_t body_task_mux0_period_ms(void); // smallest observed 0x3C2 mux-0 gap
 bool     body_task_drive_session(void);
 
+/* The permission inputs, assembled from the shared state and this file's
+ * own detectors. Exposed so rule_task.cpp asks the same question with the
+ * same answers rather than assembling a second copy that can drift.
+ *
+ * 🔴 action_enabled is ALL FALSE here. This file has no opinion on
+ * whether the operator armed anything; a caller that wants an action to
+ * be possible has to say so itself, and rule_task.cpp does. */
+FsdBodyInputs body_task_permission_inputs(uint32_t now_ms);
+
 #else  // no body core on this variant — no-op shims
 
 static inline void body_task_init(FSDState*, portMUX_TYPE*) {}
@@ -107,5 +118,10 @@ static inline uint16_t body_task_t2_last_gap_ms(void) { return 0; }
 static inline uint8_t  body_task_t2_last_reject(void) { return 0; }
 static inline uint32_t body_task_mux0_period_ms(void) { return 0; }
 static inline bool     body_task_drive_session(void) { return false; }
+static inline FsdBodyInputs body_task_permission_inputs(uint32_t) {
+    FsdBodyInputs in;
+    memset(&in, 0, sizeof(in));
+    return in;
+}
 
 #endif

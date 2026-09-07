@@ -108,4 +108,11 @@ uint8_t rules_store_clear(uint8_t idx);
  *  "0" has genuinely seen nothing. */
 uint32_t rules_store_revision(void);
 
+/** The table itself, for the matcher.
+ *
+ *  const because rule_task.cpp reads it and nothing else may: every write
+ *  still goes through rules_store_set_packed(), which validates via
+ *  fsd_rules_set() and owns the NVS commit. */
+const FsdRules* rules_store_table(void);
+
 #endif // BLE_SERVER_ENABLED

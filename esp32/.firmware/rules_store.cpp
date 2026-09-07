@@ -230,6 +230,10 @@ uint8_t rules_store_clear(uint8_t idx) {
     return (uint8_t)FSD_RULE_OK;
 }
 
+const FsdRules* rules_store_table(void) {
+    return &g_rules;
+}
+
 uint32_t rules_store_revision(void) { return g_rev; }
 
 void rules_store_print(void) {
