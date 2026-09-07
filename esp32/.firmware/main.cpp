@@ -792,18 +792,19 @@ static bool send_on_bus(CanBusId bus, const CanFrame &frame) {
  * compared the two. This adds the fifth and sixth — send_on_bus() still
  * applies its own ID refusals, and the driver still refuses in Listen-Only.
  *
- * Vehicle CAN, because that is the bus every body frame we have measured lives
- * on and the only one this car is wired to today. A second bus would need this
- * to carry the bus the template came from, which is a change to make when
- * there is a second bus, not before. */
-static bool rule_send_frame(uint32_t can_id, const uint8_t *data, uint8_t dlc) {
+ * 🔴 THE BUS IS THE ONE THE FRAME CAME IN ON, not a constant. The first
+ * bench write went out on can0 while every frame we read came in on can1;
+ * nothing answers on can0, the error counters ran away, and the isolator took
+ * that bus down. Found by actually sending, not by reading. */
+static bool rule_send_frame(uint8_t bus, uint32_t can_id, const uint8_t *data,
+                            uint8_t dlc) {
     if (!data || dlc > 8u) return false;
     CanFrame f;
     memset(&f, 0, sizeof(f));
     f.canId = can_id;
     f.data_lenght = dlc;
     memcpy(f.buffer, data, dlc);
-    return send_on_bus(CAN_BUS_PRIMARY, f);
+    return send_on_bus((CanBusId)bus, f);
 }
 
 static bool send_generated_frame(CanBusId bus, const CanFrame &frame) {
@@ -2011,7 +2012,7 @@ static void process_frame(CanBusId bus, const CanFrame &frame) {
     // the operator has armed it this session — is the one path in this firmware
     // that puts a body frame on the bus. Disarmed it decides and logs, exactly
     // as everything above it has always done.
-    rule_task_observe(frame.id, frame.data, frame.dlc, millis());
+    rule_task_observe((uint8_t)bus, frame.id, frame.data, frame.dlc, millis());
 
     if (frame.id == CAN_ID_ESP_STATUS) {
         uint32_t now_ms = millis();

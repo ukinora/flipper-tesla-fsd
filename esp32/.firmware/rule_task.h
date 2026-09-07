@@ -34,7 +34,8 @@
  *  main.cpp supplies this because send_on_bus() is static there, next to the
  *  mode gate and the ID refusals that still apply after everything here has
  *  said yes. Returns whether the frame actually went out. */
-typedef bool (*RuleTaskSend)(uint32_t can_id, const uint8_t* data, uint8_t dlc);
+typedef bool (*RuleTaskSend)(uint8_t bus, uint32_t can_id, const uint8_t* data,
+                             uint8_t dlc);
 
 /** Wire up the state pointer, its lock and the send path, and clear the
  *  trigger and template state. Call once from setup(), after
@@ -57,7 +58,16 @@ bool rule_task_armed(void);
  *  Does two things — feeds the trigger layer, and stores the frame as a
  *  template for any action whose wire row names it. Both are cheap; the
  *  overwhelming majority of frames match nothing. */
-void rule_task_observe(uint32_t can_id, const uint8_t* data, uint8_t dlc, uint32_t now_ms);
+/** 🔴 `bus` is carried so a command goes back out the way it came in.
+ *
+ * The first bench write went out on can0 while every frame we read came in
+ * on can1. Nothing answers on can0, so the controller saw no ACK, the error
+ * counters ran away and the isolator took that bus down. On the car the
+ * wiring is can1 and the failure would have been identical. A template is
+ * only a description of a bus we are actually hearing; writing it somewhere
+ * else is writing to a bus we know nothing about. */
+void rule_task_observe(uint8_t bus, uint32_t can_id, const uint8_t* data, uint8_t dlc,
+                       uint32_t now_ms);
 
 /** Advance held switches. LONG and STUCK arrive from here. Call from loop(). */
 void rule_task_tick(uint32_t now_ms);
@@ -86,12 +96,14 @@ void rule_task_print(void);
  * other seven — which is exactly what happened the first time, and exactly the
  * shape body_task.h already guards against a few lines further down its own
  * file. Building one variant proves nothing about the other seven. */
-typedef bool (*RuleTaskSend)(uint32_t can_id, const uint8_t* data, uint8_t dlc);
+typedef bool (*RuleTaskSend)(uint8_t bus, uint32_t can_id, const uint8_t* data,
+                             uint8_t dlc);
 
 static inline void rule_task_init(FSDState*, portMUX_TYPE*, RuleTaskSend) {}
 static inline void rule_task_set_armed(bool) {}
 static inline bool rule_task_armed(void) { return false; }
-static inline void rule_task_observe(uint32_t, const uint8_t*, uint8_t, uint32_t) {}
+static inline void rule_task_observe(uint8_t, uint32_t, const uint8_t*, uint8_t,
+                                     uint32_t) {}
 static inline void rule_task_tick(uint32_t) {}
 static inline uint32_t rule_task_sent(void) { return 0; }
 static inline uint32_t rule_task_refused(void) { return 0; }
