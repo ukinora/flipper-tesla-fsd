@@ -822,6 +822,34 @@ static void test_owner_decisions_are_in_the_table(void) {
     CHECK(h->may_act_out_of_park, "and out of park -- reverse is the whole case");
     CHECK(h->max_hold_ms > 0u,
           "the failure to survive is a stuck rule HOLDING them, so bound it");
+
+    /* 🔴 THE MIRROR IS THE ROW THAT LOOKS LIKE THE HAZARDS AND IS ITS
+     * OPPOSITE, which is exactly why it gets pinned rather than counted.
+     *
+     * Both arrived on a measured frame, both are small body commands, and the
+     * hazard row two lines up opened its motion gates on the argument that a
+     * light which may only act in park cannot do its job. That argument does
+     * not transfer: FOLDING A MIRROR AT SPEED REMOVES REARWARD VISION, and
+     * every rule an owner would actually write for it -- fold on walking away,
+     * unfold on getting in -- happens in park.
+     *
+     * So the next person who reads the hazard row and "makes the mirror
+     * consistent with it" has to argue with a red test. That is the entire
+     * purpose of this block: a mutation that opened these two gates passed
+     * every other assertion in this repo on 2026-09-07. */
+    const FsdBodyCaps* m = fsd_body_caps(FSD_ACT_MIRROR);
+    CHECK(m->armable_at_runtime, "mirror armable: frame measured 2026-09-06");
+    CHECK(!m->may_act_while_moving,
+          "🔴 mirrors must not fold at speed -- that is rearward vision");
+    CHECK(!m->may_act_out_of_park, "and not out of park, for the same reason");
+    CHECK(!m->may_act_without_driver && !m->may_act_without_drive_session,
+          "a body write on an unattended car needs its own reason, not the "
+          "hazard row's");
+    CHECK(m->min_interval_ms >= 3000u,
+          "the mirror drives a motor that takes seconds to travel, got %u",
+          (unsigned)m->min_interval_ms);
+    CHECK(m->max_hold_ms > 0u,
+          "TSL sends one frame per direction, so a re-sender is a bug to bound");
 }
 
 /* 🔴 THE BENCH REFUSED WHILE ALL OF THE ABOVE WAS GREEN.
