@@ -328,6 +328,12 @@ FsdEmitResult fsd_emit_build(FsdBodyAction action, int32_t arg,
     return FSD_EMIT_OK;
 }
 
+/* See the header. Measured only; 1 is the "not measured" value. */
+uint8_t fsd_emit_repeat(FsdBodyAction a) {
+    if(a == FSD_ACT_TURN_SIGNAL) return 4u;
+    return 1u;
+}
+
 const char* fsd_emit_result_str(FsdEmitResult r) {
     switch(r) {
     case FSD_EMIT_OK: return "ok";

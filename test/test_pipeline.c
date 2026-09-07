@@ -415,8 +415,76 @@ static void test_names(void) {
     CHECK(fsd_pipe_stage_str((FsdPipeStage)99) != NULL, "absurd stage");
 }
 
+/* 🔴 ONE FRAME WAS NOT THE COMMAND, AND THE CAR SAID SO.
+ *
+ * 2026-09-07, first real write: eleven byte-perfect 0x249 frames, right
+ * counter, right check byte, and the lamp never lit. TSL gets in front of
+ * the car FOUR TIMES RUNNING, 50 ms apart; we sent one, and the car's own
+ * idle frame 13-43 ms later said the stalk had been released. A lever held
+ * for 15 ms is not a lever push.
+ *
+ * These pin the two halves of the fix: the number itself, and the fact that
+ * a repeated frame still faces every gate. */
+static void test_turn_signal_needs_a_burst(void) {
+    /* Measured. Not a tuning knob -- 4 is what turned the lamp on. */
+    CHECK(fsd_emit_repeat(FSD_ACT_TURN_SIGNAL) == 4u,
+          "the turn signal is four consecutive frames, measured 2026-09-07");
+
+    /* Everything else says 1, which means "nobody has watched it fail".
+     * A number filled in without a capture behind it is what this catches. */
+    for(unsigned a = 0; a < (unsigned)FSD_ACT_COUNT; a++) {
+        if((FsdBodyAction)a == FSD_ACT_TURN_SIGNAL) continue;
+        CHECK(fsd_emit_repeat((FsdBodyAction)a) == 1u,
+              "action %u claims a burst length nobody measured", a);
+    }
+}
+
+static void test_a_repeat_faces_every_gate(void) {
+    const uint32_t now = 500000;
+
+    FsdPipeFrames f;
+    fsd_pipe_init(&f);
+    fsd_pipe_observe(&f, 0x249u, LSTALK, sizeof(LSTALK), now);
+
+    FsdBodyInputs in = good_inputs(now);
+    in.action_enabled[FSD_ACT_TURN_SIGNAL] = true;
+
+    /* dirty() poisons FSD_PIPE_MAX_OUT results, so the array has to be
+     * that long. A single struct here overruns it and smashes `in` --
+     * which is exactly what happened the first time this was written,
+     * and the axis answered NOT_ENABLED because the enable array had
+     * been overwritten with 0xAB. */
+    FsdPipeResult res[FSD_PIPE_MAX_OUT];
+    dirty(res);
+    fsd_pipe_one(FSD_ACT_TURN_SIGNAL, 0, 3, &in, &f, now, &res[0]);
+    CHECK(res[0].stage == FSD_PIPE_OK, "a repeat of an allowed action should build");
+    CHECK(res[0].rule_index == 3, "the repeat carries the rule that started it");
+    CHECK(res[0].frame.id == 0x249u, "and it is still the stalk frame");
+
+    /* 🔴 THE HALF THAT MATTERS. Take the belt off between frame two and
+     * frame three of a burst and the rest must stop -- with a name. A burst
+     * that bypassed the axis would be a rule that keeps acting on a car
+     * nobody is sitting in. */
+    in.driver_present = false;
+    in.belt_latched = false;
+    dirty(res);
+    fsd_pipe_one(FSD_ACT_TURN_SIGNAL, 0, 3, &in, &f, now, &res[0]);
+    CHECK(res[0].stage == FSD_PIPE_BLOCKED_BODY,
+          "a repeat must face the axis, not skip it");
+    CHECK(res[0].reason == (uint8_t)FSD_BODY_NO_DRIVER_PRESENT,
+          "and it must say which gate, got %s",
+          fsd_pipe_reason_str(res[0].stage, res[0].reason));
+
+    /* NULL in, nothing out -- same contract as fsd_pipe_run(). */
+    fsd_pipe_one(FSD_ACT_TURN_SIGNAL, 0, 3, NULL, &f, now, &res[0]);
+    fsd_pipe_one(FSD_ACT_TURN_SIGNAL, 0, 3, &in, NULL, now, &res[0]);
+    fsd_pipe_one(FSD_ACT_TURN_SIGNAL, 0, 3, &in, &f, now, NULL);
+}
+
 int main(void) {
     printf("test_pipeline: rule -> axis -> emitter -> chokepoint\n");
+    test_turn_signal_needs_a_burst();
+    test_a_repeat_faces_every_gate();
     test_observe();
     test_turn_signal_end_to_end();
     test_each_layer_refuses();

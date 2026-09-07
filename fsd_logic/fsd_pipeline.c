@@ -74,8 +74,31 @@ uint8_t fsd_pipe_run(const FsdRules* rules, const FsdTriggerEvent* ev, const Fsd
 
     const uint8_t n = fsd_rules_match(rules, ev, dec, want);
 
-    for(uint8_t i = 0; i < n; i++) {
-        FsdPipeResult* r = &out[i];
+    for(uint8_t i = 0; i < n; i++)
+        fsd_pipe_one(dec[i].action, dec[i].arg, dec[i].rule_index, in, f,
+                     now_ms, &out[i]);
+
+    return n;
+}
+
+/* One decision, four gates. Split out of fsd_pipe_run() on 2026-09-07 so a
+ * BURST can reuse it.
+ *
+ * The first frame of a burst comes from a rule match; the rest come from the
+ * car's next 0x249 arrivals. Every one of them faces the same four refusals.
+ * A burst that skipped the axis would be a rule that keeps acting after the
+ * belt comes off -- which is precisely the gate the car proved this morning. */
+void fsd_pipe_one(FsdBodyAction action, int32_t arg, uint8_t rule_index,
+                  const FsdBodyInputs* in, const FsdPipeFrames* f,
+                  uint32_t now_ms, FsdPipeResult* out) {
+    if(!in || !f || !out) return;
+    {
+        FsdRuleDecision dec[1];
+        FsdPipeResult* r = out;
+        const uint8_t i = 0;
+        dec[0].action = action;
+        dec[0].arg = arg;
+        dec[0].rule_index = rule_index;
         memset(r, 0, sizeof(*r));
         r->rule_index = dec[i].rule_index;
         r->action = dec[i].action;
@@ -87,7 +110,7 @@ uint8_t fsd_pipe_run(const FsdRules* rules, const FsdTriggerEvent* ev, const Fsd
         if(bv != FSD_BODY_OK) {
             r->stage = FSD_PIPE_BLOCKED_BODY;
             r->reason = (uint8_t)bv;
-            continue;
+            return;
         }
 
         /* An action out of range cannot index the template array. The axis
@@ -97,7 +120,7 @@ uint8_t fsd_pipe_run(const FsdRules* rules, const FsdTriggerEvent* ev, const Fsd
         if((uint8_t)dec[i].action >= (uint8_t)FSD_ACT_COUNT) {
             r->stage = FSD_PIPE_BLOCKED_BODY;
             r->reason = (uint8_t)FSD_BODY_UNKNOWN_ACTION;
-            continue;
+            return;
         }
 
         /* 2. Does the chokepoint have a row for this action?
@@ -115,7 +138,7 @@ uint8_t fsd_pipe_run(const FsdRules* rules, const FsdTriggerEvent* ev, const Fsd
         if(!fsd_body_wire(dec[i].action)) {
             r->stage = FSD_PIPE_BLOCKED_WIRE;
             r->reason = (uint8_t)FSD_WIRE_NO_ROW;
-            continue;
+            return;
         }
 
         const FsdEmitTemplate* tpl = &f->tpl[(uint8_t)dec[i].action];
@@ -128,7 +151,7 @@ uint8_t fsd_pipe_run(const FsdRules* rules, const FsdTriggerEvent* ev, const Fsd
         if(er != FSD_EMIT_OK) {
             r->stage = FSD_PIPE_BLOCKED_EMIT;
             r->reason = (uint8_t)er;
-            continue;
+            return;
         }
 
         /* 4. The chokepoint, at bit granularity. The emitter is trusted to
@@ -142,15 +165,13 @@ uint8_t fsd_pipe_run(const FsdRules* rules, const FsdTriggerEvent* ev, const Fsd
         if(wv != FSD_WIRE_OK) {
             r->stage = FSD_PIPE_BLOCKED_WIRE;
             r->reason = (uint8_t)wv;
-            continue;
+            return;
         }
 
         r->stage = FSD_PIPE_OK;
         r->reason = 0u;
         r->frame = frame;
     }
-
-    return n;
 }
 
 const char* fsd_pipe_stage_str(FsdPipeStage s) {
