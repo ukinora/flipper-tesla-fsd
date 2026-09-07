@@ -58,12 +58,17 @@ void rule_task_init(FSDState* state, portMUX_TYPE* mux, RuleTaskSend send) {
     g_last_refusal[sizeof(g_last_refusal) - 1] = '\0';
 }
 
+/* 🔴 사람이 읽는 한국어는 "매핑" 이다 (차주 지시 2026-09-03). 코드 이름은
+ * "rule" 그대로 — 파일명 · 함수 · [RULE] 태그 · rules/rulearm 명령 전부
+ * 안 바꾼다. 한쪽만 바꾸면 화면과 소스의 대조가 끊긴다. rules_store.cpp 가
+ * 같은 규칙을 따르고, 이 파일은 2026-09-07 에 새로 생기면서 그것을 놓쳐
+ * 하루 동안 "규칙" 을 찍고 있었다. */
 void rule_task_set_armed(bool armed) {
     if (g_armed == armed) return;
     g_armed = armed;
     Serial.printf("[RULE] %s\n", armed
-        ? "무장됨 — 규칙이 실제로 CAN 에 씁니다 (이 세션에만, 전원과 함께 꺼집니다)"
-        : "해제됨 — 규칙은 판정만 하고 아무것도 보내지 않습니다");
+        ? "무장됨 — 매핑이 실제로 CAN 에 씁니다 (이 세션에만, 전원과 함께 꺼집니다)"
+        : "해제됨 — 매핑은 판정만 하고 아무것도 보내지 않습니다");
 }
 
 bool rule_task_armed(void) {
@@ -115,7 +120,7 @@ static void run_event(const FsdTriggerEvent* ev, uint32_t now_ms) {
              * trigger the owner wired to an action — so it cannot flood, and
              * "why did nothing happen" is the question this feature will be
              * asked most often. */
-            Serial.printf("[RULE] 규칙 %u %s 거부 — %s (%s)\n", (unsigned)out[i].rule_index,
+            Serial.printf("[RULE] 매핑 %u %s 거부 — %s (%s)\n", (unsigned)out[i].rule_index,
                           fsd_body_action_str(out[i].action), fsd_pipe_stage_str(out[i].stage),
                           fsd_pipe_reason_str(out[i].stage, out[i].reason));
             continue;
@@ -134,7 +139,7 @@ static void run_event(const FsdTriggerEvent* ev, uint32_t now_ms) {
         const bool ok = g_send(g_bus, out[i].frame.id, out[i].frame.data, out[i].frame.dlc);
         if (ok) {
             g_sent++;
-            Serial.printf("[RULE] 규칙 %u %s -> 0x%03X 보냄\n", (unsigned)out[i].rule_index,
+            Serial.printf("[RULE] 매핑 %u %s -> 0x%03X 보냄\n", (unsigned)out[i].rule_index,
                           fsd_body_action_str(out[i].action), (unsigned)out[i].frame.id);
         } else {
             /* main.cpp refused it after we did not. Counted as a refusal
@@ -143,7 +148,7 @@ static void run_event(const FsdTriggerEvent* ev, uint32_t now_ms) {
             g_refused++;
             snprintf(g_last_refusal, sizeof(g_last_refusal), "bus: 0x%03X 거부됨",
                      (unsigned)out[i].frame.id);
-            Serial.printf("[RULE] 규칙 %u %s -> 0x%03X 버스가 거부\n",
+            Serial.printf("[RULE] 매핑 %u %s -> 0x%03X 버스가 거부\n",
                           (unsigned)out[i].rule_index, fsd_body_action_str(out[i].action),
                           (unsigned)out[i].frame.id);
         }
