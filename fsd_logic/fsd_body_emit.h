@@ -323,7 +323,7 @@ const char* fsd_emit_turn_str(int32_t turn);
 
 typedef enum {
     FSD_EMIT_OK = 0,
-    /** No frame for this action's id has been received; nothing to copy. */
+/** No frame for this action's id has been received; nothing to copy. */
     FSD_EMIT_NO_TEMPLATE,
     /** One was received but it is too old to still describe the car. */
     FSD_EMIT_STALE_TEMPLATE,
@@ -344,6 +344,37 @@ typedef enum {
      *  caller may retry and a screen should say something different. */
     FSD_EMIT_NO_CHECK,
 } FsdEmitResult;
+
+    /** How many CONSECUTIVE frames this command has to occupy before the car
+ *  believes it. One is not always enough, and the first car test proved it.
+ *
+ * 🔴 MEASURED ON 2026-09-07, IN THE CAR, THE HARD WAY. Eleven perfectly formed
+ * 0x249 frames went out -- right counter, right check byte, byte-identical to
+ * what TSL sends -- and the turn signal never came on. The capture said why:
+ *
+ *      7.955  5E09 0000   car,  counter 09, stalk idle
+ *      7.956  920A 0800   TSL,  counter 0A, stalk left    +1 ms
+ *      8.006  E20A 0000   car,  counter 0A, idle
+ *      8.006  580B 0800   TSL,  counter 0B, stalk left
+ *      8.055  280B 0000   car
+ *      8.056  4A0C 0800   TSL,  counter 0C
+ *      8.106  3A0C 0000   car
+ *      8.106  630D 0800   TSL,  counter 0D
+ *      8.133  0x3F5 byte0  00 -> 02        the lamp comes on
+ *
+ * TSL gets in front of the car's own frame FOUR TIMES RUNNING, 50 ms apart,
+ * for 200 ms. We sent one. The car's own next idle frame -- 13 to 43 ms later
+ * -- said "stalk released", and a lever held for 15 ms is not a lever push.
+ * The human capture agrees: a real stalk produces six consecutive frames.
+ *
+ * ⚠️ ONE MEANS "NOT MEASURED", NOT "ONE IS RIGHT". Every other action keeps 1
+ * because nobody has watched it fail yet. The map light TSL holds by re-sending
+ * for as long as the light is on, which is a different shape again -- a hold,
+ * not a burst -- and this number does not describe it. Fill a row in when the
+ * car has answered, the way this one was.
+ */
+uint8_t fsd_emit_repeat(FsdBodyAction a);
+
 
 /** The car's most recent frame for the id this action writes. */
 typedef struct {

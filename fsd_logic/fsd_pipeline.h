@@ -118,6 +118,22 @@ uint8_t fsd_pipe_observe(FsdPipeFrames* f, uint32_t can_id, const uint8_t* data,
  *  🔴 TRANSMITS NOTHING. See the header comment.
  *
  *  Safe with any NULL: returns 0. */
+/** One decision through the same four gates, without matching a rule.
+ *
+ * fsd_pipe_run() is this in a loop. It exists separately because a BURST needs
+ * to re-run a decision the rules already made: the turn signal is not one frame
+ * but three or four consecutive ones, and the second through fourth arrive on
+ * the car's clock rather than on a trigger.
+ *
+ * 🔴 IT IS NOT A SHORTCUT PAST ANYTHING. Same axis, same emitter, same
+ * chokepoint, same order. Take the belt off in the middle of a burst and the
+ * remaining frames are refused with a name, exactly as the first would have
+ * been.
+ */
+void fsd_pipe_one(FsdBodyAction action, int32_t arg, uint8_t rule_index,
+                  const FsdBodyInputs* in, const FsdPipeFrames* f,
+                  uint32_t now_ms, FsdPipeResult* out);
+
 uint8_t fsd_pipe_run(const FsdRules* rules, const FsdTriggerEvent* ev, const FsdBodyInputs* in,
                      const FsdPipeFrames* f, uint32_t now_ms, FsdPipeResult* out,
                      uint8_t max_out);

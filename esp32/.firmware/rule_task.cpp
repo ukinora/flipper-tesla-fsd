@@ -63,9 +63,33 @@ void rule_task_init(FSDState* state, portMUX_TYPE* mux, RuleTaskSend send) {
  * 안 바꾼다. 한쪽만 바꾸면 화면과 소스의 대조가 끊긴다. rules_store.cpp 가
  * 같은 규칙을 따르고, 이 파일은 2026-09-07 에 새로 생기면서 그것을 놓쳐
  * 하루 동안 "규칙" 을 찍고 있었다. */
+/* A burst in progress: the same decision, waiting for the car's next frames.
+ *
+ * 🔴 THE CAR'S CLOCK, NOT OURS. remaining counts DOWN on arrivals of the frame
+ * this action writes, so our frame lands 0-1 ms after the car's own -- the
+ * spacing TSL uses and the reason there is no timer here. A timer would drift
+ * against a 50 ms bus and put us in the middle of a gap, which is where the
+ * first car attempt died.
+ *
+ * Session state, not settings. It dies with the power like the arm flag, and
+ * anything that stops the burst early (a refusal, a mode change) just leaves
+ * remaining at whatever it was -- the next arrival tries again and gets a named
+ * refusal, which is the honest outcome. */
+static struct {
+    FsdBodyAction action;
+    int32_t arg;
+    uint8_t rule_index;
+    uint8_t remaining;
+    uint32_t id;      /* the CAN id whose arrival drives it */
+} g_burst = {(FsdBodyAction)0, 0, 0, 0u, 0u};
+
 void rule_task_set_armed(bool armed) {
     if (g_armed == armed) return;
     g_armed = armed;
+    /* Disarming stops a burst mid-flight. The axis would refuse the rest
+     * anyway (NOT_ENABLED), but "stop" should not depend on a gate further
+     * down agreeing with it. */
+    g_burst.remaining = 0u;
     Serial.printf("[RULE] %s\n", armed
         ? "무장됨 — 매핑이 실제로 CAN 에 씁니다 (이 세션에만, 전원과 함께 꺼집니다)"
         : "해제됨 — 매핑은 판정만 하고 아무것도 보내지 않습니다");
@@ -103,6 +127,58 @@ static void note_refusal(const FsdPipeResult* r) {
  * fsd_pipe_run() decides and builds; it has no way to transmit. The send below
  * is a call back into main.cpp, which still applies its own mode gate and its
  * own ID refusals afterwards. Two more layers after the four. */
+/* Ship one pipeline result. Shared by the rule path and the burst path so
+ * they cannot drift: same refusal names, same counters, same bus guard. */
+static bool ship(const FsdPipeResult* r, uint32_t now_ms) {
+    if (r->stage != FSD_PIPE_OK) {
+        note_refusal(r);
+        /* Every refusal is logged. This path is rare by construction -- a
+         * trigger the owner wired to an action -- so it cannot flood, and
+         * "why did nothing happen" is the question this feature will be
+         * asked most often. */
+        Serial.printf("[RULE] 매핑 %u %s 거부 — %s (%s)\n", (unsigned)r->rule_index,
+                      fsd_body_action_str(r->action), fsd_pipe_stage_str(r->stage),
+                      fsd_pipe_reason_str(r->stage, r->reason));
+        return false;
+    }
+
+    if (!g_send) return false;
+    if (g_bus == 0xFFu) {
+        /* No frame has arrived, so we do not know which bus to answer
+         * on. fsd_pipe_run() cannot reach this state -- the emitter
+         * needs a template first -- but guessing a bus is exactly the
+         * mistake this field exists to prevent. */
+        g_refused++;
+        Serial.println("[RULE] 어느 버스로 보낼지 모른다 — 프레임을 받은 적이 없다");
+        return false;
+    }
+
+    const bool ok = g_send(g_bus, r->frame.id, r->frame.data, r->frame.dlc);
+    if (ok) {
+        g_sent++;
+        Serial.printf("[RULE] 매핑 %u %s -> 0x%03X 보냄\n", (unsigned)r->rule_index,
+                      fsd_body_action_str(r->action), (unsigned)r->frame.id);
+    } else {
+        /* main.cpp refused it after we did not. Counted as a refusal
+         * because that is what it is, and named so the two are not
+         * confused: this one came from below the pipeline. */
+        g_refused++;
+        snprintf(g_last_refusal, sizeof(g_last_refusal), "bus: 0x%03X 거부됨",
+                 (unsigned)r->frame.id);
+        Serial.printf("[RULE] 매핑 %u %s -> 0x%03X 버스가 거부\n",
+                      (unsigned)r->rule_index, fsd_body_action_str(r->action),
+                      (unsigned)r->frame.id);
+    }
+
+    /* Tell the trigger layer we just disturbed these signals, so our own
+     * write does not come back as an event. A rule whose action changes
+     * the state it triggers on would otherwise run forever. */
+    FsdSignal touched[FSD_RULE_MAX_AFFECTS];
+    const uint8_t m = fsd_rule_affects(r->action, touched, FSD_RULE_MAX_AFFECTS);
+    for (uint8_t k = 0; k < m; k++) fsd_trig_disturbed(&g_trig, touched[k], now_ms);
+    return ok;
+}
+
 static void run_event(const FsdTriggerEvent* ev, uint32_t now_ms) {
     const FsdRules* rules = rules_store_table();
     if (!rules) return;
@@ -114,52 +190,40 @@ static void run_event(const FsdTriggerEvent* ev, uint32_t now_ms) {
     const uint8_t n = fsd_pipe_run(rules, ev, &in, &g_frames, now_ms, out, FSD_PIPE_MAX_OUT);
 
     for (uint8_t i = 0; i < n; i++) {
-        if (out[i].stage != FSD_PIPE_OK) {
-            note_refusal(&out[i]);
-            /* Every refusal is logged. This path is rare by construction — a
-             * trigger the owner wired to an action — so it cannot flood, and
-             * "why did nothing happen" is the question this feature will be
-             * asked most often. */
-            Serial.printf("[RULE] 매핑 %u %s 거부 — %s (%s)\n", (unsigned)out[i].rule_index,
-                          fsd_body_action_str(out[i].action), fsd_pipe_stage_str(out[i].stage),
-                          fsd_pipe_reason_str(out[i].stage, out[i].reason));
-            continue;
-        }
+        if (!ship(&out[i], now_ms)) continue;
 
-        if (!g_send) continue;
-        if (g_bus == 0xFFu) {
-            /* No frame has arrived, so we do not know which bus to answer
-             * on. fsd_pipe_run() cannot reach this state -- the emitter
-             * needs a template first -- but guessing a bus is exactly the
-             * mistake this field exists to prevent. */
-            g_refused++;
-            Serial.println("[RULE] 어느 버스로 보낼지 모른다 — 프레임을 받은 적이 없다");
-            continue;
+        /* 🔴 ONE FRAME IS NOT ALWAYS THE COMMAND. Arm the rest of the burst;
+         * the car's next frames of this id drive it. See fsd_emit_repeat(). */
+        const uint8_t reps = fsd_emit_repeat(out[i].action);
+        const FsdBodyWire* w = fsd_body_wire(out[i].action);
+        if (reps > 1u && w) {
+            g_burst.action = out[i].action;
+            g_burst.arg = out[i].arg;
+            g_burst.rule_index = out[i].rule_index;
+            g_burst.remaining = (uint8_t)(reps - 1u);
+            g_burst.id = w->can_id;
         }
-        const bool ok = g_send(g_bus, out[i].frame.id, out[i].frame.data, out[i].frame.dlc);
-        if (ok) {
-            g_sent++;
-            Serial.printf("[RULE] 매핑 %u %s -> 0x%03X 보냄\n", (unsigned)out[i].rule_index,
-                          fsd_body_action_str(out[i].action), (unsigned)out[i].frame.id);
-        } else {
-            /* main.cpp refused it after we did not. Counted as a refusal
-             * because that is what it is, and named so the two are not
-             * confused: this one came from below the pipeline. */
-            g_refused++;
-            snprintf(g_last_refusal, sizeof(g_last_refusal), "bus: 0x%03X 거부됨",
-                     (unsigned)out[i].frame.id);
-            Serial.printf("[RULE] 매핑 %u %s -> 0x%03X 버스가 거부\n",
-                          (unsigned)out[i].rule_index, fsd_body_action_str(out[i].action),
-                          (unsigned)out[i].frame.id);
-        }
-
-        /* Tell the trigger layer we just disturbed these signals, so our own
-         * write does not come back as an event. A rule whose action changes
-         * the state it triggers on would otherwise run forever. */
-        FsdSignal touched[FSD_RULE_MAX_AFFECTS];
-        const uint8_t m = fsd_rule_affects(out[i].action, touched, FSD_RULE_MAX_AFFECTS);
-        for (uint8_t k = 0; k < m; k++) fsd_trig_disturbed(&g_trig, touched[k], now_ms);
     }
+}
+
+/* The car's frame just landed. If a burst is owed on this id, put ours in
+ * front of the next one -- 0-1 ms behind the frame we copied, which is where
+ * TSL's are. */
+static void burst_on_frame(uint32_t can_id, uint32_t now_ms) {
+    if (g_burst.remaining == 0u || can_id != g_burst.id) return;
+    if (!g_state || !g_mux) return;
+
+    g_burst.remaining--;
+
+    const FsdBodyInputs in = rule_inputs(now_ms);
+    FsdPipeResult r;
+    memset(&r, 0, sizeof(r));
+    fsd_pipe_one(g_burst.action, g_burst.arg, g_burst.rule_index, &in, &g_frames,
+                 now_ms, &r);
+    /* A refusal here stops nothing by itself -- remaining is already down, so
+     * the burst runs out on its own. What it does is name why, which is the
+     * whole point of doing it through the pipeline instead of around it. */
+    (void)ship(&r, now_ms);
 }
 
 void rule_task_observe(uint8_t bus, uint32_t can_id, const uint8_t* data, uint8_t dlc,
@@ -171,6 +235,13 @@ void rule_task_observe(uint8_t bus, uint32_t can_id, const uint8_t* data, uint8_
      * both — should be available to the emitter as of THIS frame, not the
      * previous one. */
     (void)fsd_pipe_observe(&g_frames, can_id, data, dlc, now_ms);
+
+    /* 🔴 BURST FIRST, THEN TRIGGERS. The template this frame just became is
+     * the one our burst frame copies, and putting it out now -- in the same
+     * millisecond -- is what reproduces TSL's spacing. Doing triggers first
+     * would work too, but it would put a rule match between the car's frame
+     * and ours for no reason. */
+    burst_on_frame(can_id, now_ms);
 
     FsdTriggerEvent ev[RULE_EVENTS_MAX];
     const uint8_t n = fsd_trig_on_frame(&g_trig, can_id, data, dlc, now_ms, ev, RULE_EVENTS_MAX);
