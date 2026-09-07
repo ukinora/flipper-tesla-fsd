@@ -5,6 +5,7 @@
 #include "fsd_body.h"
 
 #include "fsd_autonomy.h" // FSD_GEAR_*
+#include "fsd_state.h"   // FSDState, for fsd_body_inputs_from_state()
 
 /* The capability table. Designated initialisers so a row cannot silently land
  * at the wrong index, plus a self-check inside each row and a length assertion
@@ -421,6 +422,30 @@ const char* fsd_body_action_str(FsdBodyAction a) {
     case FSD_ACT_COUNT: break;
     }
     return "?";
+}
+
+/* See the header. Nine fields, one place, so the next one added cannot go
+ * missing the way the belt did. Deliberately does NOT memset: the caller fills
+ * the other half from producers this file knows nothing about, and clearing
+ * their work here would be a far quieter bug than the one this fixes. */
+void fsd_body_inputs_from_state(FsdBodyInputs* in, const struct FSDState* st) {
+    if(!in || !st) return;
+
+    in->op_mode = st->op_mode;
+    in->ota_in_progress = st->tesla_ota_in_progress;
+    in->rx_stale = st->rx_stale;
+
+    in->gear = st->di_gear;
+    in->gear_seen = st->di_gear_seen;
+    in->gear_ms = st->di_gear_ms;
+
+    /* 0x3C2 mux 0 frontBuckleSwitch on this car -- 0x311 carries it on cars
+     * that ship an eight-byte UI_warning, and fsd_drive_observe_belt_switch()
+     * decides which. Either way it lands in these three FSDState fields, and
+     * this is the only line that carries them to the permission axis. */
+    in->belt_seen = st->belt_seen;
+    in->belt_latched = st->ui_buckle_status;
+    in->belt_ms = st->belt_seen_ms;
 }
 
 const char* fsd_body_verdict_str(FsdBodyVerdict v) {

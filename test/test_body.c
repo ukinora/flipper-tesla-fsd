@@ -821,8 +821,109 @@ static void test_owner_decisions_are_in_the_table(void) {
           "the failure to survive is a stuck rule HOLDING them, so bound it");
 }
 
+/* 🔴 THE BENCH REFUSED WHILE ALL OF THE ABOVE WAS GREEN.
+ *
+ * On 2026-09-07 the driver gate learned to accept a latched belt. 4,437 host
+ * tests passed, six mutations bit, eight boards built -- and replaying the very
+ * capture the fix was written for still produced "axis: no driver". The gate
+ * was right; nothing filled belt_seen / belt_latched on the way in. Every test
+ * above builds FsdBodyInputs by hand, so every test above was blind to it.
+ *
+ * These two stand where that blindness was. The first watches the copy itself;
+ * the second replays the bench: driverPresent false for the whole drive, belt
+ * latched, and the answer has to be OK. Delete either belt line in
+ * fsd_body_inputs_from_state() and the second one fails. */
+static void test_state_fields_reach_the_inputs(void) {
+    const uint32_t now = 900000;
+
+    FSDState st;
+    memset(&st, 0, sizeof(st));
+    st.op_mode = OpMode_Active;
+    st.tesla_ota_in_progress = true;
+    st.rx_stale = true;
+    st.di_gear = FSD_GEAR_D;
+    st.di_gear_seen = true;
+    st.di_gear_ms = now - 11;
+    st.ui_buckle_status = true;
+    st.belt_seen = true;
+    st.belt_seen_ms = now - 22;
+
+    FsdBodyInputs in;
+    memset(&in, 0, sizeof(in));
+    in.bus_tx_open = true; // caller's own field: must survive the copy
+    fsd_body_inputs_from_state(&in, &st);
+
+    CHECK(in.op_mode == OpMode_Active, "op_mode did not arrive");
+    CHECK(in.ota_in_progress, "ota_in_progress did not arrive");
+    CHECK(in.rx_stale, "rx_stale did not arrive");
+    CHECK(in.gear == FSD_GEAR_D, "gear did not arrive");
+    CHECK(in.gear_seen, "gear_seen did not arrive");
+    CHECK(in.gear_ms == now - 11, "gear_ms did not arrive");
+    CHECK(in.belt_seen, "belt_seen did not arrive -- the 2026-09-07 bug");
+    CHECK(in.belt_latched, "belt_latched did not arrive -- the 2026-09-07 bug");
+    CHECK(in.belt_ms == now - 22, "belt_ms did not arrive");
+    CHECK(in.bus_tx_open, "the copy clobbered a field it does not own");
+
+    /* The unlatched belt has to travel too, or the gate reads a stale true. */
+    st.ui_buckle_status = false;
+    fsd_body_inputs_from_state(&in, &st);
+    CHECK(!in.belt_latched, "an unlatched belt did not arrive");
+
+    /* NULL either side and nothing is touched. */
+    FsdBodyInputs keep = in;
+    fsd_body_inputs_from_state(&in, NULL);
+    fsd_body_inputs_from_state(NULL, &st);
+    CHECK(memcmp(&keep, &in, sizeof(in)) == 0, "NULL wrote something");
+}
+
+static void test_belt_from_state_rescues_the_gate(void) {
+    const uint32_t now = 900000;
+
+    /* The bench vector, byte for byte in the fields that matter: 0x3C2 mux 0
+     * with driverPresent clear on all 100 frames and frontBuckleSwitch == 2. */
+    FSDState st;
+    memset(&st, 0, sizeof(st));
+    st.op_mode = OpMode_Active;
+    st.di_gear = FSD_GEAR_P;
+    st.di_gear_seen = true;
+    st.di_gear_ms = now;
+    st.ui_buckle_status = true;
+    st.belt_seen = true;
+    st.belt_seen_ms = now;
+
+    FsdBodyInputs in = good_inputs(now);
+    in.action_enabled[FSD_ACT_TURN_SIGNAL] = true;
+    in.driver_seen = true;
+    in.driver_present = false; // 0/100 across the whole drive
+    in.driver_ms = now;
+    /* Take away what the helper handed us, so ONLY the state copy can put the
+     * belt back. Without this the test passes with the copy deleted. */
+    in.belt_seen = false;
+    in.belt_latched = false;
+    in.belt_ms = 0;
+
+    CHECK(fsd_body_allows(&in, FSD_ACT_TURN_SIGNAL, now) ==
+              FSD_BODY_NO_DRIVER_PRESENT,
+          "without the belt this is exactly what the bench said");
+
+    fsd_body_inputs_from_state(&in, &st);
+    CHECK(fsd_body_allows(&in, FSD_ACT_TURN_SIGNAL, now) == FSD_BODY_OK,
+          "the belt reached the axis on the bench but not here: got %s",
+          fsd_body_verdict_str(fsd_body_allows(&in, FSD_ACT_TURN_SIGNAL, now)));
+
+    /* And it is the belt doing the work, not the copy loosening something
+     * else: unlatch it in FSDState and the refusal comes straight back. */
+    st.ui_buckle_status = false;
+    fsd_body_inputs_from_state(&in, &st);
+    CHECK(fsd_body_allows(&in, FSD_ACT_TURN_SIGNAL, now) ==
+              FSD_BODY_NO_DRIVER_PRESENT,
+          "an unlatched belt still let the action through");
+}
+
 int main(void) {
     printf("test_body\n");
+    test_state_fields_reach_the_inputs();
+    test_belt_from_state_rescues_the_gate();
     test_door_is_armed_but_every_gate_still_holds();
     test_zero_is_the_tightest_row();
     test_axis_refuses_in_order();

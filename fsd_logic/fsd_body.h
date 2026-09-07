@@ -276,6 +276,32 @@ FsdBodyVerdict fsd_body_caps_verdict(const FsdBodyCaps* c, const FsdBodyInputs* 
                                      FsdBodyAction a, uint32_t now_ms);
 
 /** Human-readable verdict, for logs and the BLE surface. */
+/** Copy every FsdBodyInputs field that comes out of FSDState.
+ *
+ * 🔴 THIS EXISTS BECAUSE THE FIELDS WERE ADDED AND NOBODY FILLED THEM. On
+ * 2026-09-07 the driver gate learned to accept the belt, 4,437 host tests went
+ * green, six mutations bit, eight boards built -- and the bench still refused
+ * with "no driver", because esp32/.firmware/body_task.cpp assembled
+ * FsdBodyInputs by hand and simply had no line for belt_seen / belt_latched.
+ * The memset at the top of that function left them false, so the new branch of
+ * the gate could never be true on real hardware. The host tests could not see
+ * it: they build the struct themselves, and body_task.cpp is not in the host
+ * build at all.
+ *
+ * So the assembly moved here, where a host test can watch it. Add a field to
+ * FsdBodyInputs that comes from FSDState and it gets filled in ONE place, and
+ * the test below this comment's twin in test_body.c fails if it does not.
+ *
+ * What stays with the caller: everything that is NOT in FSDState -- the T2
+ * observer's driverPresent, the camera task's reference speed, the drive
+ * session latch, bus_tx_open, and the enable/last-fired arrays the caller owns
+ * by design. Those have their own producers; these nine had none.
+ *
+ * Forward-declared rather than #include "fsd_state.h": four other headers pull
+ * fsd_body.h in, and none of them wants the whole state struct. */
+struct FSDState;
+void fsd_body_inputs_from_state(FsdBodyInputs* in, const struct FSDState* st);
+
 const char* fsd_body_verdict_str(FsdBodyVerdict v);
 
 /** Human-readable action name, for the same reason. */

@@ -91,21 +91,22 @@ FsdBodyInputs body_task_permission_inputs(uint32_t now_ms) {
     FsdBodyInputs in;
     memset(&in, 0, sizeof(in));
 
-    uint8_t gear = 0;
-    bool gear_seen = false, belt = false, belt_seen = false;
+    /* 🔴 Every FSDState-derived field comes from fsd_body_inputs_from_state(),
+     * never from lines written out here. This function used to copy them by
+     * hand and MISSED THE BELT -- the gate learned to accept it, the host tests
+     * went green, and the bench still refused with "no driver" because these
+     * two fields stayed at the memset's false. A field with no producer is this
+     * repo's oldest failure; keeping the assembly in fsd_logic/ is what lets a
+     * host test stand where body_task.cpp cannot be reached. */
     portENTER_CRITICAL(g_mux);
-    in.op_mode = g_state->op_mode;
-    in.ota_in_progress = g_state->tesla_ota_in_progress;
-    in.rx_stale = g_state->rx_stale;
-    gear = g_state->di_gear;
-    gear_seen = g_state->di_gear_seen;
-    in.gear_ms = g_state->di_gear_ms;
-    belt = g_state->ui_buckle_status;
-    belt_seen = g_state->belt_seen;
+    fsd_body_inputs_from_state(&in, g_state);
     portEXIT_CRITICAL(g_mux);
 
-    in.gear = gear;
-    in.gear_seen = gear_seen;
+    const uint8_t gear = in.gear;
+    const bool gear_seen = in.gear_seen;
+    const bool belt = in.belt_latched;
+    const bool belt_seen = in.belt_seen;
+
     in.bus_tx_open = g_bus_tx_open;
 
     /* A drive has happened. Latched on purpose — "we drove here and parked" is
