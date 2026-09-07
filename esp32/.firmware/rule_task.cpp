@@ -35,6 +35,11 @@ static RuleTaskSend g_send = nullptr;
  * power cut. See rule_task.h. */
 static bool g_armed = false;
 
+/* Which bus the templates came in on. 🔴 A command goes back out the
+ * same way: see rule_task.h. 0xFF until the first frame arrives, and a
+ * command decided before that is refused rather than guessed at. */
+static uint8_t g_bus = 0xFFu;
+
 static uint32_t g_sent = 0;
 static uint32_t g_refused = 0;
 static char g_last_refusal[64] = "none";
@@ -46,6 +51,7 @@ void rule_task_init(FSDState* state, portMUX_TYPE* mux, RuleTaskSend send) {
     fsd_trig_init(&g_trig);
     fsd_pipe_init(&g_frames);
     g_armed = false;
+    g_bus = 0xFFu;
     g_sent = 0;
     g_refused = 0;
     strncpy(g_last_refusal, "none", sizeof(g_last_refusal) - 1);
@@ -116,7 +122,16 @@ static void run_event(const FsdTriggerEvent* ev, uint32_t now_ms) {
         }
 
         if (!g_send) continue;
-        const bool ok = g_send(out[i].frame.id, out[i].frame.data, out[i].frame.dlc);
+        if (g_bus == 0xFFu) {
+            /* No frame has arrived, so we do not know which bus to answer
+             * on. fsd_pipe_run() cannot reach this state -- the emitter
+             * needs a template first -- but guessing a bus is exactly the
+             * mistake this field exists to prevent. */
+            g_refused++;
+            Serial.println("[RULE] 어느 버스로 보낼지 모른다 — 프레임을 받은 적이 없다");
+            continue;
+        }
+        const bool ok = g_send(g_bus, out[i].frame.id, out[i].frame.data, out[i].frame.dlc);
         if (ok) {
             g_sent++;
             Serial.printf("[RULE] 규칙 %u %s -> 0x%03X 보냄\n", (unsigned)out[i].rule_index,
@@ -142,8 +157,10 @@ static void run_event(const FsdTriggerEvent* ev, uint32_t now_ms) {
     }
 }
 
-void rule_task_observe(uint32_t can_id, const uint8_t* data, uint8_t dlc, uint32_t now_ms) {
+void rule_task_observe(uint8_t bus, uint32_t can_id, const uint8_t* data, uint8_t dlc,
+                       uint32_t now_ms) {
     if (!data) return;
+    g_bus = bus;
 
     /* Store first. A frame that is both a trigger and a template — 0x3C2 is
      * both — should be available to the emitter as of THIS frame, not the
