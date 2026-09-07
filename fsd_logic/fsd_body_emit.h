@@ -147,48 +147,80 @@ extern "C" {
 #define FSD_EMIT_HAZARD_SUM_ADD  0xECu
 
 #define FSD_EMIT_DOOR_ID         0x1F9u
-#define FSD_EMIT_DOOR_BYTE       1u
 #define FSD_EMIT_DOOR_DLC        8u
 
-/* WHICH DOOR. Measured, one door per visit:
+/* WHICH DOOR. All four measured now, one or two per visit:
  *
- *      right FRONT   byte1 = 0x03    3rd visit, 2026-09-05
- *      right REAR    byte1 = 0xC0    4th visit, 2026-09-05 afternoon
+ *      right FRONT   1F9#0003000000000000   3 << 8    3rd visit, 2026-09-05
+ *      right REAR    1F9#00C0000000000000   3 << 14   4th visit
+ *      left  FRONT   1F9#6000000000000000   3 << 5    5th visit, 2026-09-06
+ *      left  REAR    1F9#0018000000000000   3 << 11   5th visit
  *
- * The 4th visit caught the rear one TWICE in two different captures — TSL's
- * own menu entry, and the three-window-up gesture that fires the same rule —
- * and both produced 0xC0. That is the internal cross-check; neither reading
- * rests on the other.
+ * 🟢🟢 FOUR FIELDS, VALUE 3, OFFSETS THREE BITS APART. Two points were a
+ * bitmask or a set of 2-bit fields and there was no way to choose; four points
+ * are a structure, and the structure says the spacing is THREE.
  *
- *      (7.458) 1F9#0000000000000000     <- the car
- *      (7.459) 1F9#00C0000000000000     <- TSL, +1 ms
- *      (7.53x)                          <- 0x103 latch moves, 70-81 ms later
+ * 🔴 AND THE OLD INFERENCE WAS WRONG IN BOTH DIRECTIONS, WHICH IS WHY IT WAS
+ * REFUSED. This comment used to read: "0x03 is bits[1:0] and 0xC0 is bits[7:6],
+ * so four 2-bit fields fits both ... either reading predicts 0x0C and 0x30 for
+ * the two LEFT doors". Measured, the left rear is 0x18 -- not 0x0C, not 0x30 --
+ * and the left front IS NOT IN THAT BYTE AT ALL. Had the obvious answer been
+ * written in, a left-front rule would have opened a rear door.
  *
- * ⚠️ TWO POINTS, AND EVERYTHING ELSE IS INFERENCE. 0x03 is bits[1:0] and 0xC0
- * is bits[7:6], so "four 2-bit fields, value 3 = open" fits both. It also fits
- * a plain bitmask. Either reading predicts 0x0C and 0x30 for the two LEFT
- * doors — and NEITHER HAS BEEN SEEN. TSL has no left-door rule, so no capture
- * can contain one.
+ *      (6.671) 1F9#0000000000000000     <- the car
+ *      (6.671) 1F9#6000000000000000     <- TSL
+ *      (6.79x)                          <- 0x102 latch moves, 119 ms later
  *
- * So the left doors are NOT in this enum. A guess here does not fail loudly:
- * it opens a door on the other side of the car, next to whatever is standing
- * there. FSD_EMIT_NO_ENCODING is the honest answer until somebody measures it.
- */
+ * 🔴 WHICH IS WHY THE ENCODING IS A BYTE PLUS A MASK AND NOT A MASK ALONE.
+ * There used to be one FSD_EMIT_DOOR_BYTE for the whole action, and the left
+ * front does not live in it. A table of masks bolted onto that constant would
+ * have put 0x60 into byte 1, on top of the two rear fields, and reported OK.
+ *
+ * ⚠️ WHAT IS STILL NOT MEASURED. Offset 2 sits below the first field and
+ * offset 17 above the last, and three-apart says something could be in either.
+ * The 5th visit found the FRUNK switch in this frame's back bytes
+ * (1F9#0000000000008801), so it plainly carries more than four doors. None of
+ * that is in the enum: a fifth selector would be predicted, not measured, and
+ * a prediction here opens a door. */
 typedef enum {
-    /* 0 is the right front, which is what every rule stored before this enum
-     * existed already meant. A stored rule must not quietly change which door
-     * it opens because the emitter learned a second one. */
+    /* 🔴 APPENDED, NEVER INSERTED -- these numbers are a rule's stored arg.
+     * 0 is the right front because that is what every rule stored before this
+     * enum existed already meant, and 1 kept its place when the rear arrived.
+     *
+     * ⚠️ 2 AND 3 USED TO BE REFUSALS. A stored rule carrying either did
+     * nothing before today and opens a left door now. Nothing that WORKED
+     * changes -- only something that never worked starts to -- and the app has
+     * never offered a value outside {0, 1} to store. Written down because it is
+     * still a behaviour change on data already in NVS, and because the two
+     * gates that make it harmless (the axis, and the missing wire row) are
+     * both things somebody will one day open on purpose. */
     FSD_EMIT_DOOR_RIGHT_FRONT = 0,
     FSD_EMIT_DOOR_RIGHT_REAR = 1,
+    FSD_EMIT_DOOR_LEFT_FRONT = 2,
+    FSD_EMIT_DOOR_LEFT_REAR = 3,
     FSD_EMIT_DOOR_COUNT,
 } FsdEmitDoor;
 
-#define FSD_EMIT_DOOR_RF_BITS    0x03u
-#define FSD_EMIT_DOOR_RR_BITS    0xC0u
+/* Byte index and mask for each field. Written as measured bytes rather than as
+ * (offset, width) arithmetic so that what is in this file is what came off the
+ * bus; the offsets are in the comment above and a host test derives these four
+ * masks from them independently. */
+#define FSD_EMIT_DOOR_RF_BYTE    1u
+#define FSD_EMIT_DOOR_RF_BITS    0x03u   /* 3 << 8  */
+#define FSD_EMIT_DOOR_RR_BYTE    1u
+#define FSD_EMIT_DOOR_RR_BITS    0xC0u   /* 3 << 14 */
+#define FSD_EMIT_DOOR_LF_BYTE    0u
+#define FSD_EMIT_DOOR_LF_BITS    0x60u   /* 3 << 5  */
+#define FSD_EMIT_DOOR_LR_BYTE    1u
+#define FSD_EMIT_DOOR_LR_BITS    0x18u   /* 3 << 11 */
 
-/** byte1 value for a door selector. False — *bits_out untouched — for a
- *  selector this car has never been measured to accept. */
-bool fsd_emit_door_bits(int32_t door, uint8_t* bits_out);
+/** Where a door selector's field lives: which byte, and which bits inside it.
+ *
+ *  🔴 BOTH OR NEITHER. The byte is half the answer -- the left front is the
+ *  only field in byte 0 and every other one is in byte 1 -- so a caller that
+ *  took the mask and assumed the byte would write a measured value at an
+ *  unmeasured place. False leaves both outputs untouched. */
+bool fsd_emit_door_field(int32_t door, uint8_t* byte_ix_out, uint8_t* bits_out);
 
 /** Name for logs and the serial console. Never returns NULL; an unmeasured
  *  selector reads as "?" rather than as some door. */

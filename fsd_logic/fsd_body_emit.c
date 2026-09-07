@@ -27,24 +27,38 @@ bool fsd_emit_supported(FsdBodyAction action) {
     return false;
 }
 
-/* Door selector -> byte1 value. A switch, not a table lookup, so that adding
- * a door to FsdEmitDoor without measuring its bits is a compiler warning here
- * rather than an index into whatever follows the array. */
-bool fsd_emit_door_bits(int32_t door, uint8_t* bits_out) {
-    if(!bits_out) return false;
+/* Door selector -> (byte, mask). A switch, not a table lookup, so that adding
+ * a door to FsdEmitDoor without measuring its field is a compiler warning here
+ * rather than an index into whatever follows the array.
+ *
+ * 🔴 Neither output is written unless BOTH are known. A partial answer here is
+ * a measured mask at an unmeasured offset, which is a different door. */
+bool fsd_emit_door_field(int32_t door, uint8_t* byte_ix_out, uint8_t* bits_out) {
+    if(!byte_ix_out || !bits_out) return false;
     switch((FsdEmitDoor)door) {
     case FSD_EMIT_DOOR_RIGHT_FRONT:
+        *byte_ix_out = FSD_EMIT_DOOR_RF_BYTE;
         *bits_out = FSD_EMIT_DOOR_RF_BITS;
         return true;
     case FSD_EMIT_DOOR_RIGHT_REAR:
+        *byte_ix_out = FSD_EMIT_DOOR_RR_BYTE;
         *bits_out = FSD_EMIT_DOOR_RR_BITS;
+        return true;
+    case FSD_EMIT_DOOR_LEFT_FRONT:
+        *byte_ix_out = FSD_EMIT_DOOR_LF_BYTE;
+        *bits_out = FSD_EMIT_DOOR_LF_BITS;
+        return true;
+    case FSD_EMIT_DOOR_LEFT_REAR:
+        *byte_ix_out = FSD_EMIT_DOOR_LR_BYTE;
+        *bits_out = FSD_EMIT_DOOR_LR_BITS;
         return true;
     case FSD_EMIT_DOOR_COUNT:
         break;
     }
-    /* 🔴 Includes the two LEFT doors. The bit pattern makes 0x0C and 0x30 look
-     * obvious, and obvious is not measured. Guessing wrong here opens a door on
-     * the other side of the car. */
+    /* 🔴 Still the honest answer for anything past the fourth door. The frame
+     * carries more than four fields -- the frunk switch is in its back bytes --
+     * and "three bits apart" predicts a fifth at offset 17. Predicting is not
+     * measuring, and this is the file where that distinction opens a door. */
     return false;
 }
 
@@ -52,6 +66,8 @@ const char* fsd_emit_door_str(int32_t door) {
     switch((FsdEmitDoor)door) {
     case FSD_EMIT_DOOR_RIGHT_FRONT: return "right front";
     case FSD_EMIT_DOOR_RIGHT_REAR: return "right rear";
+    case FSD_EMIT_DOOR_LEFT_FRONT: return "left front";
+    case FSD_EMIT_DOOR_LEFT_REAR: return "left rear";
     case FSD_EMIT_DOOR_COUNT: break;
     }
     return "?";
@@ -273,10 +289,9 @@ FsdEmitResult fsd_emit_build(FsdBodyAction action, int32_t arg,
          * "the template was stale" -- that reads like a retryable problem, and
          * this one is not: no amount of waiting will make us know which bits
          * open the driver's door. */
-        if(!fsd_emit_door_bits(arg, &bits)) return FSD_EMIT_NO_ENCODING;
+        if(!fsd_emit_door_field(arg, &byte_ix, &bits)) return FSD_EMIT_NO_ENCODING;
         want_id = FSD_EMIT_DOOR_ID;
         want_dlc = FSD_EMIT_DOOR_DLC;
-        byte_ix = FSD_EMIT_DOOR_BYTE;
         break;
     case FSD_ACT_MAP_LIGHT:
         /* Takes no argument. Ignored, not refused -- see the header. */
@@ -300,6 +315,13 @@ FsdEmitResult fsd_emit_build(FsdBodyAction action, int32_t arg,
      * (fsd_emit_supported refuses it), but if one ever does it leaves without
      * an encoding instead of borrowing map light's. */
     if(want_id == 0) return FSD_EMIT_NO_ENCODING;
+
+    /* The byte index is a variable now that the door carries its own -- so it
+     * is bounded here rather than by inspection. Every value in the table is 0
+     * or 1 against a dlc of 8, so this cannot fire today; it is here because
+     * the day a short frame gets an emitter, the failure would be a write past
+     * the end of out->data rather than a refusal. */
+    if(byte_ix >= want_dlc) return FSD_EMIT_NO_ENCODING;
 
     if(!t->seen) return FSD_EMIT_NO_TEMPLATE;
 

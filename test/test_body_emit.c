@@ -968,44 +968,174 @@ static void test_door_selector_matches_tsl_byte_for_byte(void) {
           front.data[1], f.data[1]);
 }
 
-/* 🔴 THE ONE THAT MATTERS MOST. Two doors were measured; the other two are
- * inference, and an inference here opens a door on the far side of the car. */
+/* THE TWO LEFT DOORS, measured on the 5th visit, 2026-09-06. Copied out of
+ * captures/2026-09-06-5차/좌측앞문열기 and 좌측뒷문열기 -- two injections each,
+ * 300 ms apart, and the latch answers 119 ms later.
+ *
+ *      (6.671) 1F9#6000000000000000     <- left front,  3 << 5
+ *      (6.769) 1F9#0018000000000000     <- left rear,   3 << 11
+ *
+ * 🔴 THE LEFT FRONT IS IN BYTE 0, AND THE OLD CODE COULD NOT HAVE REACHED IT.
+ * FSD_EMIT_DOOR_BYTE was a single constant, 1, for the whole action. Adding a
+ * left-front row to that table would have put 0x60 into BYTE 1 -- a value
+ * nobody has measured, sitting on top of the two rear fields. That is why this
+ * is a rewrite of the encoding and not two more enum entries.
+ *
+ * 🟢 AND THE OLD COMMENT'S INFERENCE WAS WRONG, WHICH IS THE POINT. It read
+ * "0x03 is bits[1:0] and 0xC0 is bits[7:6], so four 2-bit fields fits ...
+ * either reading predicts 0x0C and 0x30 for the two LEFT doors". Neither is
+ * right: the fields are THREE bits apart, so the left rear is 0x18 and the
+ * left front is not in that byte at all. The refusal to guess was worth
+ * exactly what it cost. */
+static const uint8_t TSL_DOOR_LF[8] = {0x60, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+static const uint8_t TSL_DOOR_LR[8] = {0x00, 0x18, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+
+static void test_left_doors_match_tsl_byte_for_byte(void) {
+    printf("\n-- door: the two left doors == the frames TSL sent --\n");
+
+    FsdEmitTemplate t = door_template(1000u);
+    FsdEmitFrame f;
+
+    CHECK(fsd_emit_build(FSD_ACT_DOOR_OPEN, FSD_EMIT_DOOR_LEFT_FRONT, &t, 1100u, &f)
+              == FSD_EMIT_OK, "left front must build");
+    CHECK(memcmp(f.data, TSL_DOOR_LF, 8) == 0,
+          "left front bytes must equal TSL's: got %02X%02X%02X%02X%02X%02X%02X%02X",
+          f.data[0], f.data[1], f.data[2], f.data[3],
+          f.data[4], f.data[5], f.data[6], f.data[7]);
+    /* 🔴 Said again as a claim about WHICH BYTE, separately from the memcmp.
+     * This is the assertion a single-byte encoding cannot pass, and it is the
+     * whole reason the door encoding changed shape. */
+    CHECK(f.data[0] == 0x60u && f.data[1] == 0x00u,
+          "left front lives in byte 0: got byte0=0x%02X byte1=0x%02X",
+          f.data[0], f.data[1]);
+
+    CHECK(fsd_emit_build(FSD_ACT_DOOR_OPEN, FSD_EMIT_DOOR_LEFT_REAR, &t, 1100u, &f)
+              == FSD_EMIT_OK, "left rear must build");
+    CHECK(memcmp(f.data, TSL_DOOR_LR, 8) == 0,
+          "left rear bytes must equal TSL's: got %02X%02X%02X%02X%02X%02X%02X%02X",
+          f.data[0], f.data[1], f.data[2], f.data[3],
+          f.data[4], f.data[5], f.data[6], f.data[7]);
+    CHECK(f.data[0] == 0x00u && f.data[1] == 0x18u,
+          "left rear lives in byte 1: got byte0=0x%02X byte1=0x%02X",
+          f.data[0], f.data[1]);
+}
+
+/* The four doors side by side -- the structure the 5th visit found, and the
+ * reason the encoding carries an OFFSET now instead of one shared byte index.
+ *
+ * Each field is checked against a value computed FROM ITS BIT OFFSET ALONE,
+ * not against the constant the emitter uses. The two agreeing is the claim:
+ * "value 3 at offsets 5, 8, 11, 14" reproduces all four captured frames. */
+static void test_four_doors_are_three_bits_apart(void) {
+    printf("\n-- door: four fields, value 3, offsets 5/8/11/14 --\n");
+
+    static const struct {
+        int32_t sel;
+        uint8_t offset;
+        const uint8_t* tsl;
+        const char* name;
+    } D[4] = {
+        {FSD_EMIT_DOOR_LEFT_FRONT, 5u, TSL_DOOR_LF, "left front"},
+        {FSD_EMIT_DOOR_RIGHT_FRONT, 8u, TSL_DOOR, "right front"},
+        {FSD_EMIT_DOOR_LEFT_REAR, 11u, TSL_DOOR_LR, "left rear"},
+        {FSD_EMIT_DOOR_RIGHT_REAR, 14u, TSL_DOOR_RR, "right rear"},
+    };
+
+    FsdEmitTemplate t = door_template(1000u);
+    uint8_t seen[8] = {0};
+
+    for(unsigned i = 0; i < 4; i++) {
+        uint8_t want[8] = {0};
+        /* 🔴 THE VALUE FITS IN ONE BYTE; THE FIELD DOES NOT ALWAYS.
+         * Three-apart makes each field three bits wide, and the right rear
+         * starts at bit 14 -- so its third bit is bit 16, over in byte 2. We
+         * never write that bit, because value 3 leaves it clear, and we never
+         * clear it either: the emitter ORs two bits and touches nothing else.
+         *
+         * Asserted rather than assumed because the day a door needs a value
+         * with the top bit set, this line is what says the two-bit shortcut
+         * has run out. */
+        CHECK((D[i].offset % 8u) <= 6u, "%s: value 3 must fit in one byte", D[i].name);
+        /* value 3 at D[i].offset, little-endian bit numbering -- the same
+         * convention the DBC uses and the one the offsets were read in. */
+        want[D[i].offset / 8u] = (uint8_t)(3u << (D[i].offset % 8u));
+        CHECK(memcmp(want, D[i].tsl, 8) == 0,
+              "%s: offset %u must reproduce the captured frame", D[i].name, D[i].offset);
+
+        FsdEmitFrame f;
+        CHECK(fsd_emit_build(FSD_ACT_DOOR_OPEN, D[i].sel, &t, 1100u, &f) == FSD_EMIT_OK,
+              "%s must build", D[i].name);
+        CHECK(memcmp(f.data, want, 8) == 0, "%s: emitter must match the offset", D[i].name);
+
+        /* 🔴 No two doors may share a bit. A transposed table or an ignored
+         * argument shows up here as two doors that are the same door. */
+        for(unsigned b = 0; b < 8; b++) {
+            CHECK((seen[b] & f.data[b]) == 0u,
+                  "%s overlaps an earlier door in byte %u", D[i].name, b);
+            seen[b] |= f.data[b];
+        }
+    }
+}
+
+/* 🔴 THE ONE THAT MATTERS MOST. All four doors are measured now; anything
+ * outside them is still inference, and an inference here opens a door. */
 static void test_unmeasured_doors_are_refused(void) {
     printf("\n-- door: the doors nobody measured are refused, not guessed --\n");
 
     FsdEmitTemplate t = door_template(1000u);
     FsdEmitFrame f;
 
-    /* 0x0C and 0x30 are what "four 2-bit fields" predicts for the two LEFT
-     * doors. TSL has no left-door rule, so no capture contains one, so we do
-     * not know. The selectors that would carry them must refuse. */
-    static const int32_t UNMEASURED[] = {2, 3, 4, 99, -1, -2147483647 - 1, 2147483647};
+    /* ⚠️ 2 AND 3 USED TO BE IN THIS LIST, and they are gone on purpose: the
+     * 5th visit measured both left doors. The list did not get weaker -- the
+     * door after the fourth is still here, and so is everything a corrupt or
+     * hostile argument could carry.
+     *
+     * 🔴 4 is the interesting one now. "Three bits apart" predicts a fifth
+     * field at offset 17, and offset 2 is empty below the first one, so the
+     * frame plainly carries more than four things -- the frunk switch turned
+     * up in its back bytes in the same visit. Predicting is not measuring. */
+    static const int32_t UNMEASURED[] = {4, 5, 99, -1, -2147483647 - 1, 2147483647};
     for(unsigned i = 0; i < sizeof(UNMEASURED) / sizeof(UNMEASURED[0]); i++) {
         memset(&f, 0xAA, sizeof(f));
         CHECK(fsd_emit_build(FSD_ACT_DOOR_OPEN, UNMEASURED[i], &t, 1100u, &f)
                   == FSD_EMIT_NO_ENCODING,
               "door selector %ld must be refused as NO_ENCODING", (long)UNMEASURED[i]);
-        uint8_t bits = 0xAAu;
-        CHECK(!fsd_emit_door_bits(UNMEASURED[i], &bits),
-              "door selector %ld has no measured bits", (long)UNMEASURED[i]);
-        CHECK(bits == 0xAAu, "a refused lookup must not touch the output");
+        uint8_t bits = 0xAAu, byte_ix = 0xAAu;
+        CHECK(!fsd_emit_door_field(UNMEASURED[i], &byte_ix, &bits),
+              "door selector %ld has no measured field", (long)UNMEASURED[i]);
+        CHECK(bits == 0xAAu && byte_ix == 0xAAu,
+              "a refused lookup must not touch either output");
     }
 
     /* 🔴 And the refusal must be NO_ENCODING even when the template is fine,
      * because "we do not know which bits" is a gap, not something waiting for
      * a fresher frame. A STALE_TEMPLATE here would read as "try again". */
     FsdEmitTemplate stale = door_template(1000u);
-    CHECK(fsd_emit_build(FSD_ACT_DOOR_OPEN, 2, &stale, 1000u + 9999u, &f)
+    CHECK(fsd_emit_build(FSD_ACT_DOOR_OPEN, FSD_EMIT_DOOR_COUNT, &stale, 1000u + 9999u, &f)
               == FSD_EMIT_NO_ENCODING,
           "an unmeasured door refuses before staleness is even considered");
 
-    /* The two we did measure still work, and say so. */
-    uint8_t bits = 0;
-    CHECK(fsd_emit_door_bits(FSD_EMIT_DOOR_RIGHT_FRONT, &bits) && bits == 0x03u,
-          "right front = 0x03, got 0x%02X", bits);
-    CHECK(fsd_emit_door_bits(FSD_EMIT_DOOR_RIGHT_REAR, &bits) && bits == 0xC0u,
-          "right rear = 0xC0, got 0x%02X", bits);
-    CHECK(!fsd_emit_door_bits(FSD_EMIT_DOOR_RIGHT_FRONT, NULL), "NULL out refused");
+    /* All four we did measure work, and say WHICH BYTE as well as which bits.
+     * 🔴 The byte is asserted because it is the half that used to be a shared
+     * constant: a lookup that returned the right mask for the wrong byte would
+     * have passed every assertion this test made before today. */
+    uint8_t bits = 0, byte_ix = 0;
+    CHECK(fsd_emit_door_field(FSD_EMIT_DOOR_LEFT_FRONT, &byte_ix, &bits)
+              && byte_ix == 0u && bits == 0x60u,
+          "left front = byte 0 / 0x60, got byte %u / 0x%02X", byte_ix, bits);
+    CHECK(fsd_emit_door_field(FSD_EMIT_DOOR_RIGHT_FRONT, &byte_ix, &bits)
+              && byte_ix == 1u && bits == 0x03u,
+          "right front = byte 1 / 0x03, got byte %u / 0x%02X", byte_ix, bits);
+    CHECK(fsd_emit_door_field(FSD_EMIT_DOOR_LEFT_REAR, &byte_ix, &bits)
+              && byte_ix == 1u && bits == 0x18u,
+          "left rear = byte 1 / 0x18, got byte %u / 0x%02X", byte_ix, bits);
+    CHECK(fsd_emit_door_field(FSD_EMIT_DOOR_RIGHT_REAR, &byte_ix, &bits)
+              && byte_ix == 1u && bits == 0xC0u,
+          "right rear = byte 1 / 0xC0, got byte %u / 0x%02X", byte_ix, bits);
+    CHECK(!fsd_emit_door_field(FSD_EMIT_DOOR_RIGHT_FRONT, &byte_ix, NULL),
+          "NULL bits refused");
+    CHECK(!fsd_emit_door_field(FSD_EMIT_DOOR_RIGHT_FRONT, NULL, &bits),
+          "NULL byte refused");
 
     /* Names, so a log says which door instead of a number -- and says "?" for
      * one we cannot name rather than picking the nearest. */
@@ -1013,10 +1143,29 @@ static void test_unmeasured_doors_are_refused(void) {
           "name: %s", fsd_emit_door_str(FSD_EMIT_DOOR_RIGHT_FRONT));
     CHECK(strcmp(fsd_emit_door_str(FSD_EMIT_DOOR_RIGHT_REAR), "right rear") == 0,
           "name: %s", fsd_emit_door_str(FSD_EMIT_DOOR_RIGHT_REAR));
-    CHECK(strcmp(fsd_emit_door_str(2), "?") == 0,
-          "an unmeasured door must not borrow a name: %s", fsd_emit_door_str(2));
-    CHECK(FSD_EMIT_DOOR_COUNT == 2,
-          "two doors measured, not four; got %d", (int)FSD_EMIT_DOOR_COUNT);
+    CHECK(strcmp(fsd_emit_door_str(FSD_EMIT_DOOR_LEFT_FRONT), "left front") == 0,
+          "name: %s", fsd_emit_door_str(FSD_EMIT_DOOR_LEFT_FRONT));
+    CHECK(strcmp(fsd_emit_door_str(FSD_EMIT_DOOR_LEFT_REAR), "left rear") == 0,
+          "name: %s", fsd_emit_door_str(FSD_EMIT_DOOR_LEFT_REAR));
+    /* 🔴 Four names, and they must all be different. Two doors sharing a name
+     * is how a log tells somebody the wrong door opened. */
+    static const int32_t NAMED[] = {FSD_EMIT_DOOR_RIGHT_FRONT, FSD_EMIT_DOOR_RIGHT_REAR,
+                                    FSD_EMIT_DOOR_LEFT_FRONT, FSD_EMIT_DOOR_LEFT_REAR};
+    for(unsigned a = 0; a < 4; a++)
+        for(unsigned b = a + 1; b < 4; b++)
+            CHECK(strcmp(fsd_emit_door_str(NAMED[a]), fsd_emit_door_str(NAMED[b])) != 0,
+                  "doors %ld and %ld share the name %s", (long)NAMED[a], (long)NAMED[b],
+                  fsd_emit_door_str(NAMED[a]));
+
+    /* ⚠️ THIS ASSERTION USED TO SAY TWO, and it was right when it was written.
+     * Kept rather than deleted, and made stronger: the count is pinned AND the
+     * selector past the end still refuses a name, which is the half that
+     * actually protects anything. */
+    CHECK(strcmp(fsd_emit_door_str(FSD_EMIT_DOOR_COUNT), "?") == 0,
+          "an unmeasured door must not borrow a name: %s",
+          fsd_emit_door_str(FSD_EMIT_DOOR_COUNT));
+    CHECK(FSD_EMIT_DOOR_COUNT == 4,
+          "four doors measured on the 5th visit; got %d", (int)FSD_EMIT_DOOR_COUNT);
 }
 
 /* An action that takes no argument ignores it. A stored rule may carry
@@ -1055,6 +1204,8 @@ int main(void) {
     test_door_and_light_do_not_cross();
     test_door_refusals();
     test_door_selector_matches_tsl_byte_for_byte();
+    test_left_doors_match_tsl_byte_for_byte();
+    test_four_doors_are_three_bits_apart();
     test_unmeasured_doors_are_refused();
     test_argless_actions_ignore_the_argument();
     test_door_row_is_open_but_narrow();
