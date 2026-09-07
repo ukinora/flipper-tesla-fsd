@@ -84,7 +84,15 @@ static FsdBodyInputs good_inputs(uint32_t now_ms) {
  * list of struct assignments. */
 static void break_speed(FsdBodyInputs* in) { in->speed_kph = 5.0f; }
 static void break_gear(FsdBodyInputs* in) { in->gear = FSD_GEAR_D; }
-static void break_driver(FsdBodyInputs* in) { in->driver_present = false; }
+/* 🔴 BOTH, because either one on its own now passes. driverPresent is
+ * dead through an entire drive on this car (0/100 frames in 돌아오는길)
+ * and the belt is the signal that carries a drive; the gate takes either.
+ * An empty seat is the absence of both, and a helper that clears one is a
+ * helper that stopped testing anything. */
+static void break_driver(FsdBodyInputs* in) {
+    in->driver_present = false;
+    in->belt_latched = false;
+}
 static void break_session(FsdBodyInputs* in) { in->drive_session = false; }
 static void break_enable(FsdBodyInputs* in) { in->action_enabled[FSD_ACT_DOOR_OPEN] = false; }
 static void break_mode(FsdBodyInputs* in) { in->op_mode = OpMode_ListenOnly; }
@@ -600,9 +608,41 @@ static void test_turn_signal_row_is_open_where_it_has_to_be(void) {
     in.speed_kph = 88.0f;
     CHECK(fsd_body_allows(&in, FSD_ACT_TURN_SIGNAL, now) == FSD_BODY_OK,
           "88 km/h is fine — that is the point of the row");
+    /* 🟢 THE FIX THIS ROW EXISTS FOR. driverPresent reads 0 for an entire
+     * drive on this car, so gating on it alone made a turn signal that may act
+     * at 88 km/h unable to fire at any speed at all. The belt carries the
+     * drive instead, and it is latched here. */
+    in.driver_present = false;
+    CHECK(fsd_body_allows(&in, FSD_ACT_TURN_SIGNAL, now) == FSD_BODY_OK,
+          "the belt alone is enough — this is the whole point");
+
+    /* And the other way round: parked, belt off, someone working the car. */
+    in.driver_present = true;
+    in.belt_latched = false;
+    CHECK(fsd_body_allows(&in, FSD_ACT_TURN_SIGNAL, now) == FSD_BODY_OK,
+          "driverPresent alone is enough too");
+
+    /* Neither is an empty seat. */
     in.driver_present = false;
     CHECK(fsd_body_allows(&in, FSD_ACT_TURN_SIGNAL, now) == FSD_BODY_NO_DRIVER_PRESENT,
           "an empty seat is not");
+
+    /* The frame that carries both went quiet: a different fault, and it has
+     * its own name so a log does not send someone looking for a passenger. */
+    in.driver_present = true;
+    in.belt_latched = true;
+    in.driver_ms = now - FSD_BODY_FRESH_MS;
+    in.belt_ms = now - FSD_BODY_FRESH_MS;
+    CHECK(fsd_body_allows(&in, FSD_ACT_TURN_SIGNAL, now) == FSD_BODY_DRIVER_STALE,
+          "both stale is stale, not empty");
+
+    /* Never heard it at all is a third thing. */
+    in = good_inputs(now);
+    in.action_enabled[FSD_ACT_TURN_SIGNAL] = true;
+    in.driver_seen = false;
+    in.belt_seen = false;
+    CHECK(fsd_body_allows(&in, FSD_ACT_TURN_SIGNAL, now) == FSD_BODY_NO_DRIVER,
+          "no signal at all is neither of the above");
 }
 
 static void test_caps_table_is_well_formed(void) {
@@ -702,7 +742,8 @@ static void test_gear_gates_when_armed(void) {
     CHECK(fsd_body_caps_verdict(&c, &in, FSD_ACT_GEAR_D, now) == FSD_BODY_MOVING,
           "moving refuses");
 
-    in = good_inputs(now); in.driver_present = false;
+    /* Both, for the reason break_driver() gives: either alone passes. */
+    in = good_inputs(now); in.driver_present = false; in.belt_latched = false;
     CHECK(fsd_body_caps_verdict(&c, &in, FSD_ACT_GEAR_D, now) == FSD_BODY_NO_DRIVER_PRESENT,
           "empty seat refuses");
 }
