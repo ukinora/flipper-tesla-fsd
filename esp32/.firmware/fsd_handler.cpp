@@ -815,13 +815,12 @@ void fsd_handle_bms_hv(FSDState *state, const CanFrame *frame) {
 }
 
 void fsd_handle_bms_soc(FSDState *state, const CanFrame *frame) {
-    if (frame->dlc < 3) return;
-    // Car display SOC: SOCUI292, bit10|10, LSB = 0.1 %.
-    uint16_t raw =
-        (((uint16_t)frame->data[SIG_BMS_SOC_UI_HIGH_BYTE] << (8 - SIG_BMS_SOC_UI_LOW_SHIFT)) |
-         (frame->data[SIG_BMS_SOC_UI_LOW_BYTE] >> SIG_BMS_SOC_UI_LOW_SHIFT)) &
-        SIG_BMS_SOC_UI_MASK;
-    state->soc_percent = raw * SIG_BMS_SOC_SCALE;
+    // 🔴 One decoder, shared with the Flipper path — see fsd_decode_bms_soc()
+    // in fsd_types.h. These two files read DIFFERENT FIELDS of this frame
+    // until 2026-09-07, and neither had a test.
+    float pct = 0.0f;
+    if (!fsd_decode_bms_soc(frame->data, frame->dlc, &pct)) return;
+    state->soc_percent = pct;
     state->bms_seen = true;
 }
 

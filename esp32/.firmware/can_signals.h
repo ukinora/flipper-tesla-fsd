@@ -112,11 +112,11 @@
 #define SIG_BMS_CURRENT_L_BYTE              2
 #define SIG_BMS_CURRENT_H_BYTE              3
 #define SIG_BMS_CURRENT_SCALE             0.1f
-#define SIG_BMS_SOC_UI_LOW_BYTE             1
-#define SIG_BMS_SOC_UI_HIGH_BYTE            2
-#define SIG_BMS_SOC_UI_LOW_SHIFT            2
-#define SIG_BMS_SOC_UI_MASK              0x03FFu
-#define SIG_BMS_SOC_SCALE                 0.1f
+/* 🔴 The SOC bit layout is NOT here any more. It lived here and in
+ * fsd_logic/fsd_handler.c at the same time, describing two different fields of
+ * 0x292, and this table was the copy that only one platform read. One
+ * decoder now: fsd_decode_bms_soc() in fsd_logic/fsd_types.h, with the
+ * measurements it rests on and the question it does not answer. */
 #define SIG_BMS_TEMP_MIN_BYTE               4
 #define SIG_BMS_TEMP_MAX_BYTE               5
 #define SIG_BMS_TEMP_OFFSET                40
