@@ -143,11 +143,20 @@ static void test_observe(void) {
     CHECK(memcmp(f.tpl[FSD_ACT_TURN_SIGNAL].data, LSTALK, 4) == 0, "bytes kept verbatim");
     CHECK(f.tpl[FSD_ACT_TURN_SIGNAL].seen_ms == 1000u, "stamped");
 
-    /* 🔴 An action with no wire row gets no template, and that is what makes
-     * the ordering inside fsd_pipe_run() necessary rather than tidy. */
-    CHECK(!f.tpl[FSD_ACT_MAP_LIGHT].seen, "map light: no row, so no template");
-    CHECK(fsd_pipe_observe(&f, 0x273u, BODY273, 8u, 1000u) == 0u,
-          "0x273 arrives and is stored nowhere");
+    /* ⚠️ THIS USED TO ASSERT THAT 0x273 WAS STORED NOWHERE, because the map
+     * light had no wire row. The owner opened all five rows on 2026-09-07, so
+     * the claim moves to the one that still holds and is stronger:
+     *
+     * 🔴 ONE FRAME, TWO ACTIONS, TWO SEPARATE COPIES. The map light and the
+     * mirror both write 0x273, which is exactly why the template store is
+     * keyed by ACTION and not by CAN id -- a single slot would make "which of
+     * these two did I mean" a question this layer cannot answer. */
+    CHECK(fsd_pipe_observe(&f, 0x273u, BODY273, 8u, 1000u) == 2u,
+          "0x273 feeds the map light AND the mirror");
+    CHECK(f.tpl[FSD_ACT_MAP_LIGHT].seen && f.tpl[FSD_ACT_MIRROR].seen,
+          "both actions have a template");
+    CHECK(f.tpl[FSD_ACT_MAP_LIGHT].data != f.tpl[FSD_ACT_MIRROR].data,
+          "and they are two objects, not one shared one");
 
     /* Wrong length is not the frame the row describes. */
     fsd_pipe_init(&f);
@@ -252,12 +261,23 @@ static void test_each_layer_refuses(void) {
     CHECK(out[0].reason == (uint8_t)FSD_BODY_NOT_ENABLED, "named NOT_ENABLED, got %s",
           fsd_pipe_reason_str(out[0].stage, out[0].reason));
 
-    /* 2. The chokepoint's missing row, for an action whose emitter works.
+    /* 2. The map light, all the way through.
      *
-     * 🔴 THIS IS THE ORDERING TEST. The map light's frame arrives every 500 ms
-     * and fsd_emit_build() can produce it, so if the row check came after the
-     * emitter this would say NO_TEMPLATE and send a person to look at the bus.
-     * It has to say NO_ROW, which is a decision nobody has made. */
+     * ⚠️ THIS WAS THE ORDERING TEST -- "a missing row must say NO_ROW, not
+     * NO_TEMPLATE, or it sends a person to look at their wiring". The map
+     * light was the action it used, because its frame arrives every 500 ms and
+     * its emitter works, so only the ORDER could produce the right answer.
+     *
+     * 🔴 THAT CLAIM IS NO LONGER TESTABLE WITH ANY ACTION. The owner opened
+     * every row on 2026-09-07, so FSD_WIRE_NO_ROW is unreachable from here: an
+     * action inside the enum has a row, and one outside it is refused by the
+     * axis first (FSD_BODY_UNKNOWN_ACTION). The branch stays as what greets
+     * the next action added to the enum, and test_body_wire.c pins the
+     * predicate at the unit level.
+     *
+     * So the case is kept and turned into what it CAN prove, which is more
+     * than it proved before: the whole chain produces the exact bytes TSL put
+     * on the wire. */
     one_rule(&rules, FSD_SIG_MAP_SW_FL, FSD_TRIG_PRESS, 0, FSD_ACT_MAP_LIGHT, 0);
     fsd_pipe_init(&f);
     (void)fsd_pipe_observe(&f, 0x273u, BODY273, 8u, now);
@@ -265,10 +285,16 @@ static void test_each_layer_refuses(void) {
     const FsdTriggerEvent map_ev = ev_of(FSD_SIG_MAP_SW_FL, FSD_TRIG_PRESS, 0, now);
     dirty(out);
     CHECK(fsd_pipe_run(&rules, &map_ev, &in, &f, now, out, FSD_PIPE_MAX_OUT) == 1u, "one result");
-    CHECK(out[0].stage == FSD_PIPE_BLOCKED_WIRE, "map light stops at the chokepoint, got %s",
-          fsd_pipe_stage_str(out[0].stage));
-    CHECK(out[0].reason == (uint8_t)FSD_WIRE_NO_ROW, "named NO_ROW, got %s",
+    CHECK(out[0].stage == FSD_PIPE_OK, "map light goes through, got %s (%s)",
+          fsd_pipe_stage_str(out[0].stage),
           fsd_pipe_reason_str(out[0].stage, out[0].reason));
+    CHECK(out[0].frame.id == 0x273u, "on 0x273, got 0x%X", (unsigned)out[0].frame.id);
+    /* One bit from the car's own frame, and it is byte 7 bit 3. */
+    for(unsigned i = 0; i < 8u; i++) {
+        const uint8_t want = (i == 7u) ? (uint8_t)(BODY273[i] | 0x08u) : BODY273[i];
+        CHECK(out[0].frame.data[i] == want, "byte %u: expected 0x%02X, got 0x%02X", i, want,
+              out[0].frame.data[i]);
+    }
 
     /* 3. The emitter, with no template. A bus we are not hearing is a bus we
      * do not write to. */
@@ -518,25 +544,49 @@ static void test_release_faces_the_chokepoint(void) {
     fsd_pipe_release(FSD_ACT_LIGHT_HORN, 0, 3u, &f, 1000u, &r);
     CHECK(r.stage != FSD_PIPE_OK, "no template -> no release");
 
-    /* 🔴 THE ONE THAT MATTERS TODAY. The light horn has no wire row, so the
-     * PRESS is refused with NO_ROW -- and the release has to be refused the
-     * same way, for the same reason, or the two halves of one gesture answer
-     * to different rules. */
+    /* ⚠️ THIS USED TO ASSERT NO_ROW FOR BOTH HALVES, because the light horn
+     * had no wire row. The owner opened it on 2026-09-07, so the case becomes
+     * the one it was written to make possible: the release REACHES the
+     * chokepoint and passes it, and what it passes with is the claim.
+     *
+     * 🟢 A RELEASE DIFFERS FROM THE CAR'S OWN FRAME IN NOTHING. So it clears
+     * a bit-granularity check by construction -- and asserting the FRAME here,
+     * not just the verdict, is what makes that structural rather than lucky. */
     (void)fsd_pipe_observe(&f, 0x3C2u, HORN_MUX0, 8u, 1000u);
     memset(&r, 0, sizeof(r));
     fsd_pipe_release(FSD_ACT_LIGHT_HORN, 0, 3u, &f, 1050u, &r);
-    CHECK(r.stage == FSD_PIPE_BLOCKED_WIRE,
-          "release stops at the chokepoint, got %s", fsd_pipe_stage_str(r.stage));
-    CHECK(r.reason == (uint8_t)FSD_WIRE_NO_ROW,
-          "and the reason is the missing row, got %s",
-          fsd_body_wire_verdict_str((FsdBodyWireVerdict)r.reason));
+    CHECK(r.stage == FSD_PIPE_OK, "the release goes through, got %s (%s)",
+          fsd_pipe_stage_str(r.stage), fsd_pipe_reason_str(r.stage, r.reason));
+    CHECK(r.frame.id == 0x3C2u && r.frame.dlc == 8u, "on 0x3C2, 8 bytes");
+    CHECK(memcmp(r.frame.data, HORN_MUX0, 8) == 0,
+          "and it is the car's frame, byte for byte");
 
+    /* 🔴 The PRESS still faces the axis, and a zeroed input is not a car we
+     * are hearing. The release skipping the axis must not mean the gesture
+     * skips it -- the first half is where that question is asked. */
     FsdPipeResult press;
     memset(&press, 0, sizeof(press));
     FsdBodyInputs in;
     memset(&in, 0, sizeof(in));
     fsd_pipe_one(FSD_ACT_LIGHT_HORN, 0, 3u, &in, &f, 1050u, &press);
-    CHECK(press.stage != FSD_PIPE_OK, "and the press is refused too");
+    CHECK(press.stage == FSD_PIPE_BLOCKED_BODY,
+          "the press is refused by the axis, got %s", fsd_pipe_stage_str(press.stage));
+
+    /* 🔴 AND THE RELEASE REFUSES WHEN THE CAR SAYS SOMEBODY IS ON THE HORN.
+     * This is the one case where a release must NOT go out, and now that the
+     * row exists it is reachable end to end rather than only in the emitter. */
+    uint8_t held[8];
+    memcpy(held, HORN_MUX0, 8);
+    held[0] = 0x04u;
+    FsdPipeFrames hf;
+    fsd_pipe_init(&hf);
+    (void)fsd_pipe_observe(&hf, 0x3C2u, held, 8u, 1000u);
+    memset(&r, 0, sizeof(r));
+    fsd_pipe_release(FSD_ACT_LIGHT_HORN, 0, 3u, &hf, 1050u, &r);
+    CHECK(r.stage == FSD_PIPE_BLOCKED_EMIT, "a held horn refuses the release, got %s",
+          fsd_pipe_stage_str(r.stage));
+    CHECK(r.reason == (uint8_t)FSD_EMIT_FIELD_IN_USE, "named FIELD_IN_USE, got %s",
+          fsd_emit_result_str((FsdEmitResult)r.reason));
 
     /* An action with no release at all must say so rather than build one. */
     memset(&r, 0, sizeof(r));
