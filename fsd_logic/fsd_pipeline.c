@@ -63,6 +63,57 @@ static void ref_from_template(const FsdEmitTemplate* t, FsdBodyRef* ref) {
     memcpy(ref->data, t->data, n);
 }
 
+/* Build this action's frame and put it through the chokepoint.
+ *
+ * 🔴 SHARED BY THE PRESS AND THE RELEASE ON PURPOSE, AND A MUTATION IS WHY.
+ * These two steps were written out twice -- once in fsd_pipe_one(), once in
+ * fsd_pipe_release() -- and deleting the chokepoint call from the release copy
+ * broke NOTHING. It could not: the only action with a release has no wire row,
+ * so fsd_pipe_release() returns before reaching it, and no test can stand
+ * there. A second copy of a safety check that nothing can exercise is a second
+ * copy that quietly stops matching the first.
+ *
+ * With one copy, the press tests hold it up for both. Delete the call and
+ * every 0x249 end-to-end assertion turns red.
+ *
+ * `release` picks which half of a gesture to build. Everything after that is
+ * identical, which is the claim being made. */
+static void emit_and_check(FsdBodyAction action, int32_t arg, const FsdPipeFrames* f,
+                           uint32_t now_ms, bool release, FsdPipeResult* r) {
+    const FsdEmitTemplate* tpl = &f->tpl[(uint8_t)action];
+
+    /* The emitter. Copies the car's frame and sets (or clears) this action's
+     * bits. Refuses without a template, which is why fsd_pipe_observe() has to
+     * be fed: we do not invent frames the car has never sent. */
+    FsdEmitFrame frame;
+    const FsdEmitResult er = release
+                                 ? fsd_emit_build_release(action, arg, tpl, now_ms, &frame)
+                                 : fsd_emit_build(action, arg, tpl, now_ms, &frame);
+    if(er != FSD_EMIT_OK) {
+        r->stage = FSD_PIPE_BLOCKED_EMIT;
+        r->reason = (uint8_t)er;
+        return;
+    }
+
+    /* The chokepoint, at bit granularity. The emitter is trusted to build the
+     * frame; it is NOT trusted to have changed only what it was allowed to.
+     * Same reference the emitter copied from, so the only thing being compared
+     * is what the emitter did to it. */
+    FsdBodyRef ref;
+    ref_from_template(tpl, &ref);
+    const FsdBodyWireVerdict wv =
+        fsd_body_wire_check(action, frame.id, frame.data, frame.dlc, &ref, now_ms);
+    if(wv != FSD_WIRE_OK) {
+        r->stage = FSD_PIPE_BLOCKED_WIRE;
+        r->reason = (uint8_t)wv;
+        return;
+    }
+
+    r->stage = FSD_PIPE_OK;
+    r->reason = 0u;
+    r->frame = frame;
+}
+
 uint8_t fsd_pipe_run(const FsdRules* rules, const FsdTriggerEvent* ev, const FsdBodyInputs* in,
                      const FsdPipeFrames* f, uint32_t now_ms, FsdPipeResult* out,
                      uint8_t max_out) {
@@ -141,36 +192,9 @@ void fsd_pipe_one(FsdBodyAction action, int32_t arg, uint8_t rule_index,
             return;
         }
 
-        const FsdEmitTemplate* tpl = &f->tpl[(uint8_t)dec[i].action];
-
-        /* 3. The emitter. Copies the car's frame and sets this action's bits.
-         * Refuses without a template, which is why fsd_pipe_observe() has to
-         * be fed: we do not invent frames the car has never sent. */
-        FsdEmitFrame frame;
-        const FsdEmitResult er = fsd_emit_build(dec[i].action, dec[i].arg, tpl, now_ms, &frame);
-        if(er != FSD_EMIT_OK) {
-            r->stage = FSD_PIPE_BLOCKED_EMIT;
-            r->reason = (uint8_t)er;
-            return;
-        }
-
-        /* 4. The chokepoint, at bit granularity. The emitter is trusted to
-         * build the frame; it is NOT trusted to have changed only what it was
-         * allowed to. Same reference the emitter copied from, so the only
-         * thing being compared is what the emitter did to it. */
-        FsdBodyRef ref;
-        ref_from_template(tpl, &ref);
-        const FsdBodyWireVerdict wv =
-            fsd_body_wire_check(dec[i].action, frame.id, frame.data, frame.dlc, &ref, now_ms);
-        if(wv != FSD_WIRE_OK) {
-            r->stage = FSD_PIPE_BLOCKED_WIRE;
-            r->reason = (uint8_t)wv;
-            return;
-        }
-
-        r->stage = FSD_PIPE_OK;
-        r->reason = 0u;
-        r->frame = frame;
+        /* 3 and 4. The emitter, then the chokepoint -- the same two steps a
+         * release takes, in the same order, from the same function. */
+        emit_and_check(dec[i].action, dec[i].arg, f, now_ms, false, r);
     }
 }
 
@@ -209,35 +233,12 @@ void fsd_pipe_release(FsdBodyAction action, int32_t arg, uint8_t rule_index,
         return;
     }
 
-    const FsdEmitTemplate* tpl = &f->tpl[(uint8_t)action];
-
-    /* 3. The emitter, which also refuses when the car says the control is in
-     * use -- see fsd_emit_build_release(). */
-    FsdEmitFrame frame;
-    const FsdEmitResult er = fsd_emit_build_release(action, arg, tpl, now_ms, &frame);
-    if(er != FSD_EMIT_OK) {
-        out->stage = FSD_PIPE_BLOCKED_EMIT;
-        out->reason = (uint8_t)er;
-        return;
-    }
-
-    /* 4. The chokepoint. A release differs from the reference in nothing, so
-     * this passes by construction -- which is the point: it costs nothing and
-     * it means the day this frame changes shape, the same table that guards
-     * every other write guards this one too. */
-    FsdBodyRef ref;
-    ref_from_template(tpl, &ref);
-    const FsdBodyWireVerdict wv =
-        fsd_body_wire_check(action, frame.id, frame.data, frame.dlc, &ref, now_ms);
-    if(wv != FSD_WIRE_OK) {
-        out->stage = FSD_PIPE_BLOCKED_WIRE;
-        out->reason = (uint8_t)wv;
-        return;
-    }
-
-    out->stage = FSD_PIPE_OK;
-    out->reason = 0u;
-    out->frame = frame;
+    /* 3 and 4. The emitter -- which also refuses when the car says the control
+     * is in use -- then the chokepoint. The SAME function the press goes
+     * through, which is the whole point: a release differs from the reference
+     * in nothing, so the chokepoint passes by construction, and sharing the
+     * call is what stops the two from drifting the day either changes. */
+    emit_and_check(action, arg, f, now_ms, true, out);
 }
 
 const char* fsd_pipe_stage_str(FsdPipeStage s) {
