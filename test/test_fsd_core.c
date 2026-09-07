@@ -3967,9 +3967,111 @@ static void test_ui_warning_seen_needs_blinker_bytes(void) {
           "capture 3F5#08000B38800E2000 -> right lit (l=%u r=%u)", l, r);
 }
 
+/* ── 0x292 BMS state of charge ────────────────────────────────────────────────
+ *
+ * 🔴 THERE WERE TWO DECODERS FOR THIS AND THEY READ DIFFERENT FIELDS.
+ * fsd_logic/fsd_handler.c took bits 0|10; esp32/.firmware/fsd_handler.cpp took
+ * 10|10. Only the ESP32 one runs on our board, the host tests do not compile
+ * that file at all, and NEITHER copy had a single test. The divergence came in
+ * from upstream -- c9ff3be created both at 0|10, 109f3b2 moved one of them --
+ * and nothing here could have noticed.
+ *
+ * These frames are real, one per visit, copied out of the captures:
+ *
+ *                                     0|10   10|10   20|10   30|10
+ *   4B4B7DF6D6010000  2026-09-03      84.3    85.0    87.1    85.9
+ *   D416EBEEB801E600  2026-09-05 4th  72.4    70.9    75.0    73.9
+ *   79723929A2010000  2026-09-05 drv  63.3    60.4    65.9    64.8
+ *   C46526DE75010000  2026-09-06 5th  45.2    40.9    48.2    47.1
+ *
+ * Across all 31 captures that carry 0x292, 0|10 <= 30|10 <= 20|10 holds with
+ * no exception -- which is what min <= average <= max looks like -- and 10|10
+ * is a fourth value that sits BELOW all three once the pack drops under ~80%,
+ * by a gap that widens as it falls (-0.7 at 84%, +4.3 at 45%). That is the
+ * shape of a displayed value carrying a fixed reserve of energy.
+ *
+ * ⚠️ THAT IS EVIDENCE, NOT PROOF. No capture we hold records what the car's
+ * own screen said at the same moment, and the owner reports the app reading
+ * 2-3 % HIGH. Nothing in this frame explains that -- 10|10 is the LOWEST of
+ * the four -- so the open question is not "which field" and these tests do
+ * not pretend to settle it. What they settle is that there is now ONE answer
+ * instead of two, and that changing it is loud.
+ */
+static const struct {
+    uint8_t data[8];
+    float ui;    /* 10|10, what both platforms now report */
+    float other; /* 0|10, what the Flipper copy used to report */
+    const char* where;
+} SOC[] = {
+    {{0x4B, 0x4B, 0x7D, 0xF6, 0xD6, 0x01, 0x00, 0x00}, 85.0f, 84.3f, "2026-09-03 유휴"},
+    {{0xD4, 0x16, 0xEB, 0xEE, 0xB8, 0x01, 0xE6, 0x00}, 70.9f, 72.4f, "2026-09-05 4th"},
+    {{0x79, 0x72, 0x39, 0x29, 0xA2, 0x01, 0x00, 0x00}, 60.4f, 63.3f, "2026-09-05 drive"},
+    {{0xC4, 0x65, 0x26, 0xDE, 0x75, 0x01, 0x00, 0x00}, 40.9f, 45.2f, "2026-09-06 5th"},
+};
+
+static void test_bms_soc_has_one_decoder(void) {
+    for (unsigned i = 0; i < sizeof(SOC) / sizeof(SOC[0]); i++) {
+        float pct = -1.0f;
+        CHECK(fsd_decode_bms_soc(SOC[i].data, 8, &pct), "%s decodes", SOC[i].where);
+        CHECK(pct > SOC[i].ui - 0.05f && pct < SOC[i].ui + 0.05f,
+              "%s: expected %.1f %%, got %.1f", SOC[i].where, SOC[i].ui, pct);
+
+        /* 🔴 THE ASSERTION THAT WOULD HAVE CAUGHT THE SPLIT. The handler and
+         * the shared decoder must agree -- so a second implementation growing
+         * back inside fsd_handle_bms_soc() turns this red instead of shipping
+         * a different number to the Flipper than to the car. */
+        FSDState st;
+        memset(&st, 0, sizeof(st));
+        CANFRAME f;
+        zero(&f);
+        f.data_lenght = 8;
+        memcpy(f.buffer, SOC[i].data, 8);
+        fsd_handle_bms_soc(&st, &f);
+        CHECK(st.soc_percent > pct - 0.001f && st.soc_percent < pct + 0.001f,
+              "%s: handler says %.1f, decoder says %.1f -- they must be one",
+              SOC[i].where, st.soc_percent, pct);
+        CHECK(st.bms_seen, "%s: and the frame is marked seen", SOC[i].where);
+
+        /* 🔴 AND IT IS NOT THE OTHER FIELD. Stated with both numbers so that
+         * moving back to 0|10 -- which is what one of the two copies did for
+         * the whole life of this project -- fails loudly rather than shifting
+         * the dashboard by a couple of percent that nobody can attribute. */
+        CHECK(pct < SOC[i].other - 0.5f || pct > SOC[i].other + 0.5f,
+              "%s: 10|10 is %.1f and 0|10 is %.1f -- reading the wrong one is "
+              "a plausible number, which is why it needs saying",
+              SOC[i].where, pct, SOC[i].other);
+    }
+}
+
+static void test_bms_soc_refuses_rather_than_guesses(void) {
+    float pct = 12.5f;
+    CHECK(!fsd_decode_bms_soc(NULL, 8, &pct), "NULL data refused");
+    CHECK(!fsd_decode_bms_soc(SOC[0].data, 8, NULL), "NULL out refused");
+    /* The field ends in byte 2, so two bytes are not enough to hold it. A
+     * short frame must not be read as a low battery. */
+    CHECK(!fsd_decode_bms_soc(SOC[0].data, 2, &pct), "dlc 2 refused");
+    CHECK(pct > 12.4f && pct < 12.6f, "a refusal leaves the caller's value alone");
+    CHECK(fsd_decode_bms_soc(SOC[0].data, 3, &pct), "dlc 3 is enough");
+
+    /* And the handler refuses the same way rather than writing a zero. */
+    FSDState st;
+    memset(&st, 0, sizeof(st));
+    st.soc_percent = 77.0f;
+    CANFRAME f;
+    zero(&f);
+    f.data_lenght = 2;
+    memcpy(f.buffer, SOC[0].data, 2);
+    fsd_handle_bms_soc(&st, &f);
+    CHECK(st.soc_percent > 76.9f && st.soc_percent < 77.1f,
+          "a short frame must not move the reading, got %.1f", st.soc_percent);
+    CHECK(!st.bms_seen, "nor mark the BMS seen");
+}
+
 int main(void) {
     printf("test_fsd_core: Tesla FSD protocol core host tests\n");
     test_set_bit();
+    test_bms_soc_has_one_decoder();
+    test_bms_soc_refuses_rather_than_guesses();
     test_read_mux();
     test_is_selected();
     test_detect_hw();

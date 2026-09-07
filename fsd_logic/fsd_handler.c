@@ -87,9 +87,12 @@ void fsd_handle_bms_hv(FSDState* state, const CANFRAME* frame) {
 }
 
 void fsd_handle_bms_soc(FSDState* state, const CANFRAME* frame) {
-    if(frame->data_lenght < 2) return;
-    uint16_t raw = ((uint16_t)(frame->buffer[1] & 0x03) << 8) | frame->buffer[0];
-    state->soc_percent = raw * 0.1f;
+    /* 🔴 THIS USED TO READ BITS 0|10 while the ESP32 copy read 10|10, so the
+     * Flipper and the car's dashboard reported different numbers off the same
+     * frame. One decoder now, in fsd_types.h, where a host test reaches it. */
+    float pct = 0.0f;
+    if(!fsd_decode_bms_soc(frame->buffer, (uint8_t)frame->data_lenght, &pct)) return;
+    state->soc_percent = pct;
     state->bms_seen = true;
 }
 

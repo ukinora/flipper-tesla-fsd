@@ -388,6 +388,76 @@ static inline bool fsd_decode_das_blind_spot_b0(const uint8_t* d, uint8_t dlc,
 #define FSD_TPMS_FIRST_BYTE    2u   /* d[2]..d[5] = four wheels */
 #define FSD_TPMS_MIN_DLC       6u
 
+/* 0x292 BMS_socStatus -- the number the dashboard shows as the battery.
+ *
+ * 🔴 THIS EXISTED TWICE AND THE TWO COPIES READ DIFFERENT FIELDS.
+ *
+ *      fsd_logic/fsd_handler.c          bits  0|10
+ *      esp32/.firmware/fsd_handler.cpp  bits 10|10   <- what our board runs
+ *
+ * Upstream c9ff3be created both at 0|10 and 109f3b2 moved one of them; nothing
+ * on this side could have noticed, because the host tests do not compile the
+ * ESP32 file and NEITHER copy had a test. Same shape as the OTA gate
+ * (fsd_ota.c), and the fourth time this repo has paid for two statements of
+ * one fact with no check between them.
+ *
+ * WHAT THE FRAME CARRIES. Four 10-bit fields, 0.1 % each. Measured across the
+ * 31 captures that hold 0x292, one row per visit:
+ *
+ *                      0|10   10|10   20|10   30|10
+ *      2026-09-03      84.3    85.0    87.1    85.9
+ *      2026-09-05      63.3    60.4    65.9    64.8
+ *      2026-09-06      58.7    55.3    61.3    60.2
+ *      2026-09-06      45.2    40.9    48.2    47.1
+ *
+ * 0|10 <= 30|10 <= 20|10 in all 31, with no exception, which is what
+ * min <= average <= max looks like. 10|10 is a fourth value that drops BELOW
+ * all three once the pack falls under about 80 %, by a gap that widens on the
+ * way down (-0.7 at 84 %, +4.3 at 45 %) -- the shape of a displayed value
+ * carrying a fixed reserve of energy it will not let you use.
+ *
+ * WHY 10|10 WINS THE MERGE, AND IT IS NOT BECAUSE WE KNOW IT IS RIGHT:
+ * it is what the board runs today, and on 2026-09-07 the owner reported the
+ * app reading 2-3 % HIGH against the car's own screen. Changing the number
+ * while that is being diagnosed would destroy the one measurement that can
+ * settle it. Merging must not move the value.
+ *
+ * 🔴 AND THE OPEN QUESTION IS NOT "WHICH OF THE FOUR". 10|10 is the LOWEST of
+ * them below 80 %, so no other field in this frame reads HIGHER-by-less --
+ * every alternative makes the app read lower still. Whatever explains the
+ * owner's 2-3 is somewhere else: 0x352 BMS_energyStatus is on this bus and is
+ * multiplexed (byte 0 cycles 0,1,2), and a Tesla's screen percentage is widely
+ * reported to be an ENERGY RATIO rather than any raw SOC field.
+ *
+ * WHAT SETTLES IT is one paired reading -- the car's screen and the app at the
+ * same moment -- plus an UNFILTERED capture. 0x292 is not in the 28-id
+ * blackbox filter, so a normal capture does not contain it; verified against
+ * the 2026-09-07 first-write captures, which have neither 0x292 nor 0x352.
+ *
+ * ⚠️ There is still no freshness signal for this value anywhere on the wire.
+ * bms_seen never leaves the module, so a reading that stopped updating looks
+ * exactly like one that did not -- and a frozen value during a drive reads
+ * high by a growing margin, which is the shape of the report. Fixing that
+ * moves the State frame to v8 and needs the app and the board updated
+ * together, so it is not folded into this merge. */
+#define FSD_BMS_SOC_BIT     10u    /* little-endian bit offset */
+#define FSD_BMS_SOC_LEN     10u
+#define FSD_BMS_SOC_MASK    0x03FFu
+#define FSD_BMS_SOC_MIN_DLC 3u     /* the field ends in byte 2 */
+#define FSD_BMS_SOC_STEP    0.1f
+
+/* Percent into *out. False -- and *out untouched -- for a frame too short to
+ * hold the field, so a truncated frame is never read as a flat battery. */
+static inline bool fsd_decode_bms_soc(const uint8_t* d, uint8_t dlc, float* out) {
+    if(!d || !out || dlc < FSD_BMS_SOC_MIN_DLC) return false;
+    const unsigned lo = FSD_BMS_SOC_BIT / 8u;   /* byte 1, bits 2..7 */
+    const unsigned sh = FSD_BMS_SOC_BIT % 8u;   /* 2 */
+    const uint16_t raw =
+        (uint16_t)((((uint16_t)d[lo + 1u] << (8u - sh)) | (d[lo] >> sh)) & FSD_BMS_SOC_MASK);
+    *out = (float)raw * FSD_BMS_SOC_STEP;
+    return true;
+}
+
 /* out4[0..3] = d[2..5], in that order and no other. out4[0] is the
  * DRIVER'S wheel -- front left on this LHD car -- pinned on 2026-09-06
  * by letting air out of that one tyre and watching exactly that byte
