@@ -109,6 +109,13 @@ typedef enum {
      * change it either -- unlike the seats, where left and right are two
      * different people. */
     FSD_ACT_TURN_SIGNAL,    // 0x249 byte2 stalk replay -- measured 2026-09-05
+    /* Fold and unfold are the ARGUMENT, for the third time and the same
+     * reason: which way the mirrors go does not change what the action can
+     * cost. 🔴 Shares 0x273 with the map light and writes a different byte --
+     * the first pair of actions in this enum to share a frame and both have an
+     * emitter, which is why fsd_pipe_observe() keys its templates by ACTION
+     * and not by CAN id. */
+    FSD_ACT_MIRROR,         // 0x273 byte3 (1 fold, 2 unfold) -- measured 2026-09-06
     FSD_ACT_COUNT,
 } FsdBodyAction;
 

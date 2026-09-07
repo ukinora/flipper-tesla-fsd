@@ -231,6 +231,64 @@ const char* fsd_emit_door_str(int32_t door);
 #define FSD_EMIT_MAP_LIGHT_MASK  0x08u   /* bit 3 of byte 7 = bit 59 */
 #define FSD_EMIT_MAP_LIGHT_DLC   8u
 
+/* THE MIRROR COMMAND. Measured 2026-09-06, fifth visit.
+ *
+ *      (5.743) 273#81E110000B023001     <- the car
+ *      (5.744) 273#81E110010B023001     <- TSL, +1 ms, byte3 = 1, FOLD
+ *      (8.743) 273#81E110000B023001     <- the car
+ *      (8.744) 273#81E110020B023001     <- TSL, +1 ms, byte3 = 2, UNFOLD
+ *
+ * 20 car frames in that capture, byte identical, 500 ms apart; exactly two are
+ * not, and each is one byte from the frame before it.
+ *
+ * 🔴 THE 3rd VISIT COULD NOT TELL COMMAND FROM STATE HERE. The mirrors moved
+ * 302 ms BEFORE the value appeared, which is what a status broadcast looks
+ * like, and 차량-캡처-2026-09-05-4차.md wrote it down as unresolved rather than
+ * guessing. The 5th visit settled it: the car never sends a non-zero byte 3,
+ * and both values arrive 1 ms behind a car frame -- where every other TSL
+ * injection on this bus lives.
+ *
+ * 🟢 SAME FRAME AS THE MAP LIGHT, DIFFERENT BYTE. First pair of actions in the
+ * enum that share an id and both have an emitter. That is why the template
+ * store is keyed by ACTION rather than by CAN id, and why a host test asserts
+ * the two cannot reach each other's bits.
+ *
+ * 🔴 AND IT IS A VALUE, NOT A BITMASK -- the difference that made the shared
+ * build path stop using |=. 1 and 2 are two states of one small field, so
+ * OR-ing 2 onto a template that already reads 1 produces 3: a value nobody has
+ * seen, asserted on a frame that also carries the locks, the wipers and the
+ * horn. Every frame we hold has byte 3 at 0, so OR and write agree on all the
+ * evidence there is -- which is exactly why the code has to be right about it
+ * rather than lucky. */
+#define FSD_EMIT_MIRROR_ID       0x273u
+#define FSD_EMIT_MIRROR_BYTE     3u
+#define FSD_EMIT_MIRROR_MASK     0x03u
+#define FSD_EMIT_MIRROR_DLC      8u
+
+/** Which way. ⚠️ The raw byte-3 values are deliberately NOT the enum values,
+ *  the same rule as the turn signal: a rule's stored arg has to keep meaning
+ *  the same thing if the field encoding is ever re-read.
+ *
+ *  🔴 THERE IS NO "STOP". 0 is the value the car broadcasts at rest, not a
+ *  third command -- ceasing to send is what stopping means here, the same as
+ *  the map light. A selector that wrote 0 would be claiming the car's own
+ *  resting value as an instruction. */
+typedef enum {
+    FSD_EMIT_MIRROR_FOLD = 0,
+    FSD_EMIT_MIRROR_UNFOLD = 1,
+    FSD_EMIT_MIRROR_COUNT,
+} FsdEmitMirror;
+
+#define FSD_EMIT_MIRROR_FOLD_BITS   0x01u
+#define FSD_EMIT_MIRROR_UNFOLD_BITS 0x02u
+
+/** byte3 field value for a mirror selector. False — *bits_out untouched — for
+ *  a selector this car has never been measured to accept. */
+bool fsd_emit_mirror_bits(int32_t mirror, uint8_t* bits_out);
+
+/** Name for logs and the serial console. Never returns NULL. */
+const char* fsd_emit_mirror_str(int32_t mirror);
+
 /* THE TURN SIGNAL COMMAND. Measured 2026-09-05, fourth visit.
  *
  * 🔴 IT IS NOT 0x3E9, AND THAT PREDICTION WAS WRITTEN DOWN BEFORE THE

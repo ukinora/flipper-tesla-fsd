@@ -249,6 +249,46 @@ static const FsdBodyCaps FSD_BODY_CAPS[] = {
             .min_interval_ms = 50u,
             .max_hold_ms = 1000u,
         },
+
+    /* Mirrors. Measured 2026-09-06: 0x273 byte 3, 1 folds and 2 unfolds, each
+     * injected one millisecond behind a car frame that never carries either.
+     *
+     * 🔴 THE CONDITION THIS TABLE ASKS FOR IS MET, AND NOTHING ELSE IS.
+     * The command frame is measured rather than inferred, so the row is
+     * armable -- and every motion gate stays SHUT, which is the opposite of
+     * what the hazard and indicator rows did. Those two opened the gates
+     * because a hazard light that may only act in park cannot do what hazard
+     * lights are for. The mirrors are the other case entirely:
+     *
+     *   🔴 FOLDING A MIRROR AT SPEED REMOVES REARWARD VISION. That is not a
+     *   louder version of the right answer, it is a worse car. Every use an
+     *   owner would actually write -- fold on walking away, unfold on getting
+     *   in -- happens in park, so the restriction costs nothing it protects.
+     *
+     * may_act_without_driver stays false for the same sentence as the door and
+     * the hazards: a body write on an unattended car needs its own reason
+     * written here rather than an inherited one. ⚠️ That does refuse "fold the
+     * mirrors after I walk away", which is the most natural rule for this
+     * action. Refused on purpose and written down rather than quietly granted;
+     * if the owner wants it, this is the line that has to change and this is
+     * the paragraph that says what changing it gives up.
+     *
+     * min_interval_ms is 3000. This one drives a MOTOR that takes a second or
+     * two to finish, and a rule re-firing inside that is a rule fighting the
+     * hardware. Same order as the door, for a different reason: there it
+     * bounds how bad a stuck rule gets, here it also bounds how often we ask a
+     * mechanism to reverse mid-travel.
+     *
+     * max_hold_ms is 1000. TSL sends ONE frame per direction -- 20 idle frames
+     * either side of it in the capture -- so there is nothing to hold, and the
+     * bound is here so a re-sender written later cannot quietly become one. */
+    [FSD_ACT_MIRROR] =
+        {
+            .action = FSD_ACT_MIRROR,
+            .armable_at_runtime = true,
+            .min_interval_ms = 3000u,
+            .max_hold_ms = 1000u,
+        },
 };
 
 _Static_assert(sizeof(FSD_BODY_CAPS) / sizeof(FSD_BODY_CAPS[0]) == FSD_ACT_COUNT,
@@ -419,6 +459,7 @@ const char* fsd_body_action_str(FsdBodyAction a) {
      * two-word name makes the arrow the only thing separating them. Same rule
      * as the J6 button names. */
     case FSD_ACT_TURN_SIGNAL: return "turn-signal";
+    case FSD_ACT_MIRROR: return "mirror";
     case FSD_ACT_COUNT: break;
     }
     return "?";
