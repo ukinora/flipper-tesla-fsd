@@ -11,34 +11,82 @@
  * 2026-09-05 afternoon one for the stalk (차량-캡처-2026-09-05-4차.md §5-②).
  * Nothing here is inferred from a DBC, and nothing here has been transmitted.
  *
- * 🔴 THREE ACTIONS ARE ABSENT, AND THE REASON CHANGED (2026-09-06).
- * This comment used to read "MAP_LIGHT and DOOR_OPEN are absent because their
- * command frame is not known -- 0x273 bit 59 correlates with both, which means
- * it selects neither." Both halves of that stopped being true: the 2nd visit
- * separated bit 59 (it is the map light, and not the door), the 3rd found the
- * door on 0x1F9, and the hazards arrived on 0x3E9 with no row written at all.
+ * 🔴🔴 EVERY ACTION HAS A ROW NOW (owner decision, 2026-09-07).
  *
- * So MAP_LIGHT, DOOR_OPEN and HAZARDS are absent for a DIFFERENT reason now:
- * their frames are known, and nobody has decided to open them here. An action
- * with no row is refused by this file no matter what the capability table says,
- * and refused is the correct state until the first write test in the car.
+ * Five were deliberately absent until today -- MAP_LIGHT, DOOR_OPEN, HAZARDS,
+ * MIRROR, LIGHT_HORN. Their frames were all measured; what was missing was a
+ * decision, and this file said so: "refused is the correct state until the
+ * first write test in the car."
  *
- * ⚠️ THIS USED TO SAY "it costs nothing today -- no caller reaches this file",
- * and that stopped being true on 2026-09-07: fsd_pipe_one() calls
- * fsd_body_wire() on every rule firing and fsd_body_wire_check() on every frame
- * it builds, and fsd_pipe_release() does the same for the second half of a
- * gesture. The rows below are load-bearing now rather than pending -- which is
- * exactly what keeps the five that can open a door, hold a lamp on or sound the
- * horn shut until somebody writes a row on purpose.
+ * ⚠️ THAT CONDITION IS NOT MET, AND THE OWNER OPENED THEM KNOWING IT.
+ * The first car write went out on 2026-09-07 with Err=0 and the car did not
+ * act; the fix (four frames instead of one) is verified on the bench and the
+ * retest has not happened. That, and the door's residual risk below, were put
+ * to the owner in those words and the answer was to open all five. Written
+ * down because a row that opens on someone's say-so should record whose and on
+ * what information -- the same discipline the capability table keeps.
  *
- * 🔴 TURN_SIGNAL HAS A ROW AND THEY DO NOT, WHICH IS NOT AN OVERSIGHT. Its
- * row is where the owner's 2026-09-06 decision lives. The other three write to
- * frames that carry nothing but their own command, so "may we send this frame"
- * and "may we do this thing" are the same question there, already answered by
- * fsd_body.c. 0x249 is not like that: it carries the high beams and the washer
- * beside the indicator, so the permission had to be narrowed to bits before it
- * could be granted at all. The row IS the narrowing. */
+ * 🔴 WHAT NO MASK HERE CAN COVER. DOOR_OPEN swings a door OUTWARD and nothing
+ * on this bus reports what is beside the car -- not a person, not a wall, not
+ * a passing cyclist. These rows decide which BITS may move; they cannot decide
+ * whether it is safe to move them. What stands in front of that is
+ * fsd_body.c's row (standstill, park, driver present, drive session), the
+ * session-only arm flag, and the owner having written the rule on purpose.
+ *
+ * 🔴 AND OPENING ALL OF THEM COST A LAYER. FSD_WIRE_NO_ROW is now unreachable
+ * from fsd_pipe_one() and fsd_pipe_release(): every action in the enum has a
+ * row, and an action OUTSIDE the enum is refused by the axis first
+ * (FSD_BODY_UNKNOWN_ACTION). The check stays, because it is what greets the
+ * NEXT action added to the enum -- but it is no longer a live gate, and a
+ * comment implying otherwise would be the kind of thing this file exists to
+ * prevent. test_body_wire.c pins it at the unit level instead.
+ *
+ * Every mask below is a bit TSL was OBSERVED changing. Nothing is inferred
+ * from a DBC, and nothing here has been transmitted by us. */
 static const FsdBodyWire FSD_BODY_WIRES[] = {
+    [FSD_ACT_MAP_LIGHT] =
+        {
+            .action = FSD_ACT_MAP_LIGHT,
+            /* 273#81E1000044023001 -> ..09. One bit, byte 7 bit 3 = bit 59.
+             * Measured 2026-09-03; six capture files agree, and the frame
+             * carries no counter and no checksum, so everything else is the
+             * car's own bytes unchanged.
+             *
+             * 🔴 SHARES 0x273 WITH THE MIRROR. Two actions, one id, and the
+             * masks must not touch -- test_masks_never_overlap() asserts that
+             * rather than leaving it to review. */
+            .can_id = 0x273u,
+            .dlc = 8u,
+            .mux_byte = FSD_BODY_WIRE_NO_MUX,
+            .payload = {[7] = 0x08u},
+        },
+
+    [FSD_ACT_DOOR_OPEN] =
+        {
+            .action = FSD_ACT_DOOR_OPEN,
+            /* 1F9#0000000000000000 -> one 3-bit field set to 3. Measured over
+             * two visits, one door at a time:
+             *
+             *      left  front   6000...   3 << 5    byte 0
+             *      right front   0003...   3 << 8    byte 1
+             *      left  rear    0018...   3 << 11   byte 1
+             *      right rear    00C0...   3 << 14   byte 1
+             *
+             * The mask is the UNION of all four, because WHICH door is the
+             * emitter's ARGUMENT and not a separate permission -- the same
+             * reasoning the seat row gives for covering both directions. A bug
+             * that picks the wrong door is caught by fsd_emit_door_field(),
+             * which refuses any selector nobody measured; it is not this row's
+             * job and this row could not do it.
+             *
+             * 🔴 THE WIDEST-CONSEQUENCE ROW IN THIS TABLE, and this mask is
+             * the narrowest part of what guards it. See the header. */
+            .can_id = 0x1F9u,
+            .dlc = 8u,
+            .mux_byte = FSD_BODY_WIRE_NO_MUX,
+            .payload = {[0] = 0x60u, [1] = 0xDBu},
+        },
+
     [FSD_ACT_CAMERA] =
         {
             .action = FSD_ACT_CAMERA,
@@ -116,6 +164,76 @@ static const FsdBodyWire FSD_BODY_WIRES[] = {
             .dlc = 3u,
             .mux_byte = FSD_BODY_WIRE_NO_MUX,
             .payload = {[0] = 0xFFu, [1] = 0xFFu},
+        },
+
+    [FSD_ACT_HAZARDS] =
+        {
+            .action = FSD_ACT_HAZARDS,
+            /* 3E9#F18802000000C027 -> F58802000000D03B. Measured 2026-09-05,
+             * four consecutive injections while the car was in reverse.
+             *
+             * Same shape as 0x249 below: byte 6's HIGH nibble is a counter
+             * that must be the car's NEXT value and byte 7 is a check over a
+             * frame that just changed, so neither can be compared against the
+             * reference and both are payload. byte 6's low nibble is NOT ours
+             * -- it was 0 in everything we hold and the emitter copies it
+             * through -- so the mask is 0xF0 rather than 0xFF.
+             *
+             * That leaves bytes 1..5 frozen plus the one bit that is the
+             * command. Written out because a mask this wide should be visible
+             * rather than glossed. */
+            .can_id = 0x3E9u,
+            .dlc = 8u,
+            .mux_byte = FSD_BODY_WIRE_NO_MUX,
+            .payload = {[0] = 0x04u, [6] = 0xF0u, [7] = 0xFFu},
+        },
+
+    [FSD_ACT_MIRROR] =
+        {
+            .action = FSD_ACT_MIRROR,
+            /* 273#81E110000B023001 -> ..01.. (fold) and ..02.. (unfold).
+             * Measured 2026-09-06; the car never sends a non-zero byte 3, and
+             * both values arrive 1 ms behind a car frame.
+             *
+             * Two bits, because the field holds 1 or 2 and which one is the
+             * emitter's argument. 🔴 Disjoint from the map light's byte 7 by
+             * construction, and asserted by test_masks_never_overlap(). */
+            .can_id = 0x273u,
+            .dlc = 8u,
+            .mux_byte = FSD_BODY_WIRE_NO_MUX,
+            .payload = {[3] = 0x03u},
+        },
+
+    [FSD_ACT_LIGHT_HORN] =
+        {
+            .action = FSD_ACT_LIGHT_HORN,
+            /* 3C2#0055555500006985 -> 04....., and back 12 ms later.
+             * Measured 2026-09-06. One bit, byte 0 bit 2.
+             *
+             * 🔴 THE MULTIPLEX MASK IS 0x03 HERE AND 0xFF ON ITS NEIGHBOURS,
+             * AND THAT IS NOT A TYPO. 0x3C2 selects its variant with byte 0
+             * bits [1:0] -- and byte 0 also carries this action's own bit. With
+             * a 0xFF mask our outgoing frame (byte 0 = 0x04) would fail this
+             * row's own multiplex check, and the feature could not work at all.
+             * The signal table hit the same wall and narrowed to 0x03 for the
+             * same reason (fsd_signal.c, MUX_MASK).
+             *
+             * ⚠️ The camera, seat and scroll rows still use 0xFF. That fails
+             * CLOSED -- they refuse a reference frame in which somebody is
+             * pressing the horn or the hazard button -- so it is a missed write
+             * rather than a wrong one, and narrowing them is a change with its
+             * own measurement to do. Left alone deliberately.
+             *
+             * 🟢 The release frame differs from the reference in NOTHING, so it
+             * passes this row by construction. That is what routing it through
+             * here buys: nothing today, and everything the day the frame
+             * changes shape. */
+            .can_id = 0x3C2u,
+            .dlc = 8u,
+            .mux_byte = 0u,
+            .mux_mask = 0x03u,
+            .mux_value = 0x00u,
+            .payload = {[0] = 0x04u},
         },
 
     [FSD_ACT_TURN_SIGNAL] =

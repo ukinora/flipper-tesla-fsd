@@ -93,17 +93,32 @@ static void test_masks_never_overlap(void) {
     }
 }
 
-// An action whose command frame we never measured has no row, and no row means
-// refused — independently of fsd_body_allows().
+// No row means refused, independently of fsd_body_allows().
+//
+// ⚠️ THIS TEST USED TO NAME THE MAP LIGHT AND THE DOOR as the actions without
+// rows. The owner opened every row on 2026-09-07, so nothing inside the enum
+// is missing one any more — and the property still has to be pinned, because
+// it is what greets the NEXT action somebody adds.
+//
+// 🔴 IT IS ALSO NO LONGER REACHABLE FROM THE PIPELINE. fsd_pipe_one() and
+// fsd_pipe_release() ask fsd_body_wire() before the emitter, but an action
+// inside the enum now has a row and one outside it is refused earlier by the
+// axis (FSD_BODY_UNKNOWN_ACTION). So this file is the only place the branch
+// gets exercised at all, which is exactly why it is exercised here.
 static void test_unknown_frames_have_no_row(void) {
-    CHECK(fsd_body_wire(FSD_ACT_MAP_LIGHT) == NULL,
-          "map light: 0x273 bit 59 correlates with two actions, so it selects neither");
-    CHECK(fsd_body_wire(FSD_ACT_DOOR_OPEN) == NULL, "door: command frame unknown");
     CHECK(fsd_body_wire(FSD_ACT_COUNT) == NULL, "out of range is NULL");
+    CHECK(fsd_body_wire((FsdBodyAction)(FSD_ACT_COUNT + 7)) == NULL, "and well past it");
 
     FsdBodyRef r = ref_of(MUX00, 8, 1000);
-    CHECK(fsd_body_wire_check(FSD_ACT_MAP_LIGHT, 0x3C2u, MUX00, 8, &r, 1000) == FSD_WIRE_NO_ROW,
+    CHECK(fsd_body_wire_check(FSD_ACT_COUNT, 0x3C2u, MUX00, 8, &r, 1000) == FSD_WIRE_NO_ROW,
           "no row refuses even a frame that is byte-identical to the car's");
+
+    // 🔴 And every action inside the enum HAS one, said as a claim rather than
+    // left as a consequence: an action added without a row must show up here,
+    // not as a surprise at the chokepoint.
+    for (int a = 0; a < FSD_ACT_COUNT; a++)
+        CHECK(fsd_body_wire((FsdBodyAction)a) != NULL, "%s has a row",
+              fsd_body_action_str((FsdBodyAction)a));
 
     // The passenger seat HAS a row but an empty payload: its frame is known,
     // its bits are not. It may change nothing.
@@ -389,6 +404,23 @@ static void test_masks_are_pinned(void) {
         // for the same reason as the gear; the third is the indicator field and
         // NOTHING ELSE in that byte, because the rest is leftStalkReserved1.
         {FSD_ACT_TURN_SIGNAL, 0x249u, 4, {0xFF, 0xFF, 0x0E, 0, 0, 0, 0, 0}},
+
+        // ── opened 2026-09-07 on the owner's decision ────────────────────────
+        // map light: byte7 bit3 = bit 59. No counter, no checksum in 0x273.
+        {FSD_ACT_MAP_LIGHT, 0x273u, 8, {0, 0, 0, 0, 0, 0, 0, 0x08}},
+        // 🔴 door: the UNION of four 3-bit fields, value 3, at offsets
+        // 5/8/11/14. Which door is the emitter's argument, not a permission —
+        // so 0x60 in byte 0 and 0x03|0x18|0xC0 in byte 1.
+        {FSD_ACT_DOOR_OPEN, 0x1F9u, 8, {0x60, 0xDB, 0, 0, 0, 0, 0, 0}},
+        // hazards: the command bit, the counter's HIGH nibble, and the check.
+        // byte6's low nibble is not ours — it was 0 in everything we hold.
+        {FSD_ACT_HAZARDS, 0x3E9u, 8, {0x04, 0, 0, 0, 0, 0, 0xF0, 0xFF}},
+        // mirror: byte3, two bits. 🔴 Shares 0x273 with the map light and must
+        // not touch it — test_masks_never_overlap() is what says so.
+        {FSD_ACT_MIRROR, 0x273u, 8, {0, 0, 0, 0x03, 0, 0, 0, 0}},
+        // light horn: byte0 bit2. The multiplex selector is bits [1:0] of the
+        // SAME byte, which is why this row's mux mask is 0x03 and not 0xFF.
+        {FSD_ACT_LIGHT_HORN, 0x3C2u, 8, {0x04, 0, 0, 0, 0, 0, 0, 0}},
     };
     const int n = (int)(sizeof(expect) / sizeof(expect[0]));
 
