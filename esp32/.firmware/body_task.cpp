@@ -87,7 +87,7 @@ bool body_task_observe(uint32_t id, const uint8_t* data, uint8_t dlc, uint32_t n
 /* Snapshot everything the permission predicate needs. Written out rather than
  * hidden in a helper so the full set of inputs is visible in one place — the
  * same reason FsdSpInputs and FsdBodyInputs exist at all. */
-static FsdBodyInputs body_inputs(uint32_t now_ms) {
+FsdBodyInputs body_task_permission_inputs(uint32_t now_ms) {
     FsdBodyInputs in;
     memset(&in, 0, sizeof(in));
 
@@ -149,7 +149,7 @@ void body_task_tick(uint32_t now_ms) {
     if((uint32_t)(now_ms - g_last_tick_ms) < BODY_TICK_MS) return;
     g_last_tick_ms = now_ms;
 
-    const FsdBodyInputs in = body_inputs(now_ms);
+    const FsdBodyInputs in = body_task_permission_inputs(now_ms);
 
     /* The action is COUNTED, not performed. fsd_t1_tick() has already put the
      * refusal reason where the log can read it. */
