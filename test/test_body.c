@@ -543,11 +543,13 @@ static void test_rewrite_opened_nothing(void) {
           "TURN_SIGNAL joined 2026-09-06, on a measured frame plus owner consent");
     CHECK(fsd_body_allows(&in, FSD_ACT_MIRROR, now) == FSD_BODY_OK,
           "MIRROR joined 2026-09-07, on the 5th visit's two injected frames");
+    CHECK(fsd_body_allows(&in, FSD_ACT_LIGHT_HORN, now) == FSD_BODY_OK,
+          "LIGHT_HORN joined the same day, on the same visit's press/release");
 
     for (int a = 0; a < FSD_ACT_COUNT; a++) {
         if (a == FSD_ACT_MAP_LIGHT || a == FSD_ACT_DOOR_OPEN ||
             a == FSD_ACT_HAZARDS || a == FSD_ACT_TURN_SIGNAL ||
-            a == FSD_ACT_MIRROR) continue;
+            a == FSD_ACT_MIRROR || a == FSD_ACT_LIGHT_HORN) continue;
         CHECK(fsd_body_allows(&in, (FsdBodyAction)a, now) == FSD_BODY_NOT_ARMABLE,
               "%s must refuse on its row even with every input satisfied",
               fsd_body_action_str((FsdBodyAction)a));
@@ -560,7 +562,7 @@ static void test_rewrite_opened_nothing(void) {
     int armable = 0;
     for (int a = 0; a < FSD_ACT_COUNT; a++)
         if (fsd_body_caps((FsdBodyAction)a)->armable_at_runtime) armable++;
-    CHECK(armable == 5, "exactly five armable rows, found %d", armable);
+    CHECK(armable == 6, "exactly six armable rows, found %d", armable);
 }
 
 /* 🔴 THE TURN SIGNAL IS THE SECOND ROW TO OPEN THE MOTION GATES, and unlike
@@ -850,6 +852,24 @@ static void test_owner_decisions_are_in_the_table(void) {
           (unsigned)m->min_interval_ms);
     CHECK(m->max_hold_ms > 0u,
           "TSL sends one frame per direction, so a re-sender is a bug to bound");
+
+    /* 🔴 THE LIGHT HORN SITS ON THE HAZARDS' SIDE OF THAT LINE, and the two
+     * rows above are why it gets said out loud. A horn is for warning somebody
+     * who is about to hit you, which happens at speed; a horn that may only
+     * sound in park cannot do that, exactly as with the hazards.
+     *
+     * What bounds it instead is the interval. The failure this row has to
+     * survive is not one beep in the wrong place, it is a stuck rule beeping
+     * over and over -- so it is rate-limited an order above the map light. */
+    const FsdBodyCaps* lh = fsd_body_caps(FSD_ACT_LIGHT_HORN);
+    CHECK(lh->armable_at_runtime, "light horn armable: frame measured 2026-09-06");
+    CHECK(lh->may_act_while_moving, "a horn that only sounds in park is not a horn");
+    CHECK(lh->may_act_out_of_park, "and out of park, for the same reason");
+    CHECK(!lh->may_act_without_driver && !lh->may_act_without_drive_session,
+          "but not on an unattended car -- same sentence as every other row");
+    CHECK(lh->min_interval_ms >= 1000u,
+          "a stuck rule must not be able to hold on the horn, got %u",
+          (unsigned)lh->min_interval_ms);
 }
 
 /* 🔴 THE BENCH REFUSED WHILE ALL OF THE ABOVE WAS GREEN.

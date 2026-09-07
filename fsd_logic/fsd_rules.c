@@ -59,6 +59,20 @@ static const FsdRuleAffects FSD_AFFECTS[] = {
      * are deliberately not signals (they blink), so there is nothing else of
      * ours for this action to disturb. */
     {FSD_ACT_TURN_SIGNAL, 1, {FSD_SIG_TURN_STALK}},
+    /* 🔴 THE SECOND DIRECT LOOP, and the first one on a SWITCH.
+     *
+     * FSD_SIG_HORN_SW reads 0x3C2 mux 0 byte 0 bit 2 and
+     * fsd_emit_build(FSD_ACT_LIGHT_HORN) sets that bit. Same shape as the
+     * stalk: no body controller in between, our command is the observation one
+     * frame later, so "on horn pressed, beep" would re-fire on its own output.
+     *
+     * ⚠️ AND THIS ROW ALONE WAS NOT ENOUGH. fsd_trig_disturbed() used to drop
+     * every request about a SWITCH on the floor -- "we cannot press one" -- so
+     * the row would have been written, called, and ignored. That exemption
+     * learned a condition on the same day, and FsdSignalDef.we_can_drive is
+     * how it knows; a host test asserts that flag and this table name the same
+     * signals. */
+    {FSD_ACT_LIGHT_HORN, 1, {FSD_SIG_HORN_SW}},
 };
 
 uint8_t fsd_rule_affects(FsdBodyAction a, FsdSignal* out, uint8_t max_out) {

@@ -391,15 +391,33 @@ static void test_affects_is_honest(void) {
           "the camera disturbs nothing we watch");
     CHECK(fsd_rule_affects(FSD_ACT_SEAT_DRIVER, out, FSD_RULE_MAX_AFFECTS) == 0, "nor the seat");
 
-    // Every signal named as disturbed must actually be a state we watch — a
-    // switch cannot be disturbed by us, and fsd_trig_disturbed() ignores those,
-    // so naming one here would be a suppression that silently does nothing.
+    // Every signal named as disturbed must actually GO QUIET when we say so.
+    //
+    // ⚠️ THIS USED TO BE "must not be a switch", and the reason it gave was
+    // right at the time: fsd_trig_disturbed() ignored switches, so naming one
+    // here would be a suppression that silently did nothing. The light horn
+    // emitter made that false on 2026-09-07 -- it presses FSD_SIG_HORN_SW,
+    // which IS a switch -- so the shape of the claim had to move rather than
+    // the claim itself.
+    //
+    // 🟢 And it got stronger on the way. The old form checked a proxy (the
+    // kind); this one calls the function and asks whether the signal actually
+    // went quiet. A row naming a signal that fsd_trig_disturbed() drops on the
+    // floor is exactly what it was written to catch, and now it catches it
+    // however the dropping happens.
     for (int a = 0; a < FSD_ACT_COUNT; a++) {
         const uint8_t n = fsd_rule_affects((FsdBodyAction)a, out, FSD_RULE_MAX_AFFECTS);
         for (uint8_t k = 0; k < n; k++) {
             const FsdSignalDef *d = fsd_signal_def(out[k]);
-            CHECK(d && d->kind != FSD_SIGK_SWITCH,
-                  "action %d names %d, which is a switch and cannot be suppressed", a, out[k]);
+            CHECK(d != NULL, "action %d names signal %d, which has no row", a, out[k]);
+            if (!d) continue;
+
+            FsdTriggers t;
+            fsd_trig_init(&t);
+            fsd_trig_disturbed(&t, out[k], 1000);
+            CHECK(fsd_trig_is_quiet(&t, out[k], 1000),
+                  "action %d names %s, but disturbing it does nothing -- the "
+                  "rule would feed itself", a, d->name);
         }
     }
 
@@ -624,6 +642,36 @@ static void test_wire_null_args(void) {
     CHECK(!fsd_rule_unpack(b, NULL), "NULL output");
 }
 
+/* 🔴 THE FLAG AND THE TABLE ARE TWO STATEMENTS OF ONE FACT, so they are
+ * checked against each other rather than each being reviewed.
+ *
+ * FsdSignalDef.we_can_drive says "an emitter of ours writes this signal's
+ * bits"; FSD_AFFECTS says "after this action fires, go quiet on these
+ * signals". They have to name the same set. If the flag is set on a signal no
+ * action disturbs, that signal is being silenced for no reason; if an action
+ * disturbs a SWITCH whose flag is clear, fsd_trig_disturbed() drops the
+ * request on the floor and the rule feeds itself -- silently, which is how
+ * this class of bug has always arrived here. */
+static void test_we_can_drive_matches_the_affects_table(void) {
+    for (unsigned s = 0; s < FSD_SIG_COUNT; s++) {
+        const FsdSignalDef *d = fsd_signal_def((FsdSignal)s);
+        CHECK(d != NULL, "signal %u has a definition", s);
+        if (!d) continue;
+
+        bool named = false;
+        for (unsigned a = 0; a < FSD_ACT_COUNT; a++) {
+            FsdSignal aff[FSD_RULE_MAX_AFFECTS];
+            const uint8_t n =
+                fsd_rule_affects((FsdBodyAction)a, aff, FSD_RULE_MAX_AFFECTS);
+            for (uint8_t k = 0; k < n; k++)
+                if (aff[k] == (FsdSignal)s) named = true;
+        }
+        CHECK(d->we_can_drive == named,
+              "%s: we_can_drive=%d but the affects table says %d", d->name,
+              (int)d->we_can_drive, (int)named);
+    }
+}
+
 int main(void) {
     printf("test_rules\n");
     test_the_owners_two_examples();
@@ -634,6 +682,7 @@ int main(void) {
     test_stored_rules_are_revalidated();
     test_value_matching();
     test_affects_is_honest();
+    test_we_can_drive_matches_the_affects_table();
     test_bounds();
     test_wire_layout_is_nailed_down();
     test_wire_roundtrip();

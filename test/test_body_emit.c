@@ -394,7 +394,7 @@ static void test_refuses_the_wrong_frame(void) {
 /* ── the gap, stated ──────────────────────────────────────────────────────── */
 
 static void test_which_actions_have_an_encoding(void) {
-    printf("\n-- 다섯은 방출기가 있고 다섯은 없다 --\n");
+    printf("\n-- 여섯은 방출기가 있고 다섯은 없다 --\n");
 
     FsdEmitTemplate t = car_template(1000u);
     FsdEmitFrame f;
@@ -407,6 +407,8 @@ static void test_which_actions_have_an_encoding(void) {
           "turn signal: yes (measured 2026-09-05, 4th visit)");
     CHECK(fsd_emit_supported(FSD_ACT_MIRROR),
           "mirror: yes (measured 2026-09-06, 5th visit)");
+    CHECK(fsd_emit_supported(FSD_ACT_LIGHT_HORN),
+          "light horn: yes (measured 2026-09-06, 5th visit)");
 
     const FsdBodyAction rest[] = {
         FSD_ACT_CAMERA, FSD_ACT_SEAT_DRIVER,
@@ -416,11 +418,11 @@ static void test_which_actions_have_an_encoding(void) {
      * things: add an action to the enum, forget this line, and the loop below
      * still passes while testing one action less. Same shape as the CAN-id
      * check that only compared the intersection. Count it. */
-    CHECK(sizeof(rest) / sizeof(rest[0]) == (size_t)FSD_ACT_COUNT - 5u,
+    CHECK(sizeof(rest) / sizeof(rest[0]) == (size_t)FSD_ACT_COUNT - 6u,
           "the no-emitter list must name every action that is not one of the "
-          "five with emitters (%u named, %u expected)",
+          "six with emitters (%u named, %u expected)",
           (unsigned)(sizeof(rest) / sizeof(rest[0])),
-          (unsigned)FSD_ACT_COUNT - 5u);
+          (unsigned)FSD_ACT_COUNT - 6u);
     for(unsigned i = 0; i < sizeof(rest) / sizeof(rest[0]); i++) {
         CHECK(!fsd_emit_supported(rest[i]),
               "%s has no emitter", fsd_body_action_str(rest[i]));
@@ -529,7 +531,7 @@ static void test_no_action_borrows_another_encoding(void) {
         CHECK(memcmp(f.data, t.data, 8) != 0,
               "%s built a frame identical to the car's", fsd_body_action_str(act));
     }
-    CHECK(supported == 5u, "five actions have emitters, saw %u", supported);
+    CHECK(supported == 6u, "six actions have emitters, saw %u", supported);
     CHECK(on_273 == sizeof(ON_273) / sizeof(ON_273[0]),
           "every action named on 0x273 must be supported: %u of %u",
           on_273, (unsigned)(sizeof(ON_273) / sizeof(ON_273[0])));
@@ -1312,6 +1314,162 @@ static void test_unmeasured_mirror_directions_are_refused(void) {
               == FSD_EMIT_BAD_TEMPLATE, "mirror action + door template -> refuse");
 }
 
+/* ── the light horn ──────────────────────────────────────────────────────────
+ *
+ * 0x3C2 multiplex 0, byte 0 bit 2. Measured 2026-09-06, fifth visit, out of
+ * captures/2026-09-06-5차/가벼운경적1회. TSL calls it 轻鸣笛 -- the LIGHT horn,
+ * and the adjective turns out to be the whole command:
+ *
+ *      (5.969) 3C2#0055555500006985     <- the car, mux 0
+ *      (5.970) 3C2#0055555500006985     <- an exact echo, +1 ms
+ *      (5.985) 3C2#0455555500006985     <- PRESS,   byte 0 bit 2
+ *      (5.997) 3C2#0055555500006985     <- RELEASE, 12 ms later
+ *      (6.019) 3C2#2955000000000080     <- the car again, mux 1
+ *      (6.069) 3C2#0055555500006985     <- ... and mux 0, 100 ms after the last
+ *
+ * 🔴 THE RELEASE IS THE FEATURE, NOT A TIDY-UP. Send only the press and the
+ * button stays down until the car's own next mux-0 frame says otherwise -- up
+ * to about 100 ms rather than 12. Whether that is still a light beep or a real
+ * honk is not something any capture we hold answers, and the device that named
+ * the command "light" sends the release explicitly. So we do too.
+ *
+ * ⚠️ THE ECHO AT 5.970 IS NOT REPRODUCED. It is the only sub-2 ms pair in the
+ * whole ten-second capture, so it is almost certainly TSL rather than the bus,
+ * but it carries the car's own bytes unchanged -- it commands nothing. Copying
+ * a frame because we saw it, without being able to say what it does, is the
+ * opposite of what every other emitter in this file does.
+ *
+ * 🔴 AND THIS ONE IS TIMED, WHICH NONE OF THE OTHERS ARE. The map light, the
+ * mirror and the door ride 0-1 ms behind a car frame; the indicator burst
+ * counts the car's own 0x249 arrivals. Here TSL's press lands 16 ms after the
+ * car's frame and the release 12 ms after the press -- mux 0 only arrives
+ * every 100 ms, so reception cannot drive a 12 ms gap. */
+static const uint8_t CAR_HORN[8] = {0x00, 0x55, 0x55, 0x55, 0x00, 0x00, 0x69, 0x85};
+static const uint8_t TSL_HORN_PRESS[8] = {0x04, 0x55, 0x55, 0x55, 0x00, 0x00, 0x69, 0x85};
+/* mux 1 of the same id: the scroll wheel's variant, from the same capture.
+ * Entirely different bytes -- which is the point of refusing it. */
+static const uint8_t CAR_SCROLL[8] = {0x29, 0x55, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80};
+
+static FsdEmitTemplate horn_template(uint32_t at_ms) {
+    FsdEmitTemplate t;
+    memset(&t, 0, sizeof(t));
+    t.seen = true;
+    t.id = FSD_EMIT_HORN_ID;
+    t.dlc = 8;
+    memcpy(t.data, CAR_HORN, 8);
+    t.seen_ms = at_ms;
+    return t;
+}
+
+static void test_light_horn_matches_tsl_byte_for_byte(void) {
+    printf("\n-- light horn: the press == the frame TSL sent --\n");
+
+    FsdEmitTemplate t = horn_template(1000u);
+    FsdEmitFrame f;
+
+    CHECK(fsd_emit_build(FSD_ACT_LIGHT_HORN, 0, &t, 1100u, &f) == FSD_EMIT_OK,
+          "the press must build");
+    CHECK(f.id == FSD_EMIT_HORN_ID, "id 0x3C2, got 0x%X", (unsigned)f.id);
+    CHECK(f.dlc == 8, "dlc 8, got %u", f.dlc);
+    CHECK(memcmp(f.data, TSL_HORN_PRESS, 8) == 0,
+          "press bytes must equal TSL's: got %02X%02X%02X%02X%02X%02X%02X%02X",
+          f.data[0], f.data[1], f.data[2], f.data[3],
+          f.data[4], f.data[5], f.data[6], f.data[7]);
+
+    unsigned diff = 0;
+    for(unsigned i = 0; i < 8; i++) {
+        uint8_t x = (uint8_t)(f.data[i] ^ CAR_HORN[i]);
+        while(x) { diff += (x & 1u); x >>= 1; }
+    }
+    CHECK(diff == 1, "exactly one bit differs from the car's frame, got %u", diff);
+    CHECK((f.data[0] ^ CAR_HORN[0]) == 0x04u, "and it is byte0 bit2");
+
+    /* 🔴 The multiplex selector is in the same byte as the bit we set, so
+     * this is not pedantry: a press that moved bits 0-1 would arrive as the
+     * OTHER variant of the frame and mean something else entirely. */
+    CHECK((f.data[0] & 0x03u) == 0x00u,
+          "the press must still be multiplex 0, got byte0 0x%02X", f.data[0]);
+}
+
+static void test_light_horn_release_is_the_cars_own_frame(void) {
+    printf("\n-- light horn: the release, and the 12 ms that make it light --\n");
+
+    FsdEmitTemplate t = horn_template(1000u);
+    FsdEmitFrame f;
+
+    CHECK(fsd_emit_release_ms(FSD_ACT_LIGHT_HORN) == 12u,
+          "TSL released after 12 ms, got %u", fsd_emit_release_ms(FSD_ACT_LIGHT_HORN));
+
+    CHECK(fsd_emit_build_release(FSD_ACT_LIGHT_HORN, 0, &t, 1100u, &f) == FSD_EMIT_OK,
+          "the release must build");
+    CHECK(f.id == FSD_EMIT_HORN_ID, "id 0x3C2, got 0x%X", (unsigned)f.id);
+    /* 🟢 THE SMALLEST POSSIBLE CLAIM. The release carries the car's own bytes
+     * back, unchanged -- it says nothing about the car that the car did not
+     * just say itself. All it does is arrive sooner than the car's next one. */
+    CHECK(memcmp(f.data, CAR_HORN, 8) == 0,
+          "release must be the car's frame verbatim: got %02X%02X%02X%02X%02X%02X%02X%02X",
+          f.data[0], f.data[1], f.data[2], f.data[3],
+          f.data[4], f.data[5], f.data[6], f.data[7]);
+
+    /* And it clears the bit even when the template still has it -- which is
+     * what happens if our own press is the most recent frame we heard. */
+    t.data[0] = 0x04u;
+    CHECK(fsd_emit_build_release(FSD_ACT_LIGHT_HORN, 0, &t, 1100u, &f) == FSD_EMIT_OK,
+          "the release must build over a pressed template");
+    CHECK(f.data[0] == 0x00u, "and it must clear the bit, got 0x%02X", f.data[0]);
+
+    /* 🔴 EVERY OTHER ACTION HAS NO RELEASE, and asking for one must be a
+     * refusal rather than a frame. A gesture is the exception in this file,
+     * not the rule: the map light and the mirror stop by our ceasing to send,
+     * the indicator's cancel is its own command with its own argument. */
+    for(unsigned a = 0; a < FSD_ACT_COUNT; a++) {
+        FsdBodyAction act = (FsdBodyAction)a;
+        if(act == FSD_ACT_LIGHT_HORN) continue;
+        CHECK(fsd_emit_release_ms(act) == 0u,
+              "%s must have no release, got %u ms", fsd_body_action_str(act),
+              fsd_emit_release_ms(act));
+        FsdEmitTemplate any = horn_template(1000u);
+        CHECK(fsd_emit_build_release(act, 0, &any, 1100u, &f) == FSD_EMIT_NO_ENCODING,
+              "%s must refuse a release", fsd_body_action_str(act));
+    }
+}
+
+/* 🔴 THE REFUSAL THAT MATTERS MOST FOR THIS EMITTER.
+ *
+ * 0x3C2 is multiplexed and the two variants share nothing: mux 0 carries the
+ * windows, the belt, the horn and the hazard button; mux 1 carries the scroll
+ * wheel and the camera. Stamping our bit into the wrong one would put a frame
+ * on the bus that announces the multiplex of the scroll wheel while carrying a
+ * horn press -- and the four bytes around it would be the scroll frame's, not
+ * the pack's.
+ *
+ * The pipeline's template store already filters by multiplex, so in the
+ * assembled system this cannot arrive. It is checked HERE anyway, for the same
+ * reason the id is: this file is handed "the last frame we saw" and must not
+ * trust the plumbing that hands it over. PR #18 shipped a parser that read the
+ * right bits out of the wrong frame and failed closed by luck. */
+static void test_light_horn_refuses_the_other_multiplex(void) {
+    printf("\n-- light horn: the scroll multiplex is not a horn template --\n");
+
+    FsdEmitTemplate t = horn_template(1000u);
+    memcpy(t.data, CAR_SCROLL, 8); /* same id, other variant */
+    FsdEmitFrame f;
+
+    memset(&f, 0xAA, sizeof(f));
+    CHECK(fsd_emit_build(FSD_ACT_LIGHT_HORN, 0, &t, 1100u, &f) == FSD_EMIT_BAD_TEMPLATE,
+          "a mux 1 template must be refused");
+    CHECK(fsd_emit_build_release(FSD_ACT_LIGHT_HORN, 0, &t, 1100u, &f)
+              == FSD_EMIT_BAD_TEMPLATE,
+          "and so must a release built from one");
+
+    /* The mux is read from the byte we also write, so a template whose bit 2
+     * happens to be set is still mux 0 and still usable. */
+    t = horn_template(1000u);
+    t.data[0] = 0x04u;
+    CHECK(fsd_emit_build(FSD_ACT_LIGHT_HORN, 0, &t, 1100u, &f) == FSD_EMIT_OK,
+          "our own press is still a mux 0 frame");
+}
+
 /* 🔴 THE ONE THAT MATTERS MOST. All four doors are measured now; anything
  * outside them is still inference, and an inference here opens a door. */
 static void test_unmeasured_doors_are_refused(void) {
@@ -1445,6 +1603,9 @@ int main(void) {
     test_mirror_writes_a_field_not_a_bitmask();
     test_mirror_and_light_share_a_frame_and_not_a_byte();
     test_unmeasured_mirror_directions_are_refused();
+    test_light_horn_matches_tsl_byte_for_byte();
+    test_light_horn_release_is_the_cars_own_frame();
+    test_light_horn_refuses_the_other_multiplex();
     test_unmeasured_doors_are_refused();
     test_argless_actions_ignore_the_argument();
     test_door_row_is_open_but_narrow();

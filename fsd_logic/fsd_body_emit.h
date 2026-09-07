@@ -91,6 +91,11 @@ extern "C" {
  * template is an old statement about the mirrors and the horn. */
 #define FSD_EMIT_TEMPLATE_MAX_AGE_MS 1500u
 
+/* This action's frame carries no multiplex. Same sentinel convention as
+ * FSD_BODY_WIRE_NO_MUX and FSD_SIG_NO_MUX, and the same value, so the three
+ * cannot be read as meaning different things. */
+#define FSD_EMIT_NO_MUX 0xFFu
+
 /* 0x273 UI_vehicleControl -- measured, see the header comment. */
 /* THE DOOR-OPEN COMMAND. Measured 2026-09-05, third visit.
  *
@@ -289,6 +294,47 @@ bool fsd_emit_mirror_bits(int32_t mirror, uint8_t* bits_out);
 /** Name for logs and the serial console. Never returns NULL. */
 const char* fsd_emit_mirror_str(int32_t mirror);
 
+/* THE LIGHT HORN. Measured 2026-09-06, fifth visit. TSL calls it 轻鸣笛 --
+ * the LIGHT horn -- and the adjective turns out to be the command:
+ *
+ *      (5.969) 3C2#0055555500006985     <- the car, multiplex 0
+ *      (5.970) 3C2#0055555500006985     <- an exact echo, +1 ms
+ *      (5.985) 3C2#0455555500006985     <- PRESS,   byte 0 bit 2
+ *      (5.997) 3C2#0055555500006985     <- RELEASE, 12 ms later
+ *      (6.069) 3C2#0055555500006985     <- the car's own next mux 0, +84 ms
+ *
+ * 🔴 THE RELEASE IS THE FEATURE. Send the press alone and the button stays
+ * down until the car's own next mux-0 frame contradicts it -- about 84 ms
+ * here, up to 100. Whether that is still a light beep or a real blast is not
+ * something any capture we hold answers, and the device that named the command
+ * "light" sends the release explicitly rather than waiting. So do we.
+ *
+ * ⚠️ THE ECHO AT 5.970 IS NOT REPRODUCED. It is the only sub-2 ms pair in the
+ * whole ten seconds, so it is almost certainly TSL rather than the bus -- but
+ * it carries the car's own bytes unchanged and therefore commands nothing.
+ * Copying a frame because we saw it, with no account of what it does, is the
+ * opposite of what every other emitter here does.
+ *
+ * 🔴 IT IS ALSO THE ONLY TIMED EMITTER. The map light, the mirror and the door
+ * ride 0-1 ms behind a car frame; the indicator burst counts the car's own
+ * 0x249 arrivals. Here the press lands 16 ms after the car's frame and the
+ * release 12 ms after the press -- and mux 0 only arrives every 100 ms, so
+ * reception cannot drive a 12 ms gap. The caller owns that clock.
+ *
+ * 🔴 AND THE MULTIPLEX IS IN THE BYTE WE WRITE. 0x3C2 selects its variant with
+ * bits [1:0] of byte 0 and our bit is bit 2, so the field is next door to the
+ * selector. Writing the pack variant's bit into the SCROLL variant would put a
+ * frame on the bus announcing one multiplex while carrying the other's
+ * payload, so the template's multiplex is checked here and not assumed. */
+#define FSD_EMIT_HORN_ID         0x3C2u
+#define FSD_EMIT_HORN_BYTE       0u
+#define FSD_EMIT_HORN_MASK       0x04u   /* bit 2 of byte 0 */
+#define FSD_EMIT_HORN_DLC        8u
+#define FSD_EMIT_HORN_MUX_BYTE   0u
+#define FSD_EMIT_HORN_MUX_MASK   0x03u
+#define FSD_EMIT_HORN_MUX_VALUE  0x00u   /* the "pack" variant */
+#define FSD_EMIT_HORN_RELEASE_MS 12u
+
 /* THE TURN SIGNAL COMMAND. Measured 2026-09-05, fourth visit.
  *
  * 🔴 IT IS NOT 0x3E9, AND THAT PREDICTION WAS WRITTEN DOWN BEFORE THE
@@ -465,6 +511,25 @@ typedef enum {
  */
 uint8_t fsd_emit_repeat(FsdBodyAction a);
 
+/**
+ * How long after the press this action's RELEASE frame is owed, in
+ * milliseconds. 0 -- every action but one -- means the action has no release.
+ *
+ * 🔴 A RELEASE IS NOT "STOP", AND ONLY ONE ACTION HAS ONE. The map light and
+ * the mirror stop by our ceasing to send: the car's own frame wins the next
+ * time it comes round, which is what TSL's menu means by 关闭(跟随车机),
+ * "give control back to the car". The indicator does not stop at all -- the
+ * car latches it and the cancel is a separate command with its own argument.
+ * The light horn is neither: it is a PRESS, and a press that is never released
+ * is a stuck button.
+ *
+ * 0 is the safe default and needs no decision, which is why this is not
+ * written as an exhaustive switch the way fsd_emit_supported() is. An action
+ * added without a line here sends one frame and nothing else -- exactly what
+ * every action did before this function existed.
+ */
+uint16_t fsd_emit_release_ms(FsdBodyAction a);
+
 
 /** The car's most recent frame for the id this action writes. */
 typedef struct {
@@ -510,6 +575,24 @@ typedef struct {
 FsdEmitResult fsd_emit_build(FsdBodyAction action, int32_t arg,
                              const FsdEmitTemplate* t, uint32_t now_ms,
                              FsdEmitFrame* out);
+
+/**
+ * Build the second half of a gesture: the frame that lets the button go.
+ *
+ * FSD_EMIT_NO_ENCODING for any action whose fsd_emit_release_ms() is 0 --
+ * asking for a release the action does not have is a mistake, not a no-op.
+ *
+ * 🟢 THE SMALLEST CLAIM ANY EMITTER IN THIS FILE MAKES. The frame is the
+ * template with this action's field returned to its idle value, so against the
+ * car's own most recent frame it differs in NOTHING. It cannot assert
+ * anything about the car; all it does is arrive sooner than the car's next
+ * one would have. That is the whole argument for a caller being allowed to
+ * send it without re-asking the permission axis -- see rule_task.cpp, which is
+ * the only caller and explains itself there.
+ */
+FsdEmitResult fsd_emit_build_release(FsdBodyAction action, int32_t arg,
+                                     const FsdEmitTemplate* t, uint32_t now_ms,
+                                     FsdEmitFrame* out);
 
 /** Names for logs and the serial console. Never returns NULL. */
 const char* fsd_emit_result_str(FsdEmitResult r);

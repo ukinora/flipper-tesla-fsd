@@ -289,6 +289,50 @@ static const FsdBodyCaps FSD_BODY_CAPS[] = {
             .min_interval_ms = 3000u,
             .max_hold_ms = 1000u,
         },
+
+    /* The light horn. Measured 2026-09-06: 0x3C2 mux 0 byte 0 bit 2, pressed
+     * and released 12 ms later. A replay of the horn BUTTON, the same
+     * technique as the indicator stalk -- we are pretending a person put a
+     * thumb on a control, not asking a body controller for a noise.
+     *
+     * 🔴 THIS ROW IS ON THE HAZARDS' SIDE OF THE LINE, NOT THE MIRROR'S, and
+     * the two are one row apart so the difference has to be said. A horn warns
+     * somebody who is about to hit you; that happens at speed, and a horn
+     * which may only sound in park cannot do it. Same sentence as the hazard
+     * row, and the opposite of the mirror row directly above -- where the
+     * restriction costs nothing because nobody folds a mirror at 80 km/h on
+     * purpose.
+     *
+     * may_act_without_driver stays false, for the third time and the same
+     * reason: a body write on an unattended car needs its own argument written
+     * here rather than one inherited from the row above.
+     *
+     * 🔴 min_interval_ms IS THE GATE THAT MATTERS HERE, because the failure to
+     * survive is not one beep in the wrong place -- it is a stuck rule leaning
+     * on the horn. 1000 is an order above the map light's 500 and still leaves
+     * the feature usable: nobody wants two beeps in one second.
+     *
+     * ⚠️ AND IT IS NOT ENFORCED TODAY. FsdBodyInputs.last_act_ms has no
+     * producer anywhere in the firmware -- body_task.cpp memsets the struct and
+     * nothing ever writes that array -- so every min_interval_ms in this table
+     * is currently decorative. Found while wiring this row, left alone on
+     * purpose: turning the limiter on would also start rate-limiting the
+     * indicator burst, whose four frames arrive at exactly the 50 ms its own
+     * row allows. That is a change with its own measurement to do, not a line
+     * to slip into this one.
+     *
+     * max_hold_ms is 1000. There is nothing to hold -- the gesture is 12 ms --
+     * so the bound is here for the same reason as the door's: a re-sender
+     * written later must not quietly become one. */
+    [FSD_ACT_LIGHT_HORN] =
+        {
+            .action = FSD_ACT_LIGHT_HORN,
+            .may_act_while_moving = true,
+            .may_act_out_of_park = true,
+            .armable_at_runtime = true,
+            .min_interval_ms = 1000u,
+            .max_hold_ms = 1000u,
+        },
 };
 
 _Static_assert(sizeof(FSD_BODY_CAPS) / sizeof(FSD_BODY_CAPS[0]) == FSD_ACT_COUNT,
@@ -460,6 +504,7 @@ const char* fsd_body_action_str(FsdBodyAction a) {
      * as the J6 button names. */
     case FSD_ACT_TURN_SIGNAL: return "turn-signal";
     case FSD_ACT_MIRROR: return "mirror";
+    case FSD_ACT_LIGHT_HORN: return "light-horn";
     case FSD_ACT_COUNT: break;
     }
     return "?";

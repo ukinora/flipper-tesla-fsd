@@ -177,6 +177,26 @@ typedef struct {
     uint8_t start_bit;
     uint8_t bit_len;
     FsdSignalKind kind;
+
+    /* 🔴 CAN ONE OF OUR OWN EMITTERS LAND IN THIS SIGNAL'S BITS?
+     *
+     * Set exactly for the signals some action's FSD_AFFECTS row names, and a
+     * host test asserts the two agree for every signal -- they are two
+     * statements of one fact, and this repo has paid four times for holding
+     * two copies of one fact with no check between them.
+     *
+     * It is a field rather than a call because fsd_trigger.c cannot ask
+     * fsd_rules.c: fsd_rules.h includes fsd_trigger.h, so the dependency runs
+     * one way only.
+     *
+     * WHAT IT IS FOR is the SWITCH exemption in fsd_trig_disturbed(), which
+     * skips switches on the grounds that "we cannot press one, so a trigger
+     * there is a person". That was true of every switch on this car until
+     * 2026-09-07, when the light horn emitter learned to write 0x3C2 mux 0
+     * byte 0 bit 2 -- which IS FSD_SIG_HORN_SW. For a STATE signal the flag
+     * changes nothing (states are never exempt); it is set there anyway so the
+     * field means one thing instead of two. */
+    bool we_can_drive;
 } FsdSignalDef;
 
 typedef enum {

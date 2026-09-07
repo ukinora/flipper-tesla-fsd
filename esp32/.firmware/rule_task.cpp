@@ -44,6 +44,29 @@ static uint32_t g_sent = 0;
 static uint32_t g_refused = 0;
 static char g_last_refusal[64] = "none";
 
+/* A gesture's second half: the release, owed a fixed number of milliseconds
+ * after a press that actually went out.
+ *
+ * 🔴 A TIMER, WHICH NOTHING ELSE IN THIS FILE IS. The burst below counts the
+ * car's own frame arrivals on purpose -- 0x249 comes every 50 ms and that is
+ * the cadence TSL uses. The light horn cannot work that way: its frame's mux 0
+ * variant only arrives every 100 ms and the release is owed after 12. So this
+ * one carries a due time and the loop delivers it.
+ *
+ * ⚠️ 12 ms IS WHAT TSL USED, NOT A DEADLINE WE CAN MISS DANGEROUSLY. Late is
+ * harmless -- the frame is the car's own bytes -- and the requirement is only
+ * that it beat the car's own next mux-0 frame, about 100 ms out. loop() runs
+ * with no delay in it, so this lands within a loop pass of when it is due.
+ *
+ * Session state, like the arm flag and the burst. It dies with the power. */
+static struct {
+    FsdBodyAction action;
+    int32_t arg;
+    uint8_t rule_index;
+    bool pending;
+    uint32_t due_ms;
+} g_release = {(FsdBodyAction)0, 0, 0, false, 0u};
+
 void rule_task_init(FSDState* state, portMUX_TYPE* mux, RuleTaskSend send) {
     g_state = state;
     g_mux = mux;
@@ -52,6 +75,7 @@ void rule_task_init(FSDState* state, portMUX_TYPE* mux, RuleTaskSend send) {
     fsd_pipe_init(&g_frames);
     g_armed = false;
     g_bus = 0xFFu;
+    g_release.pending = false;
     g_sent = 0;
     g_refused = 0;
     strncpy(g_last_refusal, "none", sizeof(g_last_refusal) - 1);
@@ -90,6 +114,13 @@ void rule_task_set_armed(bool armed) {
      * anyway (NOT_ENABLED), but "stop" should not depend on a gate further
      * down agreeing with it. */
     g_burst.remaining = 0u;
+    /* 🔴 AND IT DROPS A RELEASE THAT WAS OWED, which is the one place where
+     * "stop" costs something: the horn stays pressed until the car's own next
+     * mux-0 frame, up to 100 ms. That is the right trade -- disarm means stop
+     * writing to the bus, and 100 ms of a bit the car will contradict by
+     * itself is a smaller thing than a rule that keeps writing after the
+     * operator said no. */
+    g_release.pending = false;
     Serial.printf("[RULE] %s\n", armed
         ? "무장됨 — 매핑이 실제로 CAN 에 씁니다 (이 세션에만, 전원과 함께 꺼집니다)"
         : "해제됨 — 매핑은 판정만 하고 아무것도 보내지 않습니다");
@@ -179,6 +210,103 @@ static bool ship(const FsdPipeResult* r, uint32_t now_ms) {
     return ok;
 }
 
+/* Arm the release, if this action has one. Called after a press that actually
+ * reached the bus, never after a release -- a release that armed another one
+ * would beep forever. */
+static void arm_release(const FsdPipeResult* r, uint32_t now_ms) {
+    const uint16_t ms = fsd_emit_release_ms(r->action);
+    if (ms == 0u) return;
+    g_release.action = r->action;
+    g_release.arg = r->arg;
+    g_release.rule_index = r->rule_index;
+    g_release.due_ms = now_ms + ms;
+    g_release.pending = true;
+}
+
+/* Send the release, if one is due.
+ *
+ * 🔴 THIS DOES NOT RE-ASK THE PERMISSION AXIS, AND THAT IS THE ONE PLACE IN
+ * THIS FILE WHERE A FRAME REACHES THE BUS WITHOUT IT. The reasons, in order of
+ * how much they matter:
+ *
+ *   1. THE AXIS WOULD REFUSE IT. fsd_body_allows() rate-limits per action, and
+ *      this action's row says 1000 ms. The release is owed after 12. So asking
+ *      would mean either losing the release -- leaving the button pressed,
+ *      which is the exact failure it exists to prevent -- or dropping the rate
+ *      limit that bounds a stuck rule. Neither is acceptable.
+ *
+ *   2. IT IS THE TAIL OF A COMMAND ALREADY AUTHORISED. The press passed all
+ *      six layers 12 ms ago. Stopping half way through one gesture leaves the
+ *      car in the pressed state; there is no reading of "safer" under which
+ *      that is the better outcome.
+ *
+ *   3. IT CANNOT ASSERT ANYTHING. And this is CHECKED, not argued: the frame
+ *      must be byte-identical to the car's own most recent frame of this id
+ *      and multiplex, or it is refused. A release that differs is not a
+ *      release.
+ *
+ * 🟢 That last check earns its keep in a case nobody designed for. If the
+ * DRIVER is leaning on the horn when our release comes due, the car's most
+ * recent frame has the bit SET -- our release would differ from it, and it is
+ * refused. We do not get to tell the car that a person let go of a button
+ * they are still holding.
+ *
+ * What still stands in front of it: the arm flag, the bus guard, and
+ * send_on_bus()'s own mode gate and id refusals in main.cpp. */
+static void release_due(uint32_t now_ms) {
+    if (!g_release.pending) return;
+    /* Signed, so the millisecond counter wrapping does not make a due release
+     * wait another 49 days. */
+    if ((int32_t)(now_ms - g_release.due_ms) < 0) return;
+    g_release.pending = false;
+
+    if (!g_armed) return;
+    if (!g_send || g_bus == 0xFFu) return;
+
+    const FsdEmitTemplate* tpl = &g_frames.tpl[(uint8_t)g_release.action];
+
+    FsdEmitFrame f;
+    memset(&f, 0, sizeof(f));
+    const FsdEmitResult er =
+        fsd_emit_build_release(g_release.action, g_release.arg, tpl, now_ms, &f);
+    if (er != FSD_EMIT_OK) {
+        g_refused++;
+        snprintf(g_last_refusal, sizeof(g_last_refusal), "release: %s",
+                 fsd_emit_result_str(er));
+        Serial.printf("[RULE] 매핑 %u %s 놓기 거부 — %s\n",
+                      (unsigned)g_release.rule_index,
+                      fsd_body_action_str(g_release.action), fsd_emit_result_str(er));
+        return;
+    }
+
+    /* 🔴 Reason 3 above, enforced. */
+    if (f.dlc != tpl->dlc || memcmp(f.data, tpl->data, f.dlc) != 0) {
+        g_refused++;
+        snprintf(g_last_refusal, sizeof(g_last_refusal), "release: 차 프레임과 다르다");
+        Serial.printf("[RULE] 매핑 %u %s 놓기 거부 — 차의 마지막 프레임과 다르다 "
+                      "(사람이 누르고 있을 수 있다)\n",
+                      (unsigned)g_release.rule_index,
+                      fsd_body_action_str(g_release.action));
+        return;
+    }
+
+    if (g_send(g_bus, f.id, f.data, f.dlc)) {
+        g_sent++;
+        Serial.printf("[RULE] 매핑 %u %s -> 0x%03X 놓음\n",
+                      (unsigned)g_release.rule_index,
+                      fsd_body_action_str(g_release.action), (unsigned)f.id);
+    } else {
+        g_refused++;
+        snprintf(g_last_refusal, sizeof(g_last_refusal), "bus: 0x%03X 거부됨 (놓기)",
+                 (unsigned)f.id);
+    }
+
+    /* Our own write again, so it does not come back as a press. */
+    FsdSignal touched[FSD_RULE_MAX_AFFECTS];
+    const uint8_t m = fsd_rule_affects(g_release.action, touched, FSD_RULE_MAX_AFFECTS);
+    for (uint8_t k = 0; k < m; k++) fsd_trig_disturbed(&g_trig, touched[k], now_ms);
+}
+
 static void run_event(const FsdTriggerEvent* ev, uint32_t now_ms) {
     const FsdRules* rules = rules_store_table();
     if (!rules) return;
@@ -191,6 +319,10 @@ static void run_event(const FsdTriggerEvent* ev, uint32_t now_ms) {
 
     for (uint8_t i = 0; i < n; i++) {
         if (!ship(&out[i], now_ms)) continue;
+
+        /* 🔴 AND ONE FRAME IS SOMETIMES ONLY HALF THE COMMAND. A gesture owes
+         * a release; everything else owes nothing and this returns at once. */
+        arm_release(&out[i], now_ms);
 
         /* 🔴 ONE FRAME IS NOT ALWAYS THE COMMAND. Arm the rest of the burst;
          * the car's next frames of this id drive it. See fsd_emit_repeat(). */
@@ -223,7 +355,7 @@ static void burst_on_frame(uint32_t can_id, uint32_t now_ms) {
     /* A refusal here stops nothing by itself -- remaining is already down, so
      * the burst runs out on its own. What it does is name why, which is the
      * whole point of doing it through the pipeline instead of around it. */
-    (void)ship(&r, now_ms);
+    if (ship(&r, now_ms)) arm_release(&r, now_ms);
 }
 
 void rule_task_observe(uint8_t bus, uint32_t can_id, const uint8_t* data, uint8_t dlc,
@@ -235,6 +367,12 @@ void rule_task_observe(uint8_t bus, uint32_t can_id, const uint8_t* data, uint8_
      * both — should be available to the emitter as of THIS frame, not the
      * previous one. */
     (void)fsd_pipe_observe(&g_frames, can_id, data, dlc, now_ms);
+
+    /* A release owed on a 12 ms clock is checked here as well as in the tick,
+     * because a busy bus is exactly when a loop pass gets long -- and this
+     * runs once per frame. AFTER the store, so the release echoes the car's
+     * most recent statement rather than the one before it. */
+    release_due(now_ms);
 
     /* 🔴 BURST FIRST, THEN TRIGGERS. The template this frame just became is
      * the one our burst frame copies, and putting it out now -- in the same
@@ -250,6 +388,9 @@ void rule_task_observe(uint8_t bus, uint32_t can_id, const uint8_t* data, uint8_
 
 void rule_task_tick(uint32_t now_ms) {
     if (!g_state || !g_mux) return;
+    /* The guaranteed path: a quiet bus delivers no frames, so rule_task_observe()
+     * would never run and a release would sit pending forever. */
+    release_due(now_ms);
     FsdTriggerEvent ev[RULE_EVENTS_MAX];
     const uint8_t n = fsd_trig_tick(&g_trig, now_ms, ev, RULE_EVENTS_MAX);
     for (uint8_t i = 0; i < n; i++) run_event(&ev[i], now_ms);

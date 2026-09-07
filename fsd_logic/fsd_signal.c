@@ -60,10 +60,12 @@
            .mux_byte = FSD_SIG_NO_MUX, .start_bit = (bit), .bit_len = 1,   \
            .kind = FSD_SIGK_SWITCH}
 
+/* 🟢 we_can_drive on all four: FSD_ACT_MAP_LIGHT's affects row names them,
+ * because the lamp we light is the lamp we then read. */
 #define LAMP(n, nm, bit)                                                   \
     [n] = {.signal = (n), .name = (nm), .can_id = ID_LIGHT,                \
            .mux_byte = FSD_SIG_NO_MUX, .start_bit = (bit), .bit_len = 2,   \
-           .kind = FSD_SIGK_STATE}
+           .kind = FSD_SIGK_STATE, .we_can_drive = true}
 
 #define WIN(n, nm, bit)                                                    \
     [n] = {.signal = (n), .name = (nm), .can_id = ID_SWITCH,               \
@@ -144,7 +146,12 @@ static const FsdSignalDef FSD_SIGNALS[] = {
                       .mux_byte = FSD_SIG_NO_MUX,
                       .start_bit = 21,
                       .bit_len = 3,
-                      .kind = FSD_SIGK_STATE},
+                      .kind = FSD_SIGK_STATE,
+                      /* ⚠️ FSD_ACT_GEAR_D has no emitter and its row is not
+                       * armable, so nothing can drive this today. The flag
+                       * follows the AFFECTS table, which names it, and that
+                       * table is where the decision belongs. */
+                      .we_can_drive = true},
 
     /* 🔴 The only signed field here, and the only accumulating one: a fast roll
      * put +8 and -9 in a single frame. Treating it as a boolean "moved" would
@@ -157,7 +164,8 @@ static const FsdSignalDef FSD_SIGNALS[] = {
                               .mux_value = MUX_SCROLL,
                               .start_bit = 24,
                               .bit_len = 6,
-                              .kind = FSD_SIGK_DELTA},
+                              .kind = FSD_SIGK_DELTA,
+                              .we_can_drive = true},
 
     /* The other two things byte 0 of 0x3C2 carries. Measured 2026-09-05: the
      * owner pressed the horn twice (three presses actually reached the bus,
@@ -171,7 +179,14 @@ static const FsdSignalDef FSD_SIGNALS[] = {
                          .mux_value = MUX_PACK,
                          .start_bit = 2,
                          .bit_len = 1,
-                         .kind = FSD_SIGK_SWITCH},
+                         .kind = FSD_SIGK_SWITCH,
+                         /* 🔴 THE ONLY SWITCH ON THIS CAR WE CAN PRESS
+                          * OURSELVES. FSD_ACT_LIGHT_HORN writes this exact
+                          * bit, so our own command comes back here one frame
+                          * later. Without the flag fsd_trig_disturbed() drops
+                          * the suppression request -- silently -- and a rule
+                          * reading "horn pressed -> light horn" feeds itself. */
+                         .we_can_drive = true},
     [FSD_SIG_HAZARD_BTN] = {.signal = FSD_SIG_HAZARD_BTN,
                             .name = "hazard button",
                             .can_id = ID_SWITCH,
@@ -193,7 +208,8 @@ static const FsdSignalDef FSD_SIGNALS[] = {
                             .mux_byte = FSD_SIG_NO_MUX,
                             .start_bit = 17,
                             .bit_len = 3,
-                            .kind = FSD_SIGK_STATE},
+                            .kind = FSD_SIGK_STATE,
+                            .we_can_drive = true},
 
     /* Held across both flash phases in every hazard capture: 0x1A/0x15 by hand,
      * 0x7A/0x75 when the device did it. The indicator bits beside it alternate;
@@ -204,7 +220,8 @@ static const FsdSignalDef FSD_SIGNALS[] = {
                            .mux_byte = FSD_SIG_NO_MUX,
                            .start_bit = 4,
                            .bit_len = 1,
-                           .kind = FSD_SIGK_STATE},
+                           .kind = FSD_SIGK_STATE,
+                           .we_can_drive = true},
 };
 
 _Static_assert(sizeof(FSD_SIGNALS) / sizeof(FSD_SIGNALS[0]) == FSD_SIG_COUNT,
