@@ -3,6 +3,7 @@
  */
 
 #include "rules_store.h"
+#include "rule_task.h"  // 무장 여부만 읽는다
 
 /* Outside the guard: the no-op variant still answers on the serial console, and
  * a `Serial` that only exists in one branch is the fifth pattern waiting to
@@ -278,7 +279,8 @@ void rules_store_print(void) {
      * cheap way to stop somebody concluding the car is broken because a rule
      * they can see stored did nothing. Delete this line the day an emitter
      * exists, and not before. */
-    Serial.println("[RULES] ⚠️ 저장만 한다 — 아직 어떤 매핑도 차를 움직이지 않는다");
+    Serial.printf("[RULES] 무장해야 보낸다 — 지금은 %s. 'rulearm on' / 'ruleq'\n",
+                  rule_task_armed() ? "무장됨" : "해제됨");
     if(g_save_pending) Serial.println("[RULES] 🔴 아직 플래시에 저장되지 않았다");
 }
 
