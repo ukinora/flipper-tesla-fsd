@@ -109,6 +109,50 @@ void fsd_pipe_init(FsdPipeFrames* f);
 uint8_t fsd_pipe_observe(FsdPipeFrames* f, uint32_t can_id, const uint8_t* data, uint8_t dlc,
                          uint32_t now_ms);
 
+/**
+ * The RELEASE half of a gesture, through the same gates the press faced --
+ * minus one, on purpose.
+ *
+ * 🔴 THE PERMISSION AXIS IS SKIPPED, AND THE SHAPE OF THIS FUNCTION IS THE
+ * PROOF: there is no FsdBodyInputs argument, so it is not something a caller
+ * can forget to pass. Three reasons, and the third is the one that carries it:
+ *
+ *   1. THE AXIS IS THE WRONG QUESTION FOR THIS FRAME. It answers "may this
+ *      action happen"; it was asked and answered for the press 12 ms ago.
+ *      Asking again would let a rate limit -- min_interval_ms is 1000 for the
+ *      light horn, and the release is owed after 12 -- refuse the second half
+ *      of a gesture whose first half already went out. That leaves the car
+ *      holding a button down, which is the exact failure the release exists to
+ *      prevent.
+ *
+ *      ⚠️ It would not refuse it TODAY, because FsdBodyInputs.last_act_ms has
+ *      no producer and every min_interval_ms is currently decorative. That is
+ *      a defect, not a design, and this function must not depend on which way
+ *      it gets resolved.
+ *
+ *   2. Stopping half way through one gesture is strictly worse than not
+ *      starting it. There is no reading of "safer" under which it is better.
+ *
+ *   3. THE FRAME CANNOT ASSERT ANYTHING, and that is enforced:
+ *      fsd_emit_build_release() refuses with FSD_EMIT_FIELD_IN_USE unless the
+ *      frame it builds is byte-identical to the car's own most recent one.
+ *
+ * 🟢 THE CHOKEPOINT IS NOT SKIPPED. fsd_body_wire.h calls itself "the last
+ * denial before the wire" and fsd_pipeline.c says why it is separate from the
+ * emitter -- "the emitter is trusted to build the frame; it is NOT trusted to
+ * have changed only what it was allowed to." A release is a write like any
+ * other and faces it, including the row check that refuses an action nobody
+ * has opened on purpose. An earlier version of this went from the emitter
+ * straight to the bus with a hand-written memcmp in the ESP32 glue; that
+ * compared the frame against the template the emitter had just used as its own
+ * input, never looked at the id, the length or the multiplex, and sat where no
+ * host test could reach it.
+ *
+ * TRANSMITS NOTHING, same as fsd_pipe_one(). Safe with any NULL.
+ */
+void fsd_pipe_release(FsdBodyAction action, int32_t arg, uint8_t rule_index,
+                      const FsdPipeFrames* f, uint32_t now_ms, FsdPipeResult* out);
+
 /** Push one trigger event through all four layers.
  *
  *  Writes at most `max_out` results and returns how many. A result with

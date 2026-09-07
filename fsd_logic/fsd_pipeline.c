@@ -174,6 +174,72 @@ void fsd_pipe_one(FsdBodyAction action, int32_t arg, uint8_t rule_index,
     }
 }
 
+void fsd_pipe_release(FsdBodyAction action, int32_t arg, uint8_t rule_index,
+                      const FsdPipeFrames* f, uint32_t now_ms, FsdPipeResult* out) {
+    if(!f || !out) return;
+    memset(out, 0, sizeof(*out));
+    out->rule_index = rule_index;
+    out->action = action;
+    out->arg = arg;
+
+    if((uint8_t)action >= (uint8_t)FSD_ACT_COUNT) {
+        out->stage = FSD_PIPE_BLOCKED_EMIT;
+        out->reason = (uint8_t)FSD_EMIT_NO_ENCODING;
+        return;
+    }
+
+    /* 1. Does this action have a release at all? Asked FIRST because "this
+     * action is not a gesture" is a stronger and more useful answer than "no
+     * row" -- and because fsd_emit_release_ms() is the single statement of
+     * which actions are gestures, so a caller's timer and this cannot
+     * disagree. */
+    if(fsd_emit_release_ms(action) == 0u) {
+        out->stage = FSD_PIPE_BLOCKED_EMIT;
+        out->reason = (uint8_t)FSD_EMIT_NO_ENCODING;
+        return;
+    }
+
+    /* 2. The row, before the emitter, for exactly the reason fsd_pipe_one()
+     * gives: an action with no row never gets a template stored either, so
+     * asking later would answer NO_TEMPLATE -- which reads as "the car does
+     * not send that frame" and sends somebody to look at their wiring. */
+    if(!fsd_body_wire(action)) {
+        out->stage = FSD_PIPE_BLOCKED_WIRE;
+        out->reason = (uint8_t)FSD_WIRE_NO_ROW;
+        return;
+    }
+
+    const FsdEmitTemplate* tpl = &f->tpl[(uint8_t)action];
+
+    /* 3. The emitter, which also refuses when the car says the control is in
+     * use -- see fsd_emit_build_release(). */
+    FsdEmitFrame frame;
+    const FsdEmitResult er = fsd_emit_build_release(action, arg, tpl, now_ms, &frame);
+    if(er != FSD_EMIT_OK) {
+        out->stage = FSD_PIPE_BLOCKED_EMIT;
+        out->reason = (uint8_t)er;
+        return;
+    }
+
+    /* 4. The chokepoint. A release differs from the reference in nothing, so
+     * this passes by construction -- which is the point: it costs nothing and
+     * it means the day this frame changes shape, the same table that guards
+     * every other write guards this one too. */
+    FsdBodyRef ref;
+    ref_from_template(tpl, &ref);
+    const FsdBodyWireVerdict wv =
+        fsd_body_wire_check(action, frame.id, frame.data, frame.dlc, &ref, now_ms);
+    if(wv != FSD_WIRE_OK) {
+        out->stage = FSD_PIPE_BLOCKED_WIRE;
+        out->reason = (uint8_t)wv;
+        return;
+    }
+
+    out->stage = FSD_PIPE_OK;
+    out->reason = 0u;
+    out->frame = frame;
+}
+
 const char* fsd_pipe_stage_str(FsdPipeStage s) {
     switch(s) {
     case FSD_PIPE_OK: return "ok";

@@ -479,6 +479,15 @@ typedef enum {
      *  one clears by itself the moment the stalk goes back to rest, so a
      *  caller may retry and a screen should say something different. */
     FSD_EMIT_NO_CHECK,
+    /** 🔴 A RELEASE ONLY. The car's own most recent frame already has this
+     *  action's field set, so building the release would tell the car that
+     *  somebody let go of a control they are still holding.
+     *
+     *  We never receive our own transmissions, so a template with the field
+     *  set is not our press coming back -- it is a person's thumb. Like
+     *  NO_CHECK and unlike NO_ENCODING this clears by itself, so a caller may
+     *  simply stop rather than treat it as a fault. */
+    FSD_EMIT_FIELD_IN_USE,
 } FsdEmitResult;
 
     /** How many CONSECUTIVE frames this command has to occupy before the car
@@ -582,13 +591,17 @@ FsdEmitResult fsd_emit_build(FsdBodyAction action, int32_t arg,
  * FSD_EMIT_NO_ENCODING for any action whose fsd_emit_release_ms() is 0 --
  * asking for a release the action does not have is a mistake, not a no-op.
  *
- * 🟢 THE SMALLEST CLAIM ANY EMITTER IN THIS FILE MAKES. The frame is the
- * template with this action's field returned to its idle value, so against the
- * car's own most recent frame it differs in NOTHING. It cannot assert
- * anything about the car; all it does is arrive sooner than the car's next
- * one would have. That is the whole argument for a caller being allowed to
- * send it without re-asking the permission axis -- see rule_task.cpp, which is
- * the only caller and explains itself there.
+ * 🟢 THE SMALLEST CLAIM ANY EMITTER IN THIS FILE MAKES, AND THAT IS ENFORCED
+ * RATHER THAN ARGUED. The frame is the template with this action's field
+ * returned to its idle value, so against the car's own most recent frame it
+ * must differ in NOTHING -- and if it would, this refuses with
+ * FSD_EMIT_FIELD_IN_USE instead of building it. So the release cannot assert
+ * anything about the car; all it can do is arrive sooner than the car's next
+ * frame would have.
+ *
+ * That property is what lets fsd_pipe_release() skip the permission axis. It
+ * does NOT skip the chokepoint: the release is a write like any other and
+ * faces the same last denial. See fsd_pipeline.h.
  */
 FsdEmitResult fsd_emit_build_release(FsdBodyAction action, int32_t arg,
                                      const FsdEmitTemplate* t, uint32_t now_ms,

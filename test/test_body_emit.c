@@ -1411,12 +1411,35 @@ static void test_light_horn_release_is_the_cars_own_frame(void) {
           f.data[0], f.data[1], f.data[2], f.data[3],
           f.data[4], f.data[5], f.data[6], f.data[7]);
 
-    /* And it clears the bit even when the template still has it -- which is
-     * what happens if our own press is the most recent frame we heard. */
+    /* 🔴 AND IT REFUSES WHEN THE CAR'S OWN FRAME SAYS THE BUTTON IS DOWN.
+     *
+     * ⚠️ THIS ASSERTION USED TO EXPECT FSD_EMIT_OK AND A CLEARED BIT, and it
+     * was describing the wrong thing. A template with the horn bit set is the
+     * car telling us A PERSON HAS THEIR THUMB ON THE HORN -- we never receive
+     * our own transmissions, so it cannot be our press coming back. Building a
+     * release there is telling the car that somebody let go of a button they
+     * are still holding.
+     *
+     * The check used to live in rule_task.cpp as a memcmp after the fact, out
+     * of reach of every host test. It belongs here: it is a statement about
+     * the template and the field, which is exactly what this file decides. */
     t.data[0] = 0x04u;
+    memset(&f, 0xAA, sizeof(f));
+    CHECK(fsd_emit_build_release(FSD_ACT_LIGHT_HORN, 0, &t, 1100u, &f)
+              == FSD_EMIT_FIELD_IN_USE,
+          "a release over a pressed template must refuse");
+
+    /* The mux selector lives in the same byte, so a template that is mux 0 with
+     * the horn bit set must refuse for the RIGHT reason -- being in use, not
+     * being the wrong variant. */
+    CHECK((t.data[0] & 0x03u) == 0x00u, "that template is still multiplex 0");
+
+    /* And an idle template still builds, so the refusal is about the field
+     * rather than about releases in general. */
+    t.data[0] = 0x00u;
     CHECK(fsd_emit_build_release(FSD_ACT_LIGHT_HORN, 0, &t, 1100u, &f) == FSD_EMIT_OK,
-          "the release must build over a pressed template");
-    CHECK(f.data[0] == 0x00u, "and it must clear the bit, got 0x%02X", f.data[0]);
+          "an idle template still releases");
+    CHECK(memcmp(f.data, CAR_HORN, 8) == 0, "and it is the car's frame");
 
     /* 🔴 EVERY OTHER ACTION HAS NO RELEASE, and asking for one must be a
      * refusal rather than a frame. A gesture is the exception in this file,

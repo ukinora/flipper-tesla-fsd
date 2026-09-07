@@ -160,15 +160,15 @@ static void note_refusal(const FsdPipeResult* r) {
  * own ID refusals afterwards. Two more layers after the four. */
 /* Ship one pipeline result. Shared by the rule path and the burst path so
  * they cannot drift: same refusal names, same counters, same bus guard. */
-static bool ship(const FsdPipeResult* r, uint32_t now_ms) {
+static bool ship(const FsdPipeResult* r, uint32_t now_ms, const char* what) {
     if (r->stage != FSD_PIPE_OK) {
         note_refusal(r);
         /* Every refusal is logged. This path is rare by construction -- a
          * trigger the owner wired to an action -- so it cannot flood, and
          * "why did nothing happen" is the question this feature will be
          * asked most often. */
-        Serial.printf("[RULE] 매핑 %u %s 거부 — %s (%s)\n", (unsigned)r->rule_index,
-                      fsd_body_action_str(r->action), fsd_pipe_stage_str(r->stage),
+        Serial.printf("[RULE] 매핑 %u %s %s 거부 — %s (%s)\n", (unsigned)r->rule_index,
+                      fsd_body_action_str(r->action), what, fsd_pipe_stage_str(r->stage),
                       fsd_pipe_reason_str(r->stage, r->reason));
         return false;
     }
@@ -187,8 +187,8 @@ static bool ship(const FsdPipeResult* r, uint32_t now_ms) {
     const bool ok = g_send(g_bus, r->frame.id, r->frame.data, r->frame.dlc);
     if (ok) {
         g_sent++;
-        Serial.printf("[RULE] 매핑 %u %s -> 0x%03X 보냄\n", (unsigned)r->rule_index,
-                      fsd_body_action_str(r->action), (unsigned)r->frame.id);
+        Serial.printf("[RULE] 매핑 %u %s -> 0x%03X %s\n", (unsigned)r->rule_index,
+                      fsd_body_action_str(r->action), (unsigned)r->frame.id, what);
     } else {
         /* main.cpp refused it after we did not. Counted as a refusal
          * because that is what it is, and named so the two are not
@@ -225,34 +225,21 @@ static void arm_release(const FsdPipeResult* r, uint32_t now_ms) {
 
 /* Send the release, if one is due.
  *
- * 🔴 THIS DOES NOT RE-ASK THE PERMISSION AXIS, AND THAT IS THE ONE PLACE IN
- * THIS FILE WHERE A FRAME REACHES THE BUS WITHOUT IT. The reasons, in order of
- * how much they matter:
+ * 🔴 THE DECISION IS NOT MADE HERE. fsd_pipe_release() runs the emitter and
+ * the bit-granularity chokepoint, exactly as fsd_pipe_one() does for a press,
+ * and it is the one that explains why the permission axis is skipped and the
+ * chokepoint is not. This function owns a clock and a counter; that is all.
  *
- *   1. THE AXIS WOULD REFUSE IT. fsd_body_allows() rate-limits per action, and
- *      this action's row says 1000 ms. The release is owed after 12. So asking
- *      would mean either losing the release -- leaving the button pressed,
- *      which is the exact failure it exists to prevent -- or dropping the rate
- *      limit that bounds a stuck rule. Neither is acceptable.
+ * ⚠️ AN EARLIER VERSION OF THIS DID DECIDE, and got it wrong in two ways a
+ * review caught: it went from the emitter straight to the bus with a
+ * hand-written memcmp -- skipping fsd_body_wire_check(), which every other
+ * write in this firmware goes through -- and its comment justified skipping
+ * the axis by claiming the rate limit would refuse the release, which is not
+ * true of this build (last_act_ms has no producer). Both halves moved into
+ * fsd_logic/ where a host test can stand.
  *
- *   2. IT IS THE TAIL OF A COMMAND ALREADY AUTHORISED. The press passed all
- *      six layers 12 ms ago. Stopping half way through one gesture leaves the
- *      car in the pressed state; there is no reading of "safer" under which
- *      that is the better outcome.
- *
- *   3. IT CANNOT ASSERT ANYTHING. And this is CHECKED, not argued: the frame
- *      must be byte-identical to the car's own most recent frame of this id
- *      and multiplex, or it is refused. A release that differs is not a
- *      release.
- *
- * 🟢 That last check earns its keep in a case nobody designed for. If the
- * DRIVER is leaning on the horn when our release comes due, the car's most
- * recent frame has the bit SET -- our release would differ from it, and it is
- * refused. We do not get to tell the car that a person let go of a button
- * they are still holding.
- *
- * What still stands in front of it: the arm flag, the bus guard, and
- * send_on_bus()'s own mode gate and id refusals in main.cpp. */
+ * What still stands in front of the frame after this: the arm flag and the bus
+ * guard here, then send_on_bus()'s mode gate and id refusals in main.cpp. */
 static void release_due(uint32_t now_ms) {
     if (!g_release.pending) return;
     /* Signed, so the millisecond counter wrapping does not make a due release
@@ -260,51 +247,15 @@ static void release_due(uint32_t now_ms) {
     if ((int32_t)(now_ms - g_release.due_ms) < 0) return;
     g_release.pending = false;
 
+    /* 🔴 Disarming between the press and the release stops the release. The
+     * horn then stays pressed until the car's own next mux-0 frame, up to
+     * 100 ms -- the right trade, because "stop" has to mean stop writing. */
     if (!g_armed) return;
-    if (!g_send || g_bus == 0xFFu) return;
 
-    const FsdEmitTemplate* tpl = &g_frames.tpl[(uint8_t)g_release.action];
-
-    FsdEmitFrame f;
-    memset(&f, 0, sizeof(f));
-    const FsdEmitResult er =
-        fsd_emit_build_release(g_release.action, g_release.arg, tpl, now_ms, &f);
-    if (er != FSD_EMIT_OK) {
-        g_refused++;
-        snprintf(g_last_refusal, sizeof(g_last_refusal), "release: %s",
-                 fsd_emit_result_str(er));
-        Serial.printf("[RULE] 매핑 %u %s 놓기 거부 — %s\n",
-                      (unsigned)g_release.rule_index,
-                      fsd_body_action_str(g_release.action), fsd_emit_result_str(er));
-        return;
-    }
-
-    /* 🔴 Reason 3 above, enforced. */
-    if (f.dlc != tpl->dlc || memcmp(f.data, tpl->data, f.dlc) != 0) {
-        g_refused++;
-        snprintf(g_last_refusal, sizeof(g_last_refusal), "release: 차 프레임과 다르다");
-        Serial.printf("[RULE] 매핑 %u %s 놓기 거부 — 차의 마지막 프레임과 다르다 "
-                      "(사람이 누르고 있을 수 있다)\n",
-                      (unsigned)g_release.rule_index,
-                      fsd_body_action_str(g_release.action));
-        return;
-    }
-
-    if (g_send(g_bus, f.id, f.data, f.dlc)) {
-        g_sent++;
-        Serial.printf("[RULE] 매핑 %u %s -> 0x%03X 놓음\n",
-                      (unsigned)g_release.rule_index,
-                      fsd_body_action_str(g_release.action), (unsigned)f.id);
-    } else {
-        g_refused++;
-        snprintf(g_last_refusal, sizeof(g_last_refusal), "bus: 0x%03X 거부됨 (놓기)",
-                 (unsigned)f.id);
-    }
-
-    /* Our own write again, so it does not come back as a press. */
-    FsdSignal touched[FSD_RULE_MAX_AFFECTS];
-    const uint8_t m = fsd_rule_affects(g_release.action, touched, FSD_RULE_MAX_AFFECTS);
-    for (uint8_t k = 0; k < m; k++) fsd_trig_disturbed(&g_trig, touched[k], now_ms);
+    FsdPipeResult r;
+    fsd_pipe_release(g_release.action, g_release.arg, g_release.rule_index, &g_frames,
+                     now_ms, &r);
+    (void)ship(&r, now_ms, "놓음");
 }
 
 static void run_event(const FsdTriggerEvent* ev, uint32_t now_ms) {
@@ -318,7 +269,7 @@ static void run_event(const FsdTriggerEvent* ev, uint32_t now_ms) {
     const uint8_t n = fsd_pipe_run(rules, ev, &in, &g_frames, now_ms, out, FSD_PIPE_MAX_OUT);
 
     for (uint8_t i = 0; i < n; i++) {
-        if (!ship(&out[i], now_ms)) continue;
+        if (!ship(&out[i], now_ms, "보냄")) continue;
 
         /* 🔴 AND ONE FRAME IS SOMETIMES ONLY HALF THE COMMAND. A gesture owes
          * a release; everything else owes nothing and this returns at once. */
@@ -355,7 +306,7 @@ static void burst_on_frame(uint32_t can_id, uint32_t now_ms) {
     /* A refusal here stops nothing by itself -- remaining is already down, so
      * the burst runs out on its own. What it does is name why, which is the
      * whole point of doing it through the pipeline instead of around it. */
-    if (ship(&r, now_ms)) arm_release(&r, now_ms);
+    if (ship(&r, now_ms, "보냄")) arm_release(&r, now_ms);
 }
 
 void rule_task_observe(uint8_t bus, uint32_t can_id, const uint8_t* data, uint8_t dlc,

@@ -485,7 +485,24 @@ FsdEmitResult fsd_emit_build_release(FsdBodyAction action, int32_t arg,
      * "which actions are gestures", so a caller's timer and this builder
      * cannot disagree about whether a release is owed. */
     if(fsd_emit_release_ms(action) == 0u) return FSD_EMIT_NO_ENCODING;
-    return emit_copy_field(action, arg, t, now_ms, true, out);
+
+    const FsdEmitResult r = emit_copy_field(action, arg, t, now_ms, true, out);
+    if(r != FSD_EMIT_OK) return r;
+
+    /* 🔴 THE CLAIM THIS FRAME MAKES, CHECKED. A release differs from the car's
+     * own frame in nothing -- that is what makes it a release rather than a
+     * command. If it would differ, the car is currently saying the field is
+     * SET, and since we never receive our own transmissions that is a person
+     * holding the control. Refuse rather than contradict them.
+     *
+     * ⚠️ Lives here rather than in the caller because it is a statement about
+     * the template and the field, which is what this file decides -- and
+     * because a check in the ESP32 glue is a check no host test can reach. */
+    if(out->dlc != t->dlc || memcmp(out->data, t->data, out->dlc) != 0) {
+        memset(out, 0, sizeof(*out));
+        return FSD_EMIT_FIELD_IN_USE;
+    }
+    return FSD_EMIT_OK;
 }
 
 /* See the header: 0 means "no release", which is every action but one. */
@@ -508,6 +525,7 @@ const char* fsd_emit_result_str(FsdEmitResult r) {
     case FSD_EMIT_BAD_TEMPLATE: return "bad template";
     case FSD_EMIT_NO_ENCODING: return "no encoding";
     case FSD_EMIT_NO_CHECK: return "check byte unmeasured here";
+    case FSD_EMIT_FIELD_IN_USE: return "the car says that control is in use";
     }
     return "?";
 }

@@ -21,10 +21,15 @@
  * So MAP_LIGHT, DOOR_OPEN and HAZARDS are absent for a DIFFERENT reason now:
  * their frames are known, and nobody has decided to open them here. An action
  * with no row is refused by this file no matter what the capability table says,
- * and refused is the correct state until the first write test in the car. It
- * costs nothing today -- no caller reaches this file -- and it means the day a
- * caller appears, the three that can open a door or hold a lamp on stay shut
- * until somebody writes a row on purpose.
+ * and refused is the correct state until the first write test in the car.
+ *
+ * ⚠️ THIS USED TO SAY "it costs nothing today -- no caller reaches this file",
+ * and that stopped being true on 2026-09-07: fsd_pipe_one() calls
+ * fsd_body_wire() on every rule firing and fsd_body_wire_check() on every frame
+ * it builds, and fsd_pipe_release() does the same for the second half of a
+ * gesture. The rows below are load-bearing now rather than pending -- which is
+ * exactly what keeps the five that can open a door, hold a lamp on or sound the
+ * horn shut until somebody writes a row on purpose.
  *
  * 🔴 TURN_SIGNAL HAS A ROW AND THEY DO NOT, WHICH IS NOT AN OVERSIGHT. Its
  * row is where the owner's 2026-09-06 decision lives. The other three write to
