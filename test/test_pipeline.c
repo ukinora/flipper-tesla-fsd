@@ -47,6 +47,11 @@ static const uint8_t TSL_LEFT[4] = {0x92, 0x0A, 0x08, 0x00};
  * the frame is there and the emitter works; what is missing is a wire row. */
 static const uint8_t BODY273[8] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
 
+/* 0x3C2 multiplex 0 as the car sends it, from
+ * captures/2026-09-06-5차/가벼운경적1회. The light horn's frame, and the one
+ * whose release has to face the same denial the press does. */
+static const uint8_t HORN_MUX0[8] = {0x00, 0x55, 0x55, 0x55, 0x00, 0x00, 0x69, 0x85};
+
 /* Inputs with every gate satisfied. Individual tests spoil one at a time. */
 static FsdBodyInputs good_inputs(uint32_t now_ms) {
     FsdBodyInputs in;
@@ -481,6 +486,76 @@ static void test_a_repeat_faces_every_gate(void) {
     fsd_pipe_one(FSD_ACT_TURN_SIGNAL, 0, 3, &in, &f, now, NULL);
 }
 
+/* 🔴 THE RELEASE IS A WRITE LIKE ANY OTHER, AND IT FACES THE SAME LAST DENIAL.
+ *
+ * When the light horn's release was first built it went straight from the
+ * emitter to the bus in rule_task.cpp -- skipping fsd_body_wire_check()
+ * entirely. The comment there argued at length for skipping the PERMISSION
+ * AXIS and never mentioned the chokepoint, which is a different thing with a
+ * different job: fsd_body_wire.h calls itself "the last denial before the
+ * wire", and fsd_pipeline.c says why it is separate from the emitter -- "the
+ * emitter is trusted to build the frame; it is NOT trusted to have changed
+ * only what it was allowed to."
+ *
+ * A hand-written memcmp in the ESP32 glue is not that check. It compares the
+ * frame against the same template the emitter just used as its input, it never
+ * looks at the id, the length or the multiplex, and it lives where no host
+ * test can reach it. So the release goes through fsd_pipe_release() now, and
+ * these assertions are what that buys.
+ *
+ * ⚠️ The axis is STILL skipped, deliberately, and fsd_pipe_release() has no
+ * FsdBodyInputs argument at all -- so it is not something a caller can forget
+ * to pass, it is a property of the function's shape. */
+static void test_release_faces_the_chokepoint(void) {
+    printf("\n-- 놓기도 초크포인트를 지난다 --\n");
+
+    FsdPipeFrames f;
+    fsd_pipe_init(&f);
+    FsdPipeResult r;
+
+    /* No template at all: refused before anything is built. */
+    memset(&r, 0, sizeof(r));
+    fsd_pipe_release(FSD_ACT_LIGHT_HORN, 0, 3u, &f, 1000u, &r);
+    CHECK(r.stage != FSD_PIPE_OK, "no template -> no release");
+
+    /* 🔴 THE ONE THAT MATTERS TODAY. The light horn has no wire row, so the
+     * PRESS is refused with NO_ROW -- and the release has to be refused the
+     * same way, for the same reason, or the two halves of one gesture answer
+     * to different rules. */
+    (void)fsd_pipe_observe(&f, 0x3C2u, HORN_MUX0, 8u, 1000u);
+    memset(&r, 0, sizeof(r));
+    fsd_pipe_release(FSD_ACT_LIGHT_HORN, 0, 3u, &f, 1050u, &r);
+    CHECK(r.stage == FSD_PIPE_BLOCKED_WIRE,
+          "release stops at the chokepoint, got %s", fsd_pipe_stage_str(r.stage));
+    CHECK(r.reason == (uint8_t)FSD_WIRE_NO_ROW,
+          "and the reason is the missing row, got %s",
+          fsd_body_wire_verdict_str((FsdBodyWireVerdict)r.reason));
+
+    FsdPipeResult press;
+    memset(&press, 0, sizeof(press));
+    FsdBodyInputs in;
+    memset(&in, 0, sizeof(in));
+    fsd_pipe_one(FSD_ACT_LIGHT_HORN, 0, 3u, &in, &f, 1050u, &press);
+    CHECK(press.stage != FSD_PIPE_OK, "and the press is refused too");
+
+    /* An action with no release at all must say so rather than build one. */
+    memset(&r, 0, sizeof(r));
+    fsd_pipe_release(FSD_ACT_MAP_LIGHT, 0, 0u, &f, 1050u, &r);
+    CHECK(r.stage == FSD_PIPE_BLOCKED_EMIT,
+          "the map light has no release, got %s", fsd_pipe_stage_str(r.stage));
+    CHECK(r.reason == (uint8_t)FSD_EMIT_NO_ENCODING,
+          "named as a gap, got %s", fsd_emit_result_str((FsdEmitResult)r.reason));
+
+    /* 🔴 AND THE FRAME IS ZEROED unless the stage is OK, the same contract
+     * fsd_pipe_one() keeps -- a caller that forgets to check the stage sends
+     * id 0 rather than something plausible. */
+    CHECK(r.frame.id == 0u && r.frame.dlc == 0u, "a refused release carries no frame");
+
+    /* Safe with any NULL. */
+    fsd_pipe_release(FSD_ACT_LIGHT_HORN, 0, 0u, NULL, 1000u, &r);
+    fsd_pipe_release(FSD_ACT_LIGHT_HORN, 0, 0u, &f, 1000u, NULL);
+}
+
 int main(void) {
     printf("test_pipeline: rule -> axis -> emitter -> chokepoint\n");
     test_turn_signal_needs_a_burst();
@@ -490,6 +565,7 @@ int main(void) {
     test_each_layer_refuses();
     test_quiet_cases();
     test_names();
+    test_release_faces_the_chokepoint();
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

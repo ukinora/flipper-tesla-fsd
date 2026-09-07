@@ -541,10 +541,15 @@ static void test_rewrite_opened_nothing(void) {
           "HAZARDS joined the same day, with the motion gates open on purpose");
     CHECK(fsd_body_allows(&in, FSD_ACT_TURN_SIGNAL, now) == FSD_BODY_OK,
           "TURN_SIGNAL joined 2026-09-06, on a measured frame plus owner consent");
+    CHECK(fsd_body_allows(&in, FSD_ACT_MIRROR, now) == FSD_BODY_OK,
+          "MIRROR joined 2026-09-07, on the 5th visit's two injected frames");
+    CHECK(fsd_body_allows(&in, FSD_ACT_LIGHT_HORN, now) == FSD_BODY_OK,
+          "LIGHT_HORN joined the same day, on the same visit's press/release");
 
     for (int a = 0; a < FSD_ACT_COUNT; a++) {
         if (a == FSD_ACT_MAP_LIGHT || a == FSD_ACT_DOOR_OPEN ||
-            a == FSD_ACT_HAZARDS || a == FSD_ACT_TURN_SIGNAL) continue;
+            a == FSD_ACT_HAZARDS || a == FSD_ACT_TURN_SIGNAL ||
+            a == FSD_ACT_MIRROR || a == FSD_ACT_LIGHT_HORN) continue;
         CHECK(fsd_body_allows(&in, (FsdBodyAction)a, now) == FSD_BODY_NOT_ARMABLE,
               "%s must refuse on its row even with every input satisfied",
               fsd_body_action_str((FsdBodyAction)a));
@@ -552,12 +557,12 @@ static void test_rewrite_opened_nothing(void) {
 
     // The count itself, so adding a row without deciding its arming is a
     // failing test rather than a silent grant. It moved 1 -> 2 -> 3 on
-    // 2026-09-05 and 3 -> 4 on 2026-09-06; each move cost red tests, which is
-    // the price it should cost.
+    // 2026-09-05, 3 -> 4 on 2026-09-06 and 4 -> 5 on 2026-09-07; each move cost
+    // red tests, which is the price it should cost.
     int armable = 0;
     for (int a = 0; a < FSD_ACT_COUNT; a++)
         if (fsd_body_caps((FsdBodyAction)a)->armable_at_runtime) armable++;
-    CHECK(armable == 4, "exactly four armable rows, found %d", armable);
+    CHECK(armable == 6, "exactly six armable rows, found %d", armable);
 }
 
 /* 🔴 THE TURN SIGNAL IS THE SECOND ROW TO OPEN THE MOTION GATES, and unlike
@@ -819,6 +824,52 @@ static void test_owner_decisions_are_in_the_table(void) {
     CHECK(h->may_act_out_of_park, "and out of park -- reverse is the whole case");
     CHECK(h->max_hold_ms > 0u,
           "the failure to survive is a stuck rule HOLDING them, so bound it");
+
+    /* 🔴 THE MIRROR IS THE ROW THAT LOOKS LIKE THE HAZARDS AND IS ITS
+     * OPPOSITE, which is exactly why it gets pinned rather than counted.
+     *
+     * Both arrived on a measured frame, both are small body commands, and the
+     * hazard row two lines up opened its motion gates on the argument that a
+     * light which may only act in park cannot do its job. That argument does
+     * not transfer: FOLDING A MIRROR AT SPEED REMOVES REARWARD VISION, and
+     * every rule an owner would actually write for it -- fold on walking away,
+     * unfold on getting in -- happens in park.
+     *
+     * So the next person who reads the hazard row and "makes the mirror
+     * consistent with it" has to argue with a red test. That is the entire
+     * purpose of this block: a mutation that opened these two gates passed
+     * every other assertion in this repo on 2026-09-07. */
+    const FsdBodyCaps* m = fsd_body_caps(FSD_ACT_MIRROR);
+    CHECK(m->armable_at_runtime, "mirror armable: frame measured 2026-09-06");
+    CHECK(!m->may_act_while_moving,
+          "🔴 mirrors must not fold at speed -- that is rearward vision");
+    CHECK(!m->may_act_out_of_park, "and not out of park, for the same reason");
+    CHECK(!m->may_act_without_driver && !m->may_act_without_drive_session,
+          "a body write on an unattended car needs its own reason, not the "
+          "hazard row's");
+    CHECK(m->min_interval_ms >= 3000u,
+          "the mirror drives a motor that takes seconds to travel, got %u",
+          (unsigned)m->min_interval_ms);
+    CHECK(m->max_hold_ms > 0u,
+          "TSL sends one frame per direction, so a re-sender is a bug to bound");
+
+    /* 🔴 THE LIGHT HORN SITS ON THE HAZARDS' SIDE OF THAT LINE, and the two
+     * rows above are why it gets said out loud. A horn is for warning somebody
+     * who is about to hit you, which happens at speed; a horn that may only
+     * sound in park cannot do that, exactly as with the hazards.
+     *
+     * What bounds it instead is the interval. The failure this row has to
+     * survive is not one beep in the wrong place, it is a stuck rule beeping
+     * over and over -- so it is rate-limited an order above the map light. */
+    const FsdBodyCaps* lh = fsd_body_caps(FSD_ACT_LIGHT_HORN);
+    CHECK(lh->armable_at_runtime, "light horn armable: frame measured 2026-09-06");
+    CHECK(lh->may_act_while_moving, "a horn that only sounds in park is not a horn");
+    CHECK(lh->may_act_out_of_park, "and out of park, for the same reason");
+    CHECK(!lh->may_act_without_driver && !lh->may_act_without_drive_session,
+          "but not on an unattended car -- same sentence as every other row");
+    CHECK(lh->min_interval_ms >= 1000u,
+          "a stuck rule must not be able to hold on the horn, got %u",
+          (unsigned)lh->min_interval_ms);
 }
 
 /* 🔴 THE BENCH REFUSED WHILE ALL OF THE ABOVE WAS GREEN.

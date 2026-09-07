@@ -91,6 +91,11 @@ extern "C" {
  * template is an old statement about the mirrors and the horn. */
 #define FSD_EMIT_TEMPLATE_MAX_AGE_MS 1500u
 
+/* This action's frame carries no multiplex. Same sentinel convention as
+ * FSD_BODY_WIRE_NO_MUX and FSD_SIG_NO_MUX, and the same value, so the three
+ * cannot be read as meaning different things. */
+#define FSD_EMIT_NO_MUX 0xFFu
+
 /* 0x273 UI_vehicleControl -- measured, see the header comment. */
 /* THE DOOR-OPEN COMMAND. Measured 2026-09-05, third visit.
  *
@@ -147,48 +152,80 @@ extern "C" {
 #define FSD_EMIT_HAZARD_SUM_ADD  0xECu
 
 #define FSD_EMIT_DOOR_ID         0x1F9u
-#define FSD_EMIT_DOOR_BYTE       1u
 #define FSD_EMIT_DOOR_DLC        8u
 
-/* WHICH DOOR. Measured, one door per visit:
+/* WHICH DOOR. All four measured now, one or two per visit:
  *
- *      right FRONT   byte1 = 0x03    3rd visit, 2026-09-05
- *      right REAR    byte1 = 0xC0    4th visit, 2026-09-05 afternoon
+ *      right FRONT   1F9#0003000000000000   3 << 8    3rd visit, 2026-09-05
+ *      right REAR    1F9#00C0000000000000   3 << 14   4th visit
+ *      left  FRONT   1F9#6000000000000000   3 << 5    5th visit, 2026-09-06
+ *      left  REAR    1F9#0018000000000000   3 << 11   5th visit
  *
- * The 4th visit caught the rear one TWICE in two different captures — TSL's
- * own menu entry, and the three-window-up gesture that fires the same rule —
- * and both produced 0xC0. That is the internal cross-check; neither reading
- * rests on the other.
+ * 🟢🟢 FOUR FIELDS, VALUE 3, OFFSETS THREE BITS APART. Two points were a
+ * bitmask or a set of 2-bit fields and there was no way to choose; four points
+ * are a structure, and the structure says the spacing is THREE.
  *
- *      (7.458) 1F9#0000000000000000     <- the car
- *      (7.459) 1F9#00C0000000000000     <- TSL, +1 ms
- *      (7.53x)                          <- 0x103 latch moves, 70-81 ms later
+ * 🔴 AND THE OLD INFERENCE WAS WRONG IN BOTH DIRECTIONS, WHICH IS WHY IT WAS
+ * REFUSED. This comment used to read: "0x03 is bits[1:0] and 0xC0 is bits[7:6],
+ * so four 2-bit fields fits both ... either reading predicts 0x0C and 0x30 for
+ * the two LEFT doors". Measured, the left rear is 0x18 -- not 0x0C, not 0x30 --
+ * and the left front IS NOT IN THAT BYTE AT ALL. Had the obvious answer been
+ * written in, a left-front rule would have opened a rear door.
  *
- * ⚠️ TWO POINTS, AND EVERYTHING ELSE IS INFERENCE. 0x03 is bits[1:0] and 0xC0
- * is bits[7:6], so "four 2-bit fields, value 3 = open" fits both. It also fits
- * a plain bitmask. Either reading predicts 0x0C and 0x30 for the two LEFT
- * doors — and NEITHER HAS BEEN SEEN. TSL has no left-door rule, so no capture
- * can contain one.
+ *      (6.671) 1F9#0000000000000000     <- the car
+ *      (6.671) 1F9#6000000000000000     <- TSL
+ *      (6.79x)                          <- 0x102 latch moves, 119 ms later
  *
- * So the left doors are NOT in this enum. A guess here does not fail loudly:
- * it opens a door on the other side of the car, next to whatever is standing
- * there. FSD_EMIT_NO_ENCODING is the honest answer until somebody measures it.
- */
+ * 🔴 WHICH IS WHY THE ENCODING IS A BYTE PLUS A MASK AND NOT A MASK ALONE.
+ * There used to be one FSD_EMIT_DOOR_BYTE for the whole action, and the left
+ * front does not live in it. A table of masks bolted onto that constant would
+ * have put 0x60 into byte 1, on top of the two rear fields, and reported OK.
+ *
+ * ⚠️ WHAT IS STILL NOT MEASURED. Offset 2 sits below the first field and
+ * offset 17 above the last, and three-apart says something could be in either.
+ * The 5th visit found the FRUNK switch in this frame's back bytes
+ * (1F9#0000000000008801), so it plainly carries more than four doors. None of
+ * that is in the enum: a fifth selector would be predicted, not measured, and
+ * a prediction here opens a door. */
 typedef enum {
-    /* 0 is the right front, which is what every rule stored before this enum
-     * existed already meant. A stored rule must not quietly change which door
-     * it opens because the emitter learned a second one. */
+    /* 🔴 APPENDED, NEVER INSERTED -- these numbers are a rule's stored arg.
+     * 0 is the right front because that is what every rule stored before this
+     * enum existed already meant, and 1 kept its place when the rear arrived.
+     *
+     * ⚠️ 2 AND 3 USED TO BE REFUSALS. A stored rule carrying either did
+     * nothing before today and opens a left door now. Nothing that WORKED
+     * changes -- only something that never worked starts to -- and the app has
+     * never offered a value outside {0, 1} to store. Written down because it is
+     * still a behaviour change on data already in NVS, and because the two
+     * gates that make it harmless (the axis, and the missing wire row) are
+     * both things somebody will one day open on purpose. */
     FSD_EMIT_DOOR_RIGHT_FRONT = 0,
     FSD_EMIT_DOOR_RIGHT_REAR = 1,
+    FSD_EMIT_DOOR_LEFT_FRONT = 2,
+    FSD_EMIT_DOOR_LEFT_REAR = 3,
     FSD_EMIT_DOOR_COUNT,
 } FsdEmitDoor;
 
-#define FSD_EMIT_DOOR_RF_BITS    0x03u
-#define FSD_EMIT_DOOR_RR_BITS    0xC0u
+/* Byte index and mask for each field. Written as measured bytes rather than as
+ * (offset, width) arithmetic so that what is in this file is what came off the
+ * bus; the offsets are in the comment above and a host test derives these four
+ * masks from them independently. */
+#define FSD_EMIT_DOOR_RF_BYTE    1u
+#define FSD_EMIT_DOOR_RF_BITS    0x03u   /* 3 << 8  */
+#define FSD_EMIT_DOOR_RR_BYTE    1u
+#define FSD_EMIT_DOOR_RR_BITS    0xC0u   /* 3 << 14 */
+#define FSD_EMIT_DOOR_LF_BYTE    0u
+#define FSD_EMIT_DOOR_LF_BITS    0x60u   /* 3 << 5  */
+#define FSD_EMIT_DOOR_LR_BYTE    1u
+#define FSD_EMIT_DOOR_LR_BITS    0x18u   /* 3 << 11 */
 
-/** byte1 value for a door selector. False — *bits_out untouched — for a
- *  selector this car has never been measured to accept. */
-bool fsd_emit_door_bits(int32_t door, uint8_t* bits_out);
+/** Where a door selector's field lives: which byte, and which bits inside it.
+ *
+ *  🔴 BOTH OR NEITHER. The byte is half the answer -- the left front is the
+ *  only field in byte 0 and every other one is in byte 1 -- so a caller that
+ *  took the mask and assumed the byte would write a measured value at an
+ *  unmeasured place. False leaves both outputs untouched. */
+bool fsd_emit_door_field(int32_t door, uint8_t* byte_ix_out, uint8_t* bits_out);
 
 /** Name for logs and the serial console. Never returns NULL; an unmeasured
  *  selector reads as "?" rather than as some door. */
@@ -198,6 +235,105 @@ const char* fsd_emit_door_str(int32_t door);
 #define FSD_EMIT_MAP_LIGHT_BYTE  7u
 #define FSD_EMIT_MAP_LIGHT_MASK  0x08u   /* bit 3 of byte 7 = bit 59 */
 #define FSD_EMIT_MAP_LIGHT_DLC   8u
+
+/* THE MIRROR COMMAND. Measured 2026-09-06, fifth visit.
+ *
+ *      (5.743) 273#81E110000B023001     <- the car
+ *      (5.744) 273#81E110010B023001     <- TSL, +1 ms, byte3 = 1, FOLD
+ *      (8.743) 273#81E110000B023001     <- the car
+ *      (8.744) 273#81E110020B023001     <- TSL, +1 ms, byte3 = 2, UNFOLD
+ *
+ * 20 car frames in that capture, byte identical, 500 ms apart; exactly two are
+ * not, and each is one byte from the frame before it.
+ *
+ * 🔴 THE 3rd VISIT COULD NOT TELL COMMAND FROM STATE HERE. The mirrors moved
+ * 302 ms BEFORE the value appeared, which is what a status broadcast looks
+ * like, and 차량-캡처-2026-09-05-4차.md wrote it down as unresolved rather than
+ * guessing. The 5th visit settled it: the car never sends a non-zero byte 3,
+ * and both values arrive 1 ms behind a car frame -- where every other TSL
+ * injection on this bus lives.
+ *
+ * 🟢 SAME FRAME AS THE MAP LIGHT, DIFFERENT BYTE. First pair of actions in the
+ * enum that share an id and both have an emitter. That is why the template
+ * store is keyed by ACTION rather than by CAN id, and why a host test asserts
+ * the two cannot reach each other's bits.
+ *
+ * 🔴 AND IT IS A VALUE, NOT A BITMASK -- the difference that made the shared
+ * build path stop using |=. 1 and 2 are two states of one small field, so
+ * OR-ing 2 onto a template that already reads 1 produces 3: a value nobody has
+ * seen, asserted on a frame that also carries the locks, the wipers and the
+ * horn. Every frame we hold has byte 3 at 0, so OR and write agree on all the
+ * evidence there is -- which is exactly why the code has to be right about it
+ * rather than lucky. */
+#define FSD_EMIT_MIRROR_ID       0x273u
+#define FSD_EMIT_MIRROR_BYTE     3u
+#define FSD_EMIT_MIRROR_MASK     0x03u
+#define FSD_EMIT_MIRROR_DLC      8u
+
+/** Which way. ⚠️ The raw byte-3 values are deliberately NOT the enum values,
+ *  the same rule as the turn signal: a rule's stored arg has to keep meaning
+ *  the same thing if the field encoding is ever re-read.
+ *
+ *  🔴 THERE IS NO "STOP". 0 is the value the car broadcasts at rest, not a
+ *  third command -- ceasing to send is what stopping means here, the same as
+ *  the map light. A selector that wrote 0 would be claiming the car's own
+ *  resting value as an instruction. */
+typedef enum {
+    FSD_EMIT_MIRROR_FOLD = 0,
+    FSD_EMIT_MIRROR_UNFOLD = 1,
+    FSD_EMIT_MIRROR_COUNT,
+} FsdEmitMirror;
+
+#define FSD_EMIT_MIRROR_FOLD_BITS   0x01u
+#define FSD_EMIT_MIRROR_UNFOLD_BITS 0x02u
+
+/** byte3 field value for a mirror selector. False — *bits_out untouched — for
+ *  a selector this car has never been measured to accept. */
+bool fsd_emit_mirror_bits(int32_t mirror, uint8_t* bits_out);
+
+/** Name for logs and the serial console. Never returns NULL. */
+const char* fsd_emit_mirror_str(int32_t mirror);
+
+/* THE LIGHT HORN. Measured 2026-09-06, fifth visit. TSL calls it 轻鸣笛 --
+ * the LIGHT horn -- and the adjective turns out to be the command:
+ *
+ *      (5.969) 3C2#0055555500006985     <- the car, multiplex 0
+ *      (5.970) 3C2#0055555500006985     <- an exact echo, +1 ms
+ *      (5.985) 3C2#0455555500006985     <- PRESS,   byte 0 bit 2
+ *      (5.997) 3C2#0055555500006985     <- RELEASE, 12 ms later
+ *      (6.069) 3C2#0055555500006985     <- the car's own next mux 0, +84 ms
+ *
+ * 🔴 THE RELEASE IS THE FEATURE. Send the press alone and the button stays
+ * down until the car's own next mux-0 frame contradicts it -- about 84 ms
+ * here, up to 100. Whether that is still a light beep or a real blast is not
+ * something any capture we hold answers, and the device that named the command
+ * "light" sends the release explicitly rather than waiting. So do we.
+ *
+ * ⚠️ THE ECHO AT 5.970 IS NOT REPRODUCED. It is the only sub-2 ms pair in the
+ * whole ten seconds, so it is almost certainly TSL rather than the bus -- but
+ * it carries the car's own bytes unchanged and therefore commands nothing.
+ * Copying a frame because we saw it, with no account of what it does, is the
+ * opposite of what every other emitter here does.
+ *
+ * 🔴 IT IS ALSO THE ONLY TIMED EMITTER. The map light, the mirror and the door
+ * ride 0-1 ms behind a car frame; the indicator burst counts the car's own
+ * 0x249 arrivals. Here the press lands 16 ms after the car's frame and the
+ * release 12 ms after the press -- and mux 0 only arrives every 100 ms, so
+ * reception cannot drive a 12 ms gap. The caller owns that clock.
+ *
+ * 🔴 AND THE MULTIPLEX IS IN THE BYTE WE WRITE. 0x3C2 selects its variant with
+ * bits [1:0] of byte 0 and our bit is bit 2, so the field is next door to the
+ * selector. Writing the pack variant's bit into the SCROLL variant would put a
+ * frame on the bus announcing one multiplex while carrying the other's
+ * payload, so the template's multiplex is checked here and not assumed. */
+#define FSD_EMIT_HORN_ID         0x3C2u
+#define FSD_EMIT_HORN_BYTE       0u
+#define FSD_EMIT_HORN_MASK       0x04u   /* bit 2 of byte 0 */
+#define FSD_EMIT_HORN_DLC        8u
+#define FSD_EMIT_HORN_MUX_BYTE   0u
+#define FSD_EMIT_HORN_MUX_MASK   0x03u
+#define FSD_EMIT_HORN_MUX_VALUE  0x00u   /* the "pack" variant */
+#define FSD_EMIT_HORN_RELEASE_MS 12u
 
 /* THE TURN SIGNAL COMMAND. Measured 2026-09-05, fourth visit.
  *
@@ -343,6 +479,15 @@ typedef enum {
      *  one clears by itself the moment the stalk goes back to rest, so a
      *  caller may retry and a screen should say something different. */
     FSD_EMIT_NO_CHECK,
+    /** 🔴 A RELEASE ONLY. The car's own most recent frame already has this
+     *  action's field set, so building the release would tell the car that
+     *  somebody let go of a control they are still holding.
+     *
+     *  We never receive our own transmissions, so a template with the field
+     *  set is not our press coming back -- it is a person's thumb. Like
+     *  NO_CHECK and unlike NO_ENCODING this clears by itself, so a caller may
+     *  simply stop rather than treat it as a fault. */
+    FSD_EMIT_FIELD_IN_USE,
 } FsdEmitResult;
 
     /** How many CONSECUTIVE frames this command has to occupy before the car
@@ -374,6 +519,25 @@ typedef enum {
  * car has answered, the way this one was.
  */
 uint8_t fsd_emit_repeat(FsdBodyAction a);
+
+/**
+ * How long after the press this action's RELEASE frame is owed, in
+ * milliseconds. 0 -- every action but one -- means the action has no release.
+ *
+ * 🔴 A RELEASE IS NOT "STOP", AND ONLY ONE ACTION HAS ONE. The map light and
+ * the mirror stop by our ceasing to send: the car's own frame wins the next
+ * time it comes round, which is what TSL's menu means by 关闭(跟随车机),
+ * "give control back to the car". The indicator does not stop at all -- the
+ * car latches it and the cancel is a separate command with its own argument.
+ * The light horn is neither: it is a PRESS, and a press that is never released
+ * is a stuck button.
+ *
+ * 0 is the safe default and needs no decision, which is why this is not
+ * written as an exhaustive switch the way fsd_emit_supported() is. An action
+ * added without a line here sends one frame and nothing else -- exactly what
+ * every action did before this function existed.
+ */
+uint16_t fsd_emit_release_ms(FsdBodyAction a);
 
 
 /** The car's most recent frame for the id this action writes. */
@@ -420,6 +584,28 @@ typedef struct {
 FsdEmitResult fsd_emit_build(FsdBodyAction action, int32_t arg,
                              const FsdEmitTemplate* t, uint32_t now_ms,
                              FsdEmitFrame* out);
+
+/**
+ * Build the second half of a gesture: the frame that lets the button go.
+ *
+ * FSD_EMIT_NO_ENCODING for any action whose fsd_emit_release_ms() is 0 --
+ * asking for a release the action does not have is a mistake, not a no-op.
+ *
+ * 🟢 THE SMALLEST CLAIM ANY EMITTER IN THIS FILE MAKES, AND THAT IS ENFORCED
+ * RATHER THAN ARGUED. The frame is the template with this action's field
+ * returned to its idle value, so against the car's own most recent frame it
+ * must differ in NOTHING -- and if it would, this refuses with
+ * FSD_EMIT_FIELD_IN_USE instead of building it. So the release cannot assert
+ * anything about the car; all it can do is arrive sooner than the car's next
+ * frame would have.
+ *
+ * That property is what lets fsd_pipe_release() skip the permission axis. It
+ * does NOT skip the chokepoint: the release is a write like any other and
+ * faces the same last denial. See fsd_pipeline.h.
+ */
+FsdEmitResult fsd_emit_build_release(FsdBodyAction action, int32_t arg,
+                                     const FsdEmitTemplate* t, uint32_t now_ms,
+                                     FsdEmitFrame* out);
 
 /** Names for logs and the serial console. Never returns NULL. */
 const char* fsd_emit_result_str(FsdEmitResult r);

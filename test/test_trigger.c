@@ -330,11 +330,71 @@ static void test_kinds_are_nameable(void) {
     CHECK(1, "set_double on a non-switch is harmless");
 }
 
+/* 🔴 A SWITCH WE CAN PRESS OURSELVES IS NOT EXEMPT FROM SUPPRESSION.
+ *
+ * fsd_trig_disturbed() has always skipped SWITCH signals, and its comment gave
+ * the reason: "We cannot press one, so a trigger there is a person, and
+ * suppressing it would silence the owner rather than us."
+ *
+ * That reason expired on 2026-09-07, for exactly one signal. The light horn
+ * emitter writes 0x3C2 mux 0 byte 0 bit 2, which IS FSD_SIG_HORN_SW -- there
+ * is no body controller in between, so our command is the observation one
+ * frame later. A rule reading "horn switch pressed -> light horn" would
+ * re-fire on its own output for as long as the caps row's interval allows.
+ *
+ * fsd_signal.h saw this coming and wrote it down against the stalk: "THIS
+ * FILE'S DEFINITION OF STATE IS 'we can cause it' -- SWITCH is exempt on the
+ * grounds that 'we cannot press one', WHICH WOULD STOP BEING TRUE." The stalk
+ * answered it by being a STATE. The horn cannot: a horn button has presses,
+ * and a rule on it wants PRESS/LONG/DOUBLE, which fsd_rule_valid() allows only
+ * on a SWITCH. So the exemption learned a condition instead of the signal
+ * changing kind. */
+static void test_a_switch_we_drive_is_not_exempt(void) {
+    FsdTriggers t;
+    fsd_trig_init(&t);
+
+    fsd_trig_disturbed(&t, FSD_SIG_HORN_SW, 1000);
+    CHECK(fsd_trig_is_quiet(&t, FSD_SIG_HORN_SW, 1000),
+          "the horn switch goes quiet after we write it");
+    CHECK(fsd_trig_is_quiet(&t, FSD_SIG_HORN_SW, 1000 + FSD_TRIG_SUPPRESS_MS - 1),
+          "still quiet just inside the window");
+    CHECK(!fsd_trig_is_quiet(&t, FSD_SIG_HORN_SW, 1000 + FSD_TRIG_SUPPRESS_MS),
+          "and it comes back when the window ends");
+
+    /* 🟢 THE HALF THAT KEEPS THIS FROM SILENCING THE OWNER. Every other switch
+     * is a finger and nothing else -- we have no emitter that can press one --
+     * so suppressing it would drop a real press. The exemption is narrowed,
+     * not removed. */
+    static const FsdSignal HANDS_ONLY[] = {
+        FSD_SIG_MAP_SW_FL,
+        FSD_SIG_MAP_SW_RR,
+        FSD_SIG_WIN_UP_FR,
+        FSD_SIG_HAZARD_BTN,
+    };
+    for (unsigned i = 0; i < sizeof(HANDS_ONLY) / sizeof(HANDS_ONLY[0]); i++) {
+        fsd_trig_disturbed(&t, HANDS_ONLY[i], 2000);
+        CHECK(!fsd_trig_is_quiet(&t, HANDS_ONLY[i], 2000),
+              "%s is a finger only -- suppressing it would silence the owner",
+              fsd_signal_def(HANDS_ONLY[i])->name);
+    }
+
+    /* 🔴 And exactly one switch carries the flag today. Counted rather than
+     * listed, so a second one arriving without a reason shows up here. */
+    unsigned drivable_switches = 0;
+    for (unsigned s = 0; s < FSD_SIG_COUNT; s++) {
+        const FsdSignalDef *d = fsd_signal_def((FsdSignal)s);
+        if (d && d->kind == FSD_SIGK_SWITCH && d->we_can_drive) drivable_switches++;
+    }
+    CHECK(drivable_switches == 1,
+          "one switch has an emitter (the horn), found %u", drivable_switches);
+}
+
 int main(void) {
     printf("test_trigger\n");
     test_car_switches_are_level();
     test_first_frame_is_not_a_transition();
     test_our_own_writes_go_quiet();
+    test_a_switch_we_drive_is_not_exempt();
     test_wrong_multiplex_changes_nothing();
     test_scroll_is_a_count_not_a_level();
     test_the_second_bank_is_not_the_first();

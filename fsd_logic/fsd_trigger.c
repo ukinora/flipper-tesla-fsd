@@ -93,9 +93,21 @@ void fsd_trig_set_double(FsdTriggers* t, FsdSignal s, bool on) {
 void fsd_trig_disturbed(FsdTriggers* t, FsdSignal s, uint32_t now_ms) {
     if(!t || s >= FSD_SIG_COUNT) return;
     const FsdSignalDef* d = fsd_signal_def(s);
-    /* Switches are exempt. We cannot press one, so a trigger there is a
-     * person, and suppressing it would silence the owner rather than us. */
-    if(!d || d->kind == FSD_SIGK_SWITCH) return;
+    /* Switches are exempt -- UNLESS WE HAVE AN EMITTER FOR ONE.
+     *
+     * The exemption's reason is that we cannot press a button, so a trigger
+     * there is a person and silencing it would silence the owner. That held
+     * for every switch on this car until 2026-09-07, when the light horn
+     * emitter learned to write 0x3C2 mux 0 byte 0 bit 2 -- FSD_SIG_HORN_SW.
+     * There is no body controller in between: our command IS the observation,
+     * one frame later, so a rule on that switch would feed itself.
+     *
+     * 🔴 The condition is narrowed rather than the exemption removed. Every
+     * other switch is still a finger and nothing else, and suppressing those
+     * would drop real presses. Which switches we can drive is one fact, kept
+     * in FsdSignalDef and checked against FSD_AFFECTS by a host test. */
+    if(!d) return;
+    if(d->kind == FSD_SIGK_SWITCH && !d->we_can_drive) return;
     t->quiet_until[s] = now_ms + FSD_TRIG_SUPPRESS_MS;
     t->quiet_armed[s] = true;
 }

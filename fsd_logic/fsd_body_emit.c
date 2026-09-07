@@ -15,6 +15,8 @@ bool fsd_emit_supported(FsdBodyAction action) {
     case FSD_ACT_DOOR_OPEN:
     case FSD_ACT_HAZARDS:
     case FSD_ACT_TURN_SIGNAL:
+    case FSD_ACT_MIRROR:
+    case FSD_ACT_LIGHT_HORN:
         return true;
     case FSD_ACT_CAMERA:
     case FSD_ACT_SEAT_DRIVER:
@@ -27,24 +29,38 @@ bool fsd_emit_supported(FsdBodyAction action) {
     return false;
 }
 
-/* Door selector -> byte1 value. A switch, not a table lookup, so that adding
- * a door to FsdEmitDoor without measuring its bits is a compiler warning here
- * rather than an index into whatever follows the array. */
-bool fsd_emit_door_bits(int32_t door, uint8_t* bits_out) {
-    if(!bits_out) return false;
+/* Door selector -> (byte, mask). A switch, not a table lookup, so that adding
+ * a door to FsdEmitDoor without measuring its field is a compiler warning here
+ * rather than an index into whatever follows the array.
+ *
+ * 🔴 Neither output is written unless BOTH are known. A partial answer here is
+ * a measured mask at an unmeasured offset, which is a different door. */
+bool fsd_emit_door_field(int32_t door, uint8_t* byte_ix_out, uint8_t* bits_out) {
+    if(!byte_ix_out || !bits_out) return false;
     switch((FsdEmitDoor)door) {
     case FSD_EMIT_DOOR_RIGHT_FRONT:
+        *byte_ix_out = FSD_EMIT_DOOR_RF_BYTE;
         *bits_out = FSD_EMIT_DOOR_RF_BITS;
         return true;
     case FSD_EMIT_DOOR_RIGHT_REAR:
+        *byte_ix_out = FSD_EMIT_DOOR_RR_BYTE;
         *bits_out = FSD_EMIT_DOOR_RR_BITS;
+        return true;
+    case FSD_EMIT_DOOR_LEFT_FRONT:
+        *byte_ix_out = FSD_EMIT_DOOR_LF_BYTE;
+        *bits_out = FSD_EMIT_DOOR_LF_BITS;
+        return true;
+    case FSD_EMIT_DOOR_LEFT_REAR:
+        *byte_ix_out = FSD_EMIT_DOOR_LR_BYTE;
+        *bits_out = FSD_EMIT_DOOR_LR_BITS;
         return true;
     case FSD_EMIT_DOOR_COUNT:
         break;
     }
-    /* 🔴 Includes the two LEFT doors. The bit pattern makes 0x0C and 0x30 look
-     * obvious, and obvious is not measured. Guessing wrong here opens a door on
-     * the other side of the car. */
+    /* 🔴 Still the honest answer for anything past the fourth door. The frame
+     * carries more than four fields -- the frunk switch is in its back bytes --
+     * and "three bits apart" predicts a fifth at offset 17. Predicting is not
+     * measuring, and this is the file where that distinction opens a door. */
     return false;
 }
 
@@ -52,7 +68,38 @@ const char* fsd_emit_door_str(int32_t door) {
     switch((FsdEmitDoor)door) {
     case FSD_EMIT_DOOR_RIGHT_FRONT: return "right front";
     case FSD_EMIT_DOOR_RIGHT_REAR: return "right rear";
+    case FSD_EMIT_DOOR_LEFT_FRONT: return "left front";
+    case FSD_EMIT_DOOR_LEFT_REAR: return "left rear";
     case FSD_EMIT_DOOR_COUNT: break;
+    }
+    return "?";
+}
+
+/* Mirror selector -> byte3 field value. A switch for the same reason the door
+ * is one. */
+bool fsd_emit_mirror_bits(int32_t mirror, uint8_t* bits_out) {
+    if(!bits_out) return false;
+    switch((FsdEmitMirror)mirror) {
+    case FSD_EMIT_MIRROR_FOLD:
+        *bits_out = FSD_EMIT_MIRROR_FOLD_BITS;
+        return true;
+    case FSD_EMIT_MIRROR_UNFOLD:
+        *bits_out = FSD_EMIT_MIRROR_UNFOLD_BITS;
+        return true;
+    case FSD_EMIT_MIRROR_COUNT:
+        break;
+    }
+    /* 🔴 Includes 3, the value OR-ing the two directions would produce. The
+     * field is two bits wide so it exists on the wire; it has never been seen,
+     * and "the encoding allows it" is not "the car was asked for it". */
+    return false;
+}
+
+const char* fsd_emit_mirror_str(int32_t mirror) {
+    switch((FsdEmitMirror)mirror) {
+    case FSD_EMIT_MIRROR_FOLD: return "fold";
+    case FSD_EMIT_MIRROR_UNFOLD: return "unfold";
+    case FSD_EMIT_MIRROR_COUNT: break;
     }
     return "?";
 }
@@ -218,15 +265,20 @@ static FsdEmitResult emit_turn_signal(int32_t arg, const FsdEmitTemplate* t,
     return FSD_EMIT_OK;
 }
 
-FsdEmitResult fsd_emit_build(FsdBodyAction action, int32_t arg,
-                             const FsdEmitTemplate* t, uint32_t now_ms,
-                             FsdEmitFrame* out) {
-    if(!t || !out) return FSD_EMIT_BAD_TEMPLATE;
-    if(!fsd_emit_supported(action)) return FSD_EMIT_NO_ENCODING;
-
-    /* Two of the four commands have the same shape -- copy the car's frame,
-     * set one field, put it back on the same id -- so the id, length and bit
-     * live in four variables and the checks below are written once.
+/* The copy-and-set family: map light, door, mirror, light horn.
+ *
+ * `release` asks for the frame that puts this action's field BACK to its idle
+ * value instead of setting it. Only the light horn has one, and the public
+ * wrapper refuses the request for anything else -- but the two frames are
+ * built by one function on purpose, so a press and its release cannot disagree
+ * about the id, the length, the multiplex or the staleness bound. Two copies
+ * of those checks is how they drift. */
+static FsdEmitResult emit_copy_field(FsdBodyAction action, int32_t arg,
+                                     const FsdEmitTemplate* t, uint32_t now_ms,
+                                     bool release, FsdEmitFrame* out) {
+    /* Three of the six commands have the same shape -- copy the car's frame,
+     * set one field, put it back on the same id -- so the id, length, byte and
+     * field live in five variables and the checks below are written once.
      *
      * The other two do NOT fit that shape and take their own branches. 0x3E9
      * and 0x249 both carry a counter and a check field, so the frame is not a
@@ -234,10 +286,6 @@ FsdEmitResult fsd_emit_build(FsdBodyAction action, int32_t arg,
      * because one check is a formula and the other is a lookup. Kept separate
      * so nobody has to read the shared path wondering which of its steps
      * apply. */
-    /* Hazards take no argument. Ignored, not refused -- see the header. */
-    if(action == FSD_ACT_HAZARDS) return emit_hazards(t, now_ms, out);
-    if(action == FSD_ACT_TURN_SIGNAL) return emit_turn_signal(arg, t, now_ms, out);
-
     /* 🔴 NO `default:` HERE, AND THAT IS THE WHOLE POINT.
      *
      * fsd_emit_supported() above is written as a bare switch precisely so that
@@ -264,8 +312,27 @@ FsdEmitResult fsd_emit_build(FsdBodyAction action, int32_t arg,
      * The unreachable cases are listed rather than collapsed so the warning
      * fires. Initialised at the declaration only to keep -Wmaybe-uninitialized
      * quiet; the guard below is what actually stands there. */
+    /* 🔴 A MASK AND A VALUE, NOT ONE SET OF BITS, since 2026-09-07.
+     *
+     * This used to be a single `bits` OR-ed into the byte, which is right for
+     * a flag and wrong for a small enumerated field. The mirror is the second
+     * kind: byte 3 holds 1 for fold and 2 for unfold, so OR-ing 2 onto a
+     * template that already reads 1 yields 3 -- unmeasured, on a frame that
+     * also carries the locks, the wipers and the horn.
+     *
+     * 🟢 Nothing changed for the two that were here first: the map light and
+     * every door pass mask == value, and clearing a field before setting it to
+     * the same bits is the frame the OR produced. The tests that compare
+     * against TSL's captured bytes are unchanged and still pass, which is the
+     * point of writing them against the car instead of against the code. */
     uint32_t want_id = 0;
-    uint8_t want_dlc = 0, byte_ix = 0, bits = 0;
+    uint8_t want_dlc = 0, byte_ix = 0, mask = 0, value = 0;
+    /* The multiplex this action's variant carries, if its frame has one.
+     * FSD_EMIT_NO_MUX means it does not. */
+    uint8_t mux_byte = FSD_EMIT_NO_MUX, mux_mask = 0, mux_value = 0;
+    /* What the field reads when nobody is asking. Only meaningful for an
+     * action with a release; stated rather than assumed to be zero. */
+    uint8_t idle = 0;
     switch(action) {
     case FSD_ACT_DOOR_OPEN:
         /* 🔴 The ONLY place a door is chosen, and it refuses before it knows
@@ -273,20 +340,48 @@ FsdEmitResult fsd_emit_build(FsdBodyAction action, int32_t arg,
          * "the template was stale" -- that reads like a retryable problem, and
          * this one is not: no amount of waiting will make us know which bits
          * open the driver's door. */
-        if(!fsd_emit_door_bits(arg, &bits)) return FSD_EMIT_NO_ENCODING;
+        if(!fsd_emit_door_field(arg, &byte_ix, &mask)) return FSD_EMIT_NO_ENCODING;
+        /* The door's field IS its value: 3 in a 3-bit field, and the two bits
+         * that carry it are the mask. Written out so that the day a door needs
+         * a different value the two stop being the same variable. */
+        value = mask;
         want_id = FSD_EMIT_DOOR_ID;
         want_dlc = FSD_EMIT_DOOR_DLC;
-        byte_ix = FSD_EMIT_DOOR_BYTE;
+        break;
+    case FSD_ACT_MIRROR:
+        /* Judged before the template, same as the door and the stalk: an
+         * unmeasured direction must not get as far as "the template was
+         * stale", which reads like something waiting would fix. */
+        if(!fsd_emit_mirror_bits(arg, &value)) return FSD_EMIT_NO_ENCODING;
+        want_id = FSD_EMIT_MIRROR_ID;
+        want_dlc = FSD_EMIT_MIRROR_DLC;
+        byte_ix = FSD_EMIT_MIRROR_BYTE;
+        mask = FSD_EMIT_MIRROR_MASK;
+        break;
+    case FSD_ACT_LIGHT_HORN:
+        /* Takes no argument: the gesture is the whole command, and which half
+         * of it we are building is `release`, not something a stored rule
+         * chooses. */
+        want_id = FSD_EMIT_HORN_ID;
+        want_dlc = FSD_EMIT_HORN_DLC;
+        byte_ix = FSD_EMIT_HORN_BYTE;
+        mask = FSD_EMIT_HORN_MASK;
+        value = FSD_EMIT_HORN_MASK;
+        idle = 0u;
+        mux_byte = FSD_EMIT_HORN_MUX_BYTE;
+        mux_mask = FSD_EMIT_HORN_MUX_MASK;
+        mux_value = FSD_EMIT_HORN_MUX_VALUE;
         break;
     case FSD_ACT_MAP_LIGHT:
         /* Takes no argument. Ignored, not refused -- see the header. */
         want_id = FSD_EMIT_MAP_LIGHT_ID;
         want_dlc = FSD_EMIT_MAP_LIGHT_DLC;
         byte_ix = FSD_EMIT_MAP_LIGHT_BYTE;
-        bits = FSD_EMIT_MAP_LIGHT_MASK;
+        mask = FSD_EMIT_MAP_LIGHT_MASK;
+        value = FSD_EMIT_MAP_LIGHT_MASK;
         break;
-    case FSD_ACT_HAZARDS:     /* returned above; listed so the switch is complete */
-    case FSD_ACT_TURN_SIGNAL: /* likewise */
+    case FSD_ACT_HAZARDS:     /* handled by their own branches; listed so the */
+    case FSD_ACT_TURN_SIGNAL: /* switch is complete and the warning fires */
     case FSD_ACT_CAMERA:
     case FSD_ACT_SEAT_DRIVER:
     case FSD_ACT_SEAT_PASSENGER:
@@ -300,6 +395,19 @@ FsdEmitResult fsd_emit_build(FsdBodyAction action, int32_t arg,
      * (fsd_emit_supported refuses it), but if one ever does it leaves without
      * an encoding instead of borrowing map light's. */
     if(want_id == 0) return FSD_EMIT_NO_ENCODING;
+
+    /* The byte index is a variable now that the door carries its own -- so it
+     * is bounded here rather than by inspection. Every value in the table is 0
+     * or 1 against a dlc of 8, so this cannot fire today; it is here because
+     * the day a short frame gets an emitter, the failure would be a write past
+     * the end of out->data rather than a refusal. */
+    if(byte_ix >= want_dlc) return FSD_EMIT_NO_ENCODING;
+
+    /* A value that does not fit its own field is a table error, and the frame
+     * it would build claims bits belonging to something else on the same
+     * byte. Refused rather than truncated: a silently narrowed command is a
+     * command that means something different. */
+    if((uint8_t)(value & (uint8_t)~mask) != 0u) return FSD_EMIT_NO_ENCODING;
 
     if(!t->seen) return FSD_EMIT_NO_TEMPLATE;
 
@@ -316,6 +424,25 @@ FsdEmitResult fsd_emit_build(FsdBodyAction action, int32_t arg,
     if((uint32_t)(now_ms - t->seen_ms) >= FSD_EMIT_TEMPLATE_MAX_AGE_MS)
         return FSD_EMIT_STALE_TEMPLATE;
 
+    /* 🔴 THE MULTIPLEX, CHECKED RATHER THAN ASSUMED -- for the same reason as
+     * the id one line up. 0x3C2's two variants share nothing: mux 0 carries
+     * the windows, the belt, the horn and the hazard button, mux 1 the scroll
+     * wheel and the camera. A horn bit stamped into the scroll variant would
+     * go out announcing one multiplex while carrying the other's payload.
+     *
+     * The pipeline's template store already filters by multiplex, so in the
+     * assembled system a wrong variant cannot arrive here. This file is still
+     * handed "the last frame we saw" and must not trust the plumbing that
+     * hands it over: PR #18 shipped a parser that read the right bits out of
+     * the wrong frame and failed closed by luck. */
+    if(mux_byte != FSD_EMIT_NO_MUX) {
+        if(mux_byte >= t->dlc) return FSD_EMIT_BAD_TEMPLATE;
+        if((uint8_t)(t->data[mux_byte] & mux_mask) != mux_value)
+            return FSD_EMIT_BAD_TEMPLATE;
+    }
+
+    if(release) value = idle;
+
     memset(out, 0, sizeof(*out));
     out->id = want_id;
     out->dlc = want_dlc;
@@ -323,9 +450,65 @@ FsdEmitResult fsd_emit_build(FsdBodyAction action, int32_t arg,
 
     /* The whole command. Everything else is the car's own bytes, unchanged --
      * which is the point, and what the tests compare against the real TSL
-     * frames byte for byte, for both commands. */
-    out->data[byte_ix] |= bits;
+     * frames byte for byte, for all three commands. Clear the field, then set
+     * it: for the light and the doors mask == value so this is the byte the
+     * old OR produced, and for the mirror it is the difference between 2 and
+     * 3. */
+    out->data[byte_ix] =
+        (uint8_t)((out->data[byte_ix] & (uint8_t)~mask) | value);
     return FSD_EMIT_OK;
+}
+
+FsdEmitResult fsd_emit_build(FsdBodyAction action, int32_t arg,
+                             const FsdEmitTemplate* t, uint32_t now_ms,
+                             FsdEmitFrame* out) {
+    if(!t || !out) return FSD_EMIT_BAD_TEMPLATE;
+    if(!fsd_emit_supported(action)) return FSD_EMIT_NO_ENCODING;
+
+    /* The two that carry a counter and a check field are not copies with a
+     * field set, they are copies REWRITTEN -- and even those two differ,
+     * because one check is a formula and the other is a lookup. Kept out of
+     * the shared path so nobody has to read it wondering which of its steps
+     * apply. */
+    /* Hazards take no argument. Ignored, not refused -- see the header. */
+    if(action == FSD_ACT_HAZARDS) return emit_hazards(t, now_ms, out);
+    if(action == FSD_ACT_TURN_SIGNAL) return emit_turn_signal(arg, t, now_ms, out);
+
+    return emit_copy_field(action, arg, t, now_ms, false, out);
+}
+
+FsdEmitResult fsd_emit_build_release(FsdBodyAction action, int32_t arg,
+                                     const FsdEmitTemplate* t, uint32_t now_ms,
+                                     FsdEmitFrame* out) {
+    if(!t || !out) return FSD_EMIT_BAD_TEMPLATE;
+    /* 🔴 Asked of fsd_emit_release_ms(), not of a list here. One statement of
+     * "which actions are gestures", so a caller's timer and this builder
+     * cannot disagree about whether a release is owed. */
+    if(fsd_emit_release_ms(action) == 0u) return FSD_EMIT_NO_ENCODING;
+
+    const FsdEmitResult r = emit_copy_field(action, arg, t, now_ms, true, out);
+    if(r != FSD_EMIT_OK) return r;
+
+    /* 🔴 THE CLAIM THIS FRAME MAKES, CHECKED. A release differs from the car's
+     * own frame in nothing -- that is what makes it a release rather than a
+     * command. If it would differ, the car is currently saying the field is
+     * SET, and since we never receive our own transmissions that is a person
+     * holding the control. Refuse rather than contradict them.
+     *
+     * ⚠️ Lives here rather than in the caller because it is a statement about
+     * the template and the field, which is what this file decides -- and
+     * because a check in the ESP32 glue is a check no host test can reach. */
+    if(out->dlc != t->dlc || memcmp(out->data, t->data, out->dlc) != 0) {
+        memset(out, 0, sizeof(*out));
+        return FSD_EMIT_FIELD_IN_USE;
+    }
+    return FSD_EMIT_OK;
+}
+
+/* See the header: 0 means "no release", which is every action but one. */
+uint16_t fsd_emit_release_ms(FsdBodyAction a) {
+    if(a == FSD_ACT_LIGHT_HORN) return FSD_EMIT_HORN_RELEASE_MS;
+    return 0u;
 }
 
 /* See the header. Measured only; 1 is the "not measured" value. */
@@ -342,6 +525,7 @@ const char* fsd_emit_result_str(FsdEmitResult r) {
     case FSD_EMIT_BAD_TEMPLATE: return "bad template";
     case FSD_EMIT_NO_ENCODING: return "no encoding";
     case FSD_EMIT_NO_CHECK: return "check byte unmeasured here";
+    case FSD_EMIT_FIELD_IN_USE: return "the car says that control is in use";
     }
     return "?";
 }
