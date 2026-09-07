@@ -72,6 +72,14 @@ test_body_wire: $(BODYWIRE_SRC) $(ROOT)/fsd_logic/fsd_body_wire.h $(ROOT)/fsd_lo
 # Named signals pulled out of CAN frames. The test frames are real ones, copied
 # out of the 2026-09-01 capture — a test built from the table could only prove
 # the table agrees with itself.
+# The four layers joined. Links every one of them because that is the
+# point: this binary is the only place the whole chain runs, and it runs
+# on frames copied out of captures rather than on a fixture.
+PIPE_SRC := test_pipeline.c $(ROOT)/fsd_logic/fsd_pipeline.c $(ROOT)/fsd_logic/fsd_rules.c $(ROOT)/fsd_logic/fsd_body.c $(ROOT)/fsd_logic/fsd_body_emit.c $(ROOT)/fsd_logic/fsd_body_wire.c $(ROOT)/fsd_logic/fsd_signal.c
+
+test_pipeline: $(PIPE_SRC) $(ROOT)/fsd_logic/fsd_pipeline.h $(ROOT)/fsd_logic/fsd_rules.h $(ROOT)/fsd_logic/fsd_body.h $(ROOT)/fsd_logic/fsd_body_emit.h $(ROOT)/fsd_logic/fsd_body_wire.h $(ROOT)/fsd_logic/fsd_trigger.h
+	$(CC) $(CFLAGS) -I$(ROOT)/fsd_logic $(PIPE_SRC) -o $@
+
 SIGNAL_SRC := test_signal.c $(ROOT)/fsd_logic/fsd_signal.c
 
 test_signal: $(SIGNAL_SRC) $(ROOT)/fsd_logic/fsd_signal.h
@@ -129,7 +137,8 @@ CAPJSON_SRC := test_cap_json.c $(ROOT)/fsd_logic/fsd_cap_json.c
 test_cap_json: $(CAPJSON_SRC) $(ROOT)/fsd_logic/fsd_cap_json.h
 	$(CC) $(CFLAGS) -I$(ROOT)/fsd_logic $(CAPJSON_SRC) -o $@
 
-check: test_fsd_core test_speed_profile test_camera test_gps test_body test_body_emit test_body_wire test_signal test_trigger test_rules test_button test_btn_j6 test_wire test_cap_json
+check: test_pipeline test_fsd_core test_speed_profile test_camera test_gps test_body test_body_emit test_body_wire test_signal test_trigger test_rules test_button test_btn_j6 test_wire test_cap_json
+	./test_pipeline
 	./test_fsd_core
 	./test_speed_profile
 	./test_camera
@@ -146,6 +155,6 @@ check: test_fsd_core test_speed_profile test_camera test_gps test_body test_body
 	./test_cap_json
 
 clean:
-	rm -rf test_fsd_core test_speed_profile test_camera test_gps test_body test_body_emit test_body_wire test_signal test_trigger test_rules test_button test_btn_j6 test_wire test_cap_json *.dSYM
+	rm -rf test_pipeline test_fsd_core test_speed_profile test_camera test_gps test_body test_body_emit test_body_wire test_signal test_trigger test_rules test_button test_btn_j6 test_wire test_cap_json *.dSYM
 
 .PHONY: check clean
