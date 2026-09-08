@@ -121,9 +121,26 @@ void rule_task_set_armed(bool armed) {
      * itself is a smaller thing than a rule that keeps writing after the
      * operator said no. */
     g_release.pending = false;
+    /* 🔴 THIS SAID "무장/해제" UNTIL 2026-09-08, when the owner asked why.
+     * It was a literal rendering of `armed`. In English that word is neutral
+     * safety-engineering vocabulary only because of long usage -- you arm an
+     * alarm -- and the usage does not travel. In Korean 무장 is military and
+     * nothing else, so the translation kept the letter and dropped the sense.
+     *
+     * 🔴 Worse, one word was carrying four different jobs: this switch, the
+     * capability table's armable_at_runtime (a property of an action, not a
+     * state), the blackbox capture window, and the camera policy's ARMED
+     * phase -- and the last two can appear on the same phone screen. The
+     * visible words now name what each one actually does.
+     *
+     * 🔴 The identifiers do not change. g_armed, rule_task_set_armed() and
+     * the `rulearm` command keep their names, for the reason OpMode keeps
+     * "Active": the command is typed, and the field procedure quotes it as
+     * an anchor. Renaming the visible half and leaving the anchor is the
+     * decision, not an oversight. */
     Serial.printf("[RULE] %s\n", armed
-        ? "무장됨 — 매핑이 실제로 CAN 에 씁니다 (이 세션에만, 전원과 함께 꺼집니다)"
-        : "해제됨 — 매핑은 판정만 하고 아무것도 보내지 않습니다");
+        ? "송신 허용 — 매핑이 실제로 CAN 에 씁니다 (이 세션에만, 전원과 함께 꺼집니다)"
+        : "송신 잠금 — 매핑은 판정만 하고 아무것도 보내지 않습니다");
 }
 
 bool rule_task_armed(void) {
@@ -361,10 +378,10 @@ const char* rule_task_last_refusal(void) {
 
 void rule_task_print(void) {
     Serial.printf("[RULE] %s · 보냄 %u · 거부 %u · 마지막 거부: %s\n",
-                  g_armed ? "무장됨" : "해제됨", (unsigned)g_sent, (unsigned)g_refused,
+                  g_armed ? "송신 허용" : "송신 잠금", (unsigned)g_sent, (unsigned)g_refused,
                   g_last_refusal);
     if (!g_armed) {
-        Serial.println("[RULE] 무장하려면 'rulearm on'. 이 세션에만 유효하고 "
+        Serial.println("[RULE] 허용하려면 'rulearm on'. 이 세션에만 유효하고 "
                        "전원이 끊기면 꺼집니다.");
     }
 }

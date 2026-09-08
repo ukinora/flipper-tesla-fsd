@@ -412,7 +412,7 @@ static void serial_command_tick() {
                 } else {
                     Serial.printf("[RULE] 지금 %s — 켜려면 'rulearm on', "
                                   "끄려면 'rulearm off'\n",
-                                  rule_task_armed() ? "무장됨" : "해제됨");
+                                  rule_task_armed() ? "송신 허용" : "송신 잠금");
                 }
             } else if (serial_cmd_equals(buf, "ruleq")) {
                 rule_task_print();
@@ -596,8 +596,8 @@ static void serial_command_tick() {
                 Serial.println("[SER]   bbclear yes   — delete ALL captures (irreversible)");
                 Serial.println("[SER]   bball [on|off]— 무필터 캡처 (한 건 1.5 MB, 디스크 2건)");
                 Serial.println("[SER]   rules         — 저장된 매핑");
-                Serial.println("[SER]   rulearm on/off— 매핑이 실제로 CAN 에 쓰게 (세션 한정)");
-                Serial.println("[SER]   ruleq         — 무장 여부 · 보냄 · 거부");
+                Serial.println("[SER]   rulearm on/off— 송신 허용/잠금 (세션 한정)");
+                Serial.println("[SER]   ruleq         — 송신 허용 여부 · 보냄 · 거부");
                 Serial.println("[SER]   pwr           — 12V verdict: switched or always-on");
                 Serial.println("[SER]   hw [hw3|hw4|legacy|auto] — 오토파일럿 세대 고정 (persisted)");
                 Serial.println("[SER]   owner / ownerpair / ownerclear");
