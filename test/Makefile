@@ -6,9 +6,9 @@
 CC      ?= cc
 CFLAGS  ?= -std=c11 -Wall -Wextra -O0 -g
 ROOT    := ..
-SRC     := test_fsd_core.c $(ROOT)/fsd_logic/fsd_handler.c $(ROOT)/fsd_logic/fsd_ota.c $(ROOT)/fsd_logic/fsd_profile.c $(ROOT)/fsd_logic/fsd_autonomy.c $(ROOT)/fsd_logic/fsd_power.c $(ROOT)/fsd_logic/fsd_owner.c $(ROOT)/fsd_logic/fsd_selftest.c
+SRC     := test_fsd_core.c $(ROOT)/fsd_logic/fsd_rxstall.c $(ROOT)/fsd_logic/fsd_handler.c $(ROOT)/fsd_logic/fsd_ota.c $(ROOT)/fsd_logic/fsd_profile.c $(ROOT)/fsd_logic/fsd_autonomy.c $(ROOT)/fsd_logic/fsd_power.c $(ROOT)/fsd_logic/fsd_owner.c $(ROOT)/fsd_logic/fsd_selftest.c
 
-test_fsd_core: $(SRC) $(ROOT)/fsd_logic/fsd_handler.h $(ROOT)/fsd_logic/fsd_ota.h $(ROOT)/fsd_logic/fsd_types.h $(ROOT)/fsd_logic/fsd_checksum.h $(ROOT)/fsd_logic/fsd_can_ops.h $(ROOT)/fsd_logic/fsd_state.h $(ROOT)/fsd_logic/fsd_capture.h $(ROOT)/fsd_logic/fsd_profile.h $(ROOT)/fsd_logic/fsd_events.h $(ROOT)/fsd_logic/fsd_blackbox_summary.h $(ROOT)/fsd_logic/fsd_blackbox_filter.h $(ROOT)/fsd_logic/fsd_bushealth.h $(ROOT)/fsd_logic/fsd_canquar.h $(ROOT)/fsd_logic/fsd_readcache.h $(ROOT)/fsd_logic/fsd_capability.h $(ROOT)/fsd_logic/fsd_profile_db.h $(ROOT)/fsd_logic/fsd_autonomy.h $(ROOT)/fsd_logic/fsd_power.h $(ROOT)/fsd_logic/fsd_owner.h $(ROOT)/fsd_logic/fsd_selftest.h
+test_fsd_core: $(SRC) $(ROOT)/fsd_logic/fsd_handler.h $(ROOT)/fsd_logic/fsd_ota.h $(ROOT)/fsd_logic/fsd_types.h $(ROOT)/fsd_logic/fsd_checksum.h $(ROOT)/fsd_logic/fsd_can_ops.h $(ROOT)/fsd_logic/fsd_state.h $(ROOT)/fsd_logic/fsd_capture.h $(ROOT)/fsd_logic/fsd_profile.h $(ROOT)/fsd_logic/fsd_events.h $(ROOT)/fsd_logic/fsd_blackbox_summary.h $(ROOT)/fsd_logic/fsd_blackbox_filter.h $(ROOT)/fsd_logic/fsd_bushealth.h $(ROOT)/fsd_logic/fsd_canquar.h $(ROOT)/fsd_logic/fsd_readcache.h $(ROOT)/fsd_logic/fsd_capability.h $(ROOT)/fsd_logic/fsd_profile_db.h $(ROOT)/fsd_logic/fsd_autonomy.h $(ROOT)/fsd_logic/fsd_power.h $(ROOT)/fsd_logic/fsd_owner.h $(ROOT)/fsd_logic/fsd_rxstall.h $(ROOT)/fsd_logic/fsd_selftest.h
 	$(CC) $(CFLAGS) -I$(ROOT)/fsd_logic $(SRC) -o $@ -lm
 
 # Speed-profile convergence machine. Standalone: it deliberately depends on
@@ -75,9 +75,9 @@ test_body_wire: $(BODYWIRE_SRC) $(ROOT)/fsd_logic/fsd_body_wire.h $(ROOT)/fsd_lo
 # The four layers joined. Links every one of them because that is the
 # point: this binary is the only place the whole chain runs, and it runs
 # on frames copied out of captures rather than on a fixture.
-PIPE_SRC := test_pipeline.c $(ROOT)/fsd_logic/fsd_pipeline.c $(ROOT)/fsd_logic/fsd_rules.c $(ROOT)/fsd_logic/fsd_body.c $(ROOT)/fsd_logic/fsd_body_emit.c $(ROOT)/fsd_logic/fsd_body_wire.c $(ROOT)/fsd_logic/fsd_signal.c
+PIPE_SRC := test_pipeline.c $(ROOT)/fsd_logic/fsd_burst.c $(ROOT)/fsd_logic/fsd_pipeline.c $(ROOT)/fsd_logic/fsd_rules.c $(ROOT)/fsd_logic/fsd_body.c $(ROOT)/fsd_logic/fsd_body_emit.c $(ROOT)/fsd_logic/fsd_body_wire.c $(ROOT)/fsd_logic/fsd_signal.c
 
-test_pipeline: $(PIPE_SRC) $(ROOT)/fsd_logic/fsd_pipeline.h $(ROOT)/fsd_logic/fsd_rules.h $(ROOT)/fsd_logic/fsd_body.h $(ROOT)/fsd_logic/fsd_body_emit.h $(ROOT)/fsd_logic/fsd_body_wire.h $(ROOT)/fsd_logic/fsd_trigger.h
+test_pipeline: $(PIPE_SRC) $(ROOT)/fsd_logic/fsd_burst.h $(ROOT)/fsd_logic/fsd_pipeline.h $(ROOT)/fsd_logic/fsd_rules.h $(ROOT)/fsd_logic/fsd_body.h $(ROOT)/fsd_logic/fsd_body_emit.h $(ROOT)/fsd_logic/fsd_body_wire.h $(ROOT)/fsd_logic/fsd_trigger.h
 	$(CC) $(CFLAGS) -I$(ROOT)/fsd_logic $(PIPE_SRC) -o $@
 
 SIGNAL_SRC := test_signal.c $(ROOT)/fsd_logic/fsd_signal.c

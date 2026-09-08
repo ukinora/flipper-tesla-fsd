@@ -33,6 +33,7 @@
 #include "fsd_ota.h"
 #include "fsd_power.h"
 #include "fsd_owner.h"
+#include "fsd_rxstall.h"
 #include "fsd_selftest.h"
 #include "fsd_profile.h"
 #include "fsd_profile_db.h"
@@ -4211,6 +4212,184 @@ static void test_ui_soc_refuses_rather_than_guesses(void) {
     CHECK(!st.ui_soc_seen, "nor mark it seen");
 }
 
+
+/* ════════════════════════════════════════════════════════════════════════
+ * fsd_rxstall — a controller that was listening and stopped.
+ *
+ * 🔴 TWICE IN THE CAR, AND EACH TIME IT COST MORE THAN HALF AN HOUR.
+ *
+ *   2026-09-01  RX frozen at 701.       Cause: CAN-H/L were reversed.
+ *   2026-09-08  RX frozen at 4,187,198. Cause: NOT that — the wiring was
+ *               fine, the car was awake, the gear went in, Err was 0.
+ *
+ * Both were fixed by pulling the USB and putting it back. That is the shape
+ * this file is for: **the counter stops with nothing else complaining.** It is
+ * a different signature from the one fsd_bushealth.h watches, which is a
+ * controller raising errors without pause — here the error counter says zero
+ * and the controller simply goes deaf.
+ *
+ * 🔴 WHY THIS NEEDS A GIVE-UP AND NOT JUST A TIMER. A sleeping car produces
+ * exactly the same reading: the bus goes quiet and RX stops. Re-initialising
+ * then is pointless, and re-initialising forever would fill the log with a
+ * recovery that never recovers — which is worse than not trying, because a
+ * real stall would be invisible inside it.
+ *
+ * The discriminator is not a cleverer threshold. It is that **recovery either
+ * works or it does not**: a latched controller comes back on the first
+ * re-init, a sleeping car does not come back however many times we ask. So we
+ * try a small number of times, then stop until traffic returns on its own.
+ * ════════════════════════════════════════════════════════════════════════ */
+
+static void test_rxstall_does_nothing_on_a_bus_that_never_spoke(void) {
+    printf("\n-- rxstall: a bus we never heard is not a stall --\n");
+    FsdRxStall st;
+    fsd_rxstall_reset(&st);
+    /* 🔴 A board on the bench with nothing plugged in reads 0 forever. That is
+     * not a controller that went deaf; it is one that was never spoken to, and
+     * re-initialising it in a loop would be the first thing anyone sees. */
+    for (uint32_t t = 0; t < 60000u; t += 1000u)
+        CHECK(fsd_rxstall_sample(&st, 0u, t) == FSD_RXSTALL_OK,
+              "quiet from the start at %u ms", (unsigned)t);
+    CHECK(st.recoveries == 0u, "and nothing was attempted");
+}
+
+static void test_rxstall_recovers_a_controller_that_went_deaf(void) {
+    printf("\n-- rxstall: it was counting, then it stopped --\n");
+    FsdRxStall st;
+    fsd_rxstall_reset(&st);
+
+    /* The bus is alive. */
+    uint32_t rx = 0u;
+    for (uint32_t t = 0; t < 2000u; t += 100u)
+        CHECK(fsd_rxstall_sample(&st, (rx += 400u), t) == FSD_RXSTALL_OK,
+              "healthy at %u ms", (unsigned)t);
+
+    /* 4,187,198 and then nothing — the 2026-09-08 reading.
+     *
+     * 🔴 The window runs from the LAST FRAME, not from when we noticed. The
+     * loop above ends at 1900 ms, so that is the clock. Writing 2000 here
+     * failed first, and the right response was to fix the arithmetic rather
+     * than the file: "how long since the bus spoke" is the question, and it
+     * cannot be measured from a moment the bus had nothing to do with. */
+    const uint32_t last_frame = 1900u;
+    CHECK(fsd_rxstall_sample(&st, rx, last_frame + FSD_RXSTALL_QUIET_MS - 1u)
+              == FSD_RXSTALL_OK,
+          "a short gap is not a stall");
+    CHECK(fsd_rxstall_sample(&st, rx, last_frame + FSD_RXSTALL_QUIET_MS)
+              == FSD_RXSTALL_RECOVER,
+          "silence past the window asks for a re-init");
+    CHECK(st.recoveries == 1u, "counted");
+
+    /* 🔴 AND NOT AGAIN ON THE VERY NEXT TICK. A re-init takes time to show
+     * whether it worked; asking again a millisecond later would stack resets
+     * on a controller that is still coming up. */
+    CHECK(fsd_rxstall_sample(&st, rx, last_frame + FSD_RXSTALL_QUIET_MS + 1u)
+              == FSD_RXSTALL_OK,
+          "the cooldown holds it");
+    CHECK(fsd_rxstall_sample(&st, rx,
+                             last_frame + FSD_RXSTALL_QUIET_MS + FSD_RXSTALL_COOLDOWN_MS)
+              == FSD_RXSTALL_RECOVER,
+          "and lets the next one through");
+}
+
+static void test_rxstall_stops_asking_when_asking_does_not_help(void) {
+    printf("\n-- rxstall: a sleeping car is not a broken controller --\n");
+    FsdRxStall st;
+    fsd_rxstall_reset(&st);
+    uint32_t rx = 1000u;
+    CHECK(fsd_rxstall_sample(&st, rx, 0u) == FSD_RXSTALL_OK, "seed");
+    CHECK(fsd_rxstall_sample(&st, (rx += 100u), 100u) == FSD_RXSTALL_OK, "traffic");
+
+    uint32_t t = 100u;
+    unsigned asked = 0;
+    for (unsigned i = 0; i < 20u; i++) {
+        t += FSD_RXSTALL_QUIET_MS + FSD_RXSTALL_COOLDOWN_MS;
+        if (fsd_rxstall_sample(&st, rx, t) == FSD_RXSTALL_RECOVER) asked++;
+    }
+    CHECK(asked == FSD_RXSTALL_MAX_TRIES, "asked %u times, not forever", asked);
+    CHECK(st.gave_up, "and said so");
+
+    /* 🔴 UNTIL THE BUS COMES BACK. The car waking up has to re-arm this, or a
+     * module that sat through one night never guards the drive after it. */
+    CHECK(fsd_rxstall_sample(&st, rx + 1u, t + 100u) == FSD_RXSTALL_OK, "traffic returns");
+    CHECK(!st.gave_up, "the give-up is lifted");
+    CHECK(fsd_rxstall_sample(&st, rx + 1u, t + 100u + FSD_RXSTALL_QUIET_MS)
+              == FSD_RXSTALL_RECOVER,
+          "and it guards the next stall");
+}
+
+static void test_rxstall_a_working_recovery_resets_the_budget(void) {
+    printf("\n-- rxstall: recovery that works costs nothing later --\n");
+    FsdRxStall st;
+    fsd_rxstall_reset(&st);
+    uint32_t rx = 500u;
+    fsd_rxstall_sample(&st, rx, 0u);
+    fsd_rxstall_sample(&st, (rx += 50u), 100u);
+    CHECK(fsd_rxstall_sample(&st, rx, 100u + FSD_RXSTALL_QUIET_MS) == FSD_RXSTALL_RECOVER,
+          "stalled, asked once");
+    CHECK(st.tries == 1u, "one try spent");
+    /* The controller comes back. */
+    CHECK(fsd_rxstall_sample(&st, rx + 400u, 100u + FSD_RXSTALL_QUIET_MS + 50u)
+              == FSD_RXSTALL_OK,
+          "frames again");
+    CHECK(st.tries == 0u, "the budget is whole again");
+}
+
+static void test_rxstall_a_counter_that_restarts_is_not_traffic(void) {
+    printf("\n-- rxstall: a smaller count is a restart, not a frame --\n");
+    FsdRxStall st;
+    fsd_rxstall_reset(&st);
+    uint32_t rx = 900000u;
+    fsd_rxstall_sample(&st, rx, 0u);
+    fsd_rxstall_sample(&st, (rx += 100u), 100u);
+    CHECK(fsd_rxstall_sample(&st, rx, 100u + FSD_RXSTALL_QUIET_MS) == FSD_RXSTALL_RECOVER,
+          "stalled");
+
+    /* 🔴 The MCP2515 driver does NOT zero rx_count_ in begin(), so this cannot
+     * happen today — but "today" is the only thing that makes it safe, and a
+     * driver that started zeroing it would turn every failed recovery into a
+     * successful-looking one. Only an INCREASE counts as a frame. */
+    CHECK(fsd_rxstall_sample(&st, 0u, 100u + FSD_RXSTALL_QUIET_MS + 10u) == FSD_RXSTALL_OK,
+          "a restart is absorbed quietly");
+    CHECK(st.tries == 1u, "and does NOT refund the try");
+    CHECK(fsd_rxstall_sample(&st, 5u, 100u + FSD_RXSTALL_QUIET_MS + 20u) == FSD_RXSTALL_OK,
+          "counting up from the new base is traffic");
+    CHECK(st.tries == 0u, "which does refund it");
+}
+
+static void test_rxstall_survives_the_millisecond_wrap(void) {
+    printf("\n-- rxstall: 49 days --\n");
+    FsdRxStall st;
+    fsd_rxstall_reset(&st);
+    const uint32_t near_wrap = 0xFFFFF000u;
+    uint32_t rx = 10u;
+    fsd_rxstall_sample(&st, rx, near_wrap);
+    fsd_rxstall_sample(&st, (rx += 5u), near_wrap + 100u);
+    /* Unsigned subtraction carries across the wrap; a signed compare would
+     * make a due stall wait another 49 days. */
+    CHECK(fsd_rxstall_sample(&st, rx, near_wrap + 100u + FSD_RXSTALL_QUIET_MS)
+              == FSD_RXSTALL_RECOVER,
+          "a stall that spans the wrap is still a stall");
+
+    /* 🔴 AND UNSIGNED IS NOT INTERCHANGEABLE WITH THE SIGNED TRICK USED FOR
+     * DEADLINES. release_due() asks "is this moment past", where the gap is
+     * small and a signed compare is right. This asks "how long since", and a
+     * signed compare silently answers "not yet" for every gap over 24.8 days
+     * — so a module left in a stored car would stop guarding the bus for
+     * another 24.8 days.
+     *
+     * Written because the mutation that swaps them survived the test above:
+     * a 3-second gap looks the same either way, which is exactly why the
+     * difference needs its own case. */
+    FsdRxStall far;
+    fsd_rxstall_reset(&far);
+    uint32_t r2 = 7u;
+    fsd_rxstall_sample(&far, r2, 0u);
+    fsd_rxstall_sample(&far, (r2 += 3u), 1u);
+    CHECK(fsd_rxstall_sample(&far, r2, 0x90000000u) == FSD_RXSTALL_RECOVER,
+          "a gap past 24.8 days is elapsed, not negative");
+}
+
 int main(void) {
     printf("test_fsd_core: Tesla FSD protocol core host tests\n");
     test_set_bit();
@@ -4287,6 +4466,12 @@ int main(void) {
     test_autonomy_mode();
     test_observer_extra_fields();
     test_ui_warning_seen_needs_blinker_bytes();
+    test_rxstall_does_nothing_on_a_bus_that_never_spoke();
+    test_rxstall_recovers_a_controller_that_went_deaf();
+    test_rxstall_stops_asking_when_asking_does_not_help();
+    test_rxstall_a_working_recovery_resets_the_budget();
+    test_rxstall_a_counter_that_restarts_is_not_traffic();
+    test_rxstall_survives_the_millisecond_wrap();
 
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
