@@ -167,7 +167,7 @@ void body_task_tick(uint32_t now_ms) {
          *        person compares against the capture by eye
          *   last when the last T2 gesture landed, so it can be found in a dump */
         "[BODY] t1:%u(%s) win:%u latch L:%X R:%X | t2:%u press:%ums gap:%ums "
-        "rej:%u b5:%02X last:%ums | mux0:%ums\n",
+        "rej:%u b5:%02X last:%ums | mux0:%ums drv:%u/%u\n",
         (unsigned)g_t1_actions, fsd_body_verdict_str(fsd_t1_last_verdict(&g_t1)),
         (unsigned)fsd_t1_window_count(&g_t1),
         (unsigned)fsd_t1_latch_raw(&g_t1, FSD_BODY_SIDE_LEFT),
@@ -175,7 +175,17 @@ void body_task_tick(uint32_t now_ms) {
         (unsigned)fsd_t2_last_press_ms(&g_t2), (unsigned)fsd_t2_last_gap_ms(&g_t2),
         (unsigned)fsd_t2_last_reject(&g_t2),
         (unsigned)fsd_t2_last_byte5(&g_t2), (unsigned)fsd_t2_last_gesture_ms(&g_t2),
-        (unsigned)fsd_t2_mux0_min_gap_ms(&g_t2));
+        (unsigned)fsd_t2_mux0_min_gap_ms(&g_t2),
+        /* 🔴 NOT A GATE ANY MORE -- a measurement. The occupancy gate that read
+         * this was removed on 2026-09-08, which left fsd_t2_driver_*() with no
+         * production caller at all: this repo's oldest failure mode. It is
+         * printed instead of deleted because the question it answers is still
+         * open and now reachable from the app -- driverPresent is offered as a
+         * RULE TRIGGER (signal 17), and on this car the bit reads 100/100 while
+         * parked with the gear being worked and 0/100 across an entire drive.
+         * Anyone about to build a rule on it should be able to watch it. */
+        (unsigned)fsd_t2_driver_seen(&g_t2),
+        (unsigned)fsd_t2_driver_present(&g_t2));
 }
 
 uint8_t body_task_t1_verdict(void) { return (uint8_t)fsd_t1_last_verdict(&g_t1); }

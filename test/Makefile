@@ -35,7 +35,12 @@ test_gps: $(GPS_SRC) $(ROOT)/fsd_logic/fsd_gps.h $(ROOT)/fsd_logic/fsd_camera.h
 
 # Body control: the authority axis plus the T1/T2 detectors. Standalone — none
 # of these files constructs a CAN frame, so there is nothing to link but them.
-BODY_SRC := test_body.c $(ROOT)/fsd_logic/fsd_body.c $(ROOT)/fsd_logic/fsd_body_t1.c $(ROOT)/fsd_logic/fsd_body_t2.c
+# fsd_autonomy.c is here for ONE function: fsd_drive_observe_belt_switch().
+# test_the_capture_that_refused_now_passes() drives the axis from raw 0x3C2
+# bytes rather than from fields set by hand, and that is the observer those
+# bytes have to go through -- assembling FsdBodyInputs in the test is exactly
+# what let a missing producer reach the bench on 2026-09-07.
+BODY_SRC := test_body.c $(ROOT)/fsd_logic/fsd_body.c $(ROOT)/fsd_logic/fsd_body_t1.c $(ROOT)/fsd_logic/fsd_body_t2.c $(ROOT)/fsd_logic/fsd_autonomy.c
 # The emitter — the one thing that actually builds a body frame. Its vectors are
 # the bytes TSL put on the wire on 2026-09-03, so this checks the builder
 # against the CAR rather than against my reading of the capture.
