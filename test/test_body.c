@@ -686,6 +686,33 @@ static void test_rate_limit(void) {
     CHECK(fsd_body_allows(&in, FSD_ACT_MAP_LIGHT, now) == FSD_BODY_OK,
           "exactly the interval is enough");
 
+    /* 🔴 0 MEANS NEVER, AND THE SUBTRACTION DOES NOT SAY THAT NEAR BOOT.
+     *
+     * The field's own comment promises "0 means never fired, and the unsigned
+     * wrap treats that as long ago -- correct, because it is". That is true
+     * for every millis() except the first few thousand: at now = 300 the
+     * arithmetic gives 300, which is LESS than the map light's 500, so the
+     * very first command of a run would be refused for as long as the
+     * interval lasts.
+     *
+     * Nobody would have noticed while the limiter was decorative. Turning it
+     * on made the promise load-bearing, so the code has to keep it. */
+    FsdBodyInputs boot = good_inputs(300u);
+    boot.last_act_ms[FSD_ACT_MAP_LIGHT] = 0u;
+    CHECK(fsd_body_allows(&boot, FSD_ACT_MAP_LIGHT, 300u) == FSD_BODY_OK,
+          "300 ms after boot, an action that never fired is allowed");
+    CHECK(iv > 300u, "...and this only means anything while iv (%u) exceeds it",
+          (unsigned)iv);
+
+    /* ...but 0 is not a licence: an action that DID fire at millis() 0 is
+     * indistinguishable from one that never did, and the safe reading of an
+     * ambiguity here is the permissive one only because the alternative
+     * refuses every first command. One millisecond of licence, once a boot. */
+    FsdBodyInputs later = good_inputs(300u + iv);
+    later.last_act_ms[FSD_ACT_MAP_LIGHT] = 300u;
+    CHECK(fsd_body_allows(&later, FSD_ACT_MAP_LIGHT, 300u + 1u) == FSD_BODY_TOO_SOON,
+          "a real stamp still counts, even a tiny one");
+
     // A row that never set min_interval_ms may never fire. This is the
     // permissive-when-non-zero rule applied to a number, and it is why a
     // zero-filled row is still the tightest row.

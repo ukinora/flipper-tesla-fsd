@@ -5,6 +5,22 @@
  * body_task.cpp and camera_task.cpp do. rule_task_observe() has one caller
  * inside process_frame(), and the tick is called from loop(). Nothing here may
  * be called from a NimBLE callback.
+ *
+ * 🔴 WHAT IS AND IS NOT COVERED BY A TEST, because this file is Arduino and no
+ * host test can reach a line of it. Everything that DECIDES lives elsewhere:
+ * the rules (fsd_rules.c), the four gates (fsd_pipeline.c), when a frame goes
+ * out (fsd_burst.c), what a frame contains (fsd_body_emit.c). What is left
+ * here is glue -- and glue is where this file has been wrong twice:
+ *
+ *   2026-09-08  run_event() shipped frame one on the trigger's clock. The car
+ *               found it: the mirror never reached the bus.
+ *   2026-09-08  Removing that send also removed the stage check, so a REFUSED
+ *               decision armed a burst -- and stamped the rate limiter, which
+ *               would have locked out the next valid press. Reading found it,
+ *               an hour after writing it.
+ *
+ * So: when editing this file, the question is not "do the tests pass". It is
+ * "which of these lines is a decision that should not be here at all".
  */
 
 #include "rule_task.h"
@@ -154,11 +170,20 @@ bool rule_task_armed(void) {
  * operator armed the engine. Disarmed, every action_enabled stays false and
  * the axis answers NOT_ENABLED — the same refusal a disabled rule would get,
  * with a name. */
-static FsdBodyInputs rule_inputs(uint32_t now_ms) {
+/* `emitting` is the action whose frame is going out right now, or
+ * FSD_ACT_COUNT on the press path where nothing is. It exempts that one action
+ * from min_interval_ms -- see fsd_burst_fill_last_act(), which owns the reason.
+ *
+ * 🔴 body_task.cpp memsets last_act_ms and nothing else fills it, so before
+ * 2026-09-08 every min_interval_ms in FSD_BODY_CAPS was decorative: four gates
+ * advertised, three enforced. The record lives in the burst table because that
+ * table already is the list of commands accepted. */
+static FsdBodyInputs rule_inputs(uint32_t now_ms, unsigned emitting) {
     FsdBodyInputs in = body_task_permission_inputs(now_ms);
     if (g_armed) {
         for (unsigned a = 0; a < FSD_ACT_COUNT; a++) in.action_enabled[a] = true;
     }
+    fsd_burst_fill_last_act(&g_burst, in.last_act_ms, emitting);
     return in;
 }
 
@@ -250,9 +275,15 @@ static void arm_release(const FsdPipeResult* r, uint32_t now_ms) {
  * review caught: it went from the emitter straight to the bus with a
  * hand-written memcmp -- skipping fsd_body_wire_check(), which every other
  * write in this firmware goes through -- and its comment justified skipping
- * the axis by claiming the rate limit would refuse the release, which is not
- * true of this build (last_act_ms has no producer). Both halves moved into
- * fsd_logic/ where a host test can stand.
+ * the axis by claiming the rate limit would refuse the release, which was not
+ * true of that build: last_act_ms had no producer and every min_interval_ms
+ * was decorative. Both halves moved into fsd_logic/ where a host test can
+ * stand.
+ *
+ * ⚠️ The limiter IS enforced since 2026-09-08, so the claim is now arguable --
+ * and the skip is still not justified by it. The release is skipped because it
+ * is the second half of one gesture, not because of what any gate would
+ * answer; see fsd_pipe_release().
  *
  * What still stands in front of the frame after this: the arm flag and the bus
  * guard here, then send_on_bus()'s mode gate and id refusals in main.cpp. */
@@ -278,7 +309,10 @@ static void run_event(const FsdTriggerEvent* ev, uint32_t now_ms) {
     const FsdRules* rules = rules_store_table();
     if (!rules) return;
 
-    const FsdBodyInputs in = rule_inputs(now_ms);
+    /* Nothing is being emitted here, so nothing is exempt: this is the one
+     * place min_interval_ms is asked, and a press inside the interval is
+     * refused before a burst can be armed. */
+    const FsdBodyInputs in = rule_inputs(now_ms, FSD_ACT_COUNT);
 
     FsdPipeResult out[FSD_PIPE_MAX_OUT];
     memset(out, 0, sizeof(out));
@@ -293,6 +327,27 @@ static void run_event(const FsdTriggerEvent* ev, uint32_t now_ms) {
          *
          * The decision is still made HERE, at the press: which rules matched
          * is a question about the event. Only the writing moved. */
+        /* 🔴🔴 A REFUSAL ARMS NOTHING. Dropping the ship() call that used to
+         * stand here removed the only thing that separated an accepted
+         * decision from a refused one -- and arming on a refusal is worse
+         * than sending on one: fsd_burst_arm() STAMPS last_act_ms, so a
+         * command the axis just rejected would lock the next, valid press out
+         * for the whole interval. It would also hold a slot until the
+         * deadline, and report its reason 500 ms late instead of under the
+         * finger that caused it.
+         *
+         * Found while wiring the rate limiter -- the same commit that made the
+         * stamp mean anything is the one that made this dangerous. */
+        if (out[i].stage != FSD_PIPE_OK) {
+            note_refusal(&out[i]);
+            Serial.printf("[RULE] 매핑 %u %s 거부 — %s: %s\n",
+                          (unsigned)out[i].rule_index,
+                          fsd_body_action_str(out[i].action),
+                          fsd_pipe_stage_str(out[i].stage),
+                          fsd_pipe_reason_str(out[i].stage, out[i].reason));
+            continue;
+        }
+
         const FsdBodyWire* w = fsd_body_wire(out[i].action);
         if (!w) {
             /* Every action in the enum has a row, so this is unreachable
@@ -327,7 +382,10 @@ static void burst_on_frame(uint32_t can_id, uint32_t now_ms) {
     FsdBurstDue due;
     if (!fsd_burst_on_frame(&g_burst, can_id, now_ms, &due)) return;
 
-    const FsdBodyInputs in = rule_inputs(now_ms);
+    /* Exempt this action: the command it belongs to already passed the
+     * interval at the press, and the indicator's own row (50 ms) would
+     * otherwise refuse frames two through four of its own burst. */
+    const FsdBodyInputs in = rule_inputs(now_ms, (unsigned)due.action);
     FsdPipeResult r;
     memset(&r, 0, sizeof(r));
     fsd_pipe_one(due.action, due.arg, due.rule_index, &in, &g_frames, now_ms, &r);

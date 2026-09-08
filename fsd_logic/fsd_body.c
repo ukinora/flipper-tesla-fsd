@@ -229,10 +229,18 @@ static const FsdBodyCaps FSD_BODY_CAPS[] = {
      * into, and the same sentence as the hazard row applies: a body write on an
      * unattended car needs its own reason written here, not an inherited one.
      *
-     * min_interval_ms is 50, the car's own period for this frame, because TSL
-     * sends three or four back to back at exactly that rate and we do not know
-     * which of them the car acts on. A larger interval would make the emitter
+     * min_interval_ms is 50, the car's own period for this frame. That number
+     * was picked when the column was read as a FRAME spacing: TSL sends three
+     * or four back to back at exactly that rate and we do not know which of
+     * them the car acts on, so a larger interval would have made the emitter
      * structurally unable to reproduce the only sequence we have seen work.
+     *
+     * ⚠️ SINCE 2026-09-08 THE COLUMN COUNTS COMMANDS, so 50 no longer bounds
+     * the burst at all -- the burst is one command and its frames are exempt.
+     * What it now says is "a new indicator command may be issued twenty times
+     * a second", which is permissive and deliberately left that way: this row
+     * is not where the indicator is protected, and changing the number would
+     * be a decision with its own measurement to do.
      * 🔴 That is the loosest interval in this table, and the thing that keeps
      * it from being a burst generator is max_hold_ms, not this.
      *
@@ -312,14 +320,19 @@ static const FsdBodyCaps FSD_BODY_CAPS[] = {
      * on the horn. 1000 is an order above the map light's 500 and still leaves
      * the feature usable: nobody wants two beeps in one second.
      *
-     * ⚠️ AND IT IS NOT ENFORCED TODAY. FsdBodyInputs.last_act_ms has no
-     * producer anywhere in the firmware -- body_task.cpp memsets the struct and
-     * nothing ever writes that array -- so every min_interval_ms in this table
-     * is currently decorative. Found while wiring this row, left alone on
-     * purpose: turning the limiter on would also start rate-limiting the
-     * indicator burst, whose four frames arrive at exactly the 50 ms its own
-     * row allows. That is a change with its own measurement to do, not a line
-     * to slip into this one.
+     * 🟢 AND IT IS ENFORCED SINCE 2026-09-08. It was not before: last_act_ms
+     * had no producer anywhere in the firmware -- body_task.cpp memset the
+     * struct and nothing ever wrote that array -- so every min_interval_ms in
+     * this table was decorative, four gates advertised and three enforced.
+     *
+     * It was found while wiring this row and left alone on purpose, because
+     * switching it on naively breaks the indicator: four frames about 50 ms
+     * apart against a row that allows 50 ms. 🔴 The answer turned out not to be
+     * a bigger number but a re-reading of the question -- this column counts
+     * COMMANDS, which is what every row in this table already assumed (3000
+     * here is "do not open the door twice in three seconds"). A burst is one
+     * command; it is stamped once, at the press, and its own frames are exempt.
+     * See fsd_burst_fill_last_act().
      *
      * max_hold_ms is 1000. There is nothing to hold -- the gesture is 12 ms --
      * so the bound is here for the same reason as the door's: a re-sender
@@ -382,7 +395,19 @@ FsdBodyVerdict fsd_body_caps_verdict(const FsdBodyCaps* c, const FsdBodyInputs* 
      * missing: a row with min_interval_ms == 0 may never fire at all, and that
      * has to be answerable even on a car that is telling us nothing. */
     if(c->min_interval_ms == 0u) return FSD_BODY_TOO_SOON;
-    if((uint32_t)(now_ms - in->last_act_ms[a]) < c->min_interval_ms) return FSD_BODY_TOO_SOON;
+    /* 🔴 0 IS "NEVER", NOT "AT MILLISECOND ZERO". The field's own comment
+     * promises the unsigned wrap treats it as long ago, and that is true for
+     * every millis() except the first few thousand: at now = 300 the
+     * subtraction yields 300, below the map light's 500, so the FIRST command
+     * of a run would be refused for as long as the interval lasts.
+     *
+     * Nobody could have noticed while the limiter was decorative. Turning it
+     * on (2026-09-08) made the promise load-bearing. The cost of the explicit
+     * check is one millisecond of licence, once per boot, to an action that
+     * genuinely fired at millis() 0. */
+    if(in->last_act_ms[a] != 0u &&
+       (uint32_t)(now_ms - in->last_act_ms[a]) < c->min_interval_ms)
+        return FSD_BODY_TOO_SOON;
 
     /* "Is someone in the driver's seat", from TWO signals rather than one.
      *
