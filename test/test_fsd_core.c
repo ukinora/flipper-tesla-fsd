@@ -2198,6 +2198,14 @@ static void test_blackbox_filter(void) {
     CHECK(fsd_blackbox_should_record(0x102u), "0x102 VCLEFT doors (T1 input)");
     CHECK(fsd_blackbox_should_record(0x103u), "0x103 VCRIGHT doors (T1 input)");
     CHECK(fsd_blackbox_should_record(0x311u), "0x311 anyDoorOpen — T1's third input");
+
+    /* 🔴 Both battery frames, named for the same reason as the rest of this
+     * block. Dropping either one puts the 2026-09-08 finding back out of
+     * reach of an ordinary capture -- and the finding IS that they differ, so
+     * one without the other reproduces exactly the confusion it settled. */
+    CHECK(fsd_blackbox_should_record(CAN_ID_BMS_SOC), "0x292 the pack's estimate");
+    CHECK(fsd_blackbox_should_record(CAN_ID_UI_SOC),
+          "0x33A the number on the car's screen");
     CHECK(fsd_blackbox_should_record(0x3F5u), "0x3F5 courtesy lighting (T1 output cand.)");
     CHECK(fsd_blackbox_should_record(0x3E2u), "0x3E2 map light state");
     CHECK(fsd_blackbox_should_record(0x119u), "0x119 window requests (T2 output cand.)");

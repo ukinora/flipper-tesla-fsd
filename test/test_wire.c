@@ -699,6 +699,17 @@ static void emit_fixture(FILE* f) {
           .blinker_left_blinking = 1u, .blinker_right_blinking = 1u,
           .op_mode = 0, .hw_version = 2, .gear = 1, .rx_fps = 1000,
           .uptime_s = 121}},
+        /* 🔴 THE TWO BATTERY NUMBERS, SIDE BY SIDE — the exact pair measured
+         * on 2026-09-08 with both screens photographed together. Its own
+         * vector because every other one here leaves byte 28 at the sentinel,
+         * and a fixture that only ever carries "absent" never makes the app
+         * walk the path where the value exists. */
+        {"battery_car_and_pack",
+         {.rx_seen = true, .op_mode = 0, .hw_version = 2, .gear = 1,
+          .rx_fps = 1000, .uptime_s = 600,
+          .soc_percent = 24.5f, /* 0x292 — the pack said this... */
+          .ui_soc_seen = true,
+          .ui_soc = 22}}, /* ...and the car's screen said this */
     };
 
     const size_t ns = sizeof(states) / sizeof(states[0]);
@@ -713,7 +724,7 @@ static void emit_fixture(FILE* f) {
                 "\"hw\": %u, \"speed_profile\": %u, \"ap_state\": %u, "
                 "\"speed_kph_x10\": %u, \"soc\": %u, \"gear\": %u, "
                 "\"speed_limit\": %u, \"rx_fps\": %u, \"crc_err\": %u, "
-                "\"uptime_s\": %u, \"blink_l\": %u, \"blink_r\": %u, \"limit_src\": %u, \"bs_l\": %u, \"bs_r\": %u, \"tyre0\": %u, \"tyre1\": %u, \"tyre2\": %u, \"tyre3\": %u } }%s\n",
+                "\"uptime_s\": %u, \"blink_l\": %u, \"blink_r\": %u, \"limit_src\": %u, \"bs_l\": %u, \"bs_r\": %u, \"tyre0\": %u, \"tyre1\": %u, \"tyre2\": %u, \"tyre3\": %u, \"ui_soc\": %u } }%s\n",
                 (unsigned)b[0], (unsigned)b[1], (unsigned)w->op_mode,
                 (unsigned)w->hw_version, (unsigned)b[4], (unsigned)w->ap_state,
                 (unsigned)le16(&b[6]), (unsigned)b[8], (unsigned)w->gear,
@@ -723,6 +734,7 @@ static void emit_fixture(FILE* f) {
                 (unsigned)((b[20] >> 4) & 0x03u),
                 (unsigned)(b[21] & 0x03u), (unsigned)((b[21] >> 2) & 0x03u),
                 (unsigned)b[22], (unsigned)b[23], (unsigned)b[24], (unsigned)b[25],
+                (unsigned)b[28],
                 (i + 1 < ns) ? "," : "");
     }
     fprintf(f, "  ],\n  \"camstat\": [\n");

@@ -66,7 +66,7 @@
  * three times; 288 bytes cannot. */
 #define BLE_UUID_RULES   "6b1a000b-4b53-4d4f-4432-43414e000001"
 
-#define BLE_STATE_LEN  28u   // v7: +byte 27, DI_uiSpeed (reverse shows 0 otherwise)
+#define BLE_STATE_LEN  29u   // v8: +byte 28, the % on the CAR'S screen (0x33A)
 #define BLE_RESULT_LEN 4u
 #define BLE_BULK_HDR   2u   // seq prefix on every bulk frame
 
