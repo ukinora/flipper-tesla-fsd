@@ -5,6 +5,22 @@
  * body_task.cpp and camera_task.cpp do. rule_task_observe() has one caller
  * inside process_frame(), and the tick is called from loop(). Nothing here may
  * be called from a NimBLE callback.
+ *
+ * 🔴 WHAT IS AND IS NOT COVERED BY A TEST, because this file is Arduino and no
+ * host test can reach a line of it. Everything that DECIDES lives elsewhere:
+ * the rules (fsd_rules.c), the four gates (fsd_pipeline.c), when a frame goes
+ * out (fsd_burst.c), what a frame contains (fsd_body_emit.c). What is left
+ * here is glue -- and glue is where this file has been wrong twice:
+ *
+ *   2026-09-08  run_event() shipped frame one on the trigger's clock. The car
+ *               found it: the mirror never reached the bus.
+ *   2026-09-08  Removing that send also removed the stage check, so a REFUSED
+ *               decision armed a burst -- and stamped the rate limiter, which
+ *               would have locked out the next valid press. Reading found it,
+ *               an hour after writing it.
+ *
+ * So: when editing this file, the question is not "do the tests pass". It is
+ * "which of these lines is a decision that should not be here at all".
  */
 
 #include "rule_task.h"
