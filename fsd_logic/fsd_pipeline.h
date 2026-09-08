@@ -63,6 +63,14 @@ extern "C" {
  *  than a handful of them is a mistake, not a feature. */
 #define FSD_PIPE_MAX_OUT 4u
 
+/** No channel: this action's template has never arrived.
+ *
+ *  🔴 0 IS A REAL CHANNEL (can0), so it cannot carry the absence -- the same
+ *  argument as the profile sentinel and the battery percentage's. A caller
+ *  that forgets to check the stage must not be handed a plausible bus, for
+ *  exactly the reason the frame is zeroed. */
+#define FSD_PIPE_BUS_NONE 0xFFu
+
 /** Where a decision stopped. Anything but OK means NO FRAME WAS BUILT. */
 typedef enum {
     FSD_PIPE_OK = 0,
@@ -83,6 +91,22 @@ typedef struct {
      * caller that forgets to check the stage sends id 0 rather than something
      * plausible. */
     FsdEmitFrame frame;
+
+    /* Which channel this frame must go out on: the one its TEMPLATE arrived
+     * on, not the one that spoke most recently.
+     *
+     * 🔴 rule_task.h has always promised "a command goes back out the way it
+     * came in", and that promise was written after it was broken on the bench:
+     * a write went out on can0 while every frame we read arrived on can1,
+     * nothing answered, the error counters ran away and the isolator took the
+     * bus down. The implementation kept the promise only because ONE channel
+     * was wired -- it was a global set on every received frame. With two, a
+     * 0x273 template from Vehicle and a Party frame a millisecond later put
+     * the command on Party, and the chokepoint cannot catch that: it compares
+     * bytes, not channels.
+     *
+     * FSD_PIPE_BUS_NONE when no template has arrived. */
+    uint8_t bus;
 } FsdPipeResult;
 
 /* The car's most recent frame for each action, kept per action rather than per
@@ -91,6 +115,10 @@ typedef struct {
  * that would otherwise have to answer "which of these two did I mean". */
 typedef struct {
     FsdEmitTemplate tpl[FSD_ACT_COUNT];
+    /* Which channel each template arrived on. Parallel to tpl[] rather than
+     * inside FsdEmitTemplate because the emitter has no business knowing about
+     * buses -- it builds bytes. */
+    uint8_t bus[FSD_ACT_COUNT];
 } FsdPipeFrames;
 
 /** Clear every template. Nothing is "seen" until the car says so. */
@@ -106,8 +134,8 @@ void fsd_pipe_init(FsdPipeFrames* f);
  *  🔴 The action->id mapping is fsd_body_wire()'s table, not a second list.
  *  A copy would be one more thing to keep in step, and this repo has paid for
  *  that four times (CAN ids, rule layout, allow-lists, the OTA raw value). */
-uint8_t fsd_pipe_observe(FsdPipeFrames* f, uint32_t can_id, const uint8_t* data, uint8_t dlc,
-                         uint32_t now_ms);
+uint8_t fsd_pipe_observe(FsdPipeFrames* f, uint8_t bus, uint32_t can_id,
+                         const uint8_t* data, uint8_t dlc, uint32_t now_ms);
 
 /**
  * The RELEASE half of a gesture, through the same gates the press faced --

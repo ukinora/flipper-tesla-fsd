@@ -52,10 +52,17 @@ static RuleTaskSend g_send = nullptr;
  * power cut. See rule_task.h. */
 static bool g_armed = false;
 
-/* Which bus the templates came in on. 🔴 A command goes back out the
- * same way: see rule_task.h. 0xFF until the first frame arrives, and a
- * command decided before that is refused rather than guessed at. */
-static uint8_t g_bus = 0xFFu;
+/* 🔴 THE BUS MOVED INTO THE RESULT (2026-09-08). It used to live here, as a
+ * global set on every received frame -- "whichever channel spoke most
+ * recently". That kept rule_task.h's promise only because ONE channel is
+ * wired: with two, a template from Vehicle and a Party frame a millisecond
+ * later would put the command on Party, and the chokepoint cannot catch that
+ * because it compares bytes, not channels.
+ *
+ * FsdPipeResult.bus now carries the channel its TEMPLATE arrived on, decided
+ * in fsd_logic where a host test can drive both. Found while preparing the
+ * second channel; it was a defect waiting in the car, not one that had
+ * happened yet. */
 
 static uint32_t g_sent = 0;
 static uint32_t g_refused = 0;
@@ -91,7 +98,7 @@ void rule_task_init(FSDState* state, portMUX_TYPE* mux, RuleTaskSend send) {
     fsd_trig_init(&g_trig);
     fsd_pipe_init(&g_frames);
     g_armed = false;
-    g_bus = 0xFFu;
+
     g_release.pending = false;
     g_sent = 0;
     g_refused = 0;
@@ -215,7 +222,7 @@ static bool ship(const FsdPipeResult* r, uint32_t now_ms, const char* what) {
     }
 
     if (!g_send) return false;
-    if (g_bus == 0xFFu) {
+    if (r->bus == FSD_PIPE_BUS_NONE) {
         /* No frame has arrived, so we do not know which bus to answer
          * on. fsd_pipe_run() cannot reach this state -- the emitter
          * needs a template first -- but guessing a bus is exactly the
@@ -225,7 +232,7 @@ static bool ship(const FsdPipeResult* r, uint32_t now_ms, const char* what) {
         return false;
     }
 
-    const bool ok = g_send(g_bus, r->frame.id, r->frame.data, r->frame.dlc);
+    const bool ok = g_send(r->bus, r->frame.id, r->frame.data, r->frame.dlc);
     if (ok) {
         g_sent++;
         Serial.printf("[RULE] 매핑 %u %s -> 0x%03X %s\n", (unsigned)r->rule_index,
@@ -398,12 +405,11 @@ static void burst_on_frame(uint32_t can_id, uint32_t now_ms) {
 void rule_task_observe(uint8_t bus, uint32_t can_id, const uint8_t* data, uint8_t dlc,
                        uint32_t now_ms) {
     if (!data) return;
-    g_bus = bus;
 
     /* Store first. A frame that is both a trigger and a template — 0x3C2 is
      * both — should be available to the emitter as of THIS frame, not the
      * previous one. */
-    (void)fsd_pipe_observe(&g_frames, can_id, data, dlc, now_ms);
+    (void)fsd_pipe_observe(&g_frames, bus, can_id, data, dlc, now_ms);
 
     /* A release owed on a 12 ms clock is checked here as well as in the tick,
      * because a busy bus is exactly when a loop pass gets long -- and this
