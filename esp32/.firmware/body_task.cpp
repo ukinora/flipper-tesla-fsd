@@ -101,23 +101,12 @@ FsdBodyInputs body_task_permission_inputs(uint32_t now_ms) {
     fsd_body_inputs_from_state(&in, g_state);
     portEXIT_CRITICAL(g_mux);
 
-    const uint8_t gear = in.gear;
-    const bool gear_seen = in.gear_seen;
-    const bool belt = in.belt_latched;
-    const bool belt_seen = in.belt_seen;
-
     in.bus_tx_open = g_bus_tx_open;
 
     /* 🔴 THE DRIVE-SESSION LATCH WAS HERE AND IT IS GONE (owner's instruction,
      * 2026-09-08). It set a flag the moment a P->D/R happened with the belt
      * latched, and the axis refused everything until then — see fsd_body.c for
      * what that cost and what still stands. */
-
-    /* driverPresent rides in 0x3C2 mux 0, so the T2 observer already has it and
-     * it costs nothing to carry. */
-    in.driver_seen = fsd_t2_driver_seen(&g_t2);
-    in.driver_present = fsd_t2_driver_present(&g_t2);
-    in.driver_ms = fsd_t2_driver_ms(&g_t2);
 
     /* Drivetrain, never GPS. See camera_task.h. */
     in.speed_seen = camera_task_ref_speed_seen();

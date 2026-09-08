@@ -29,12 +29,13 @@ static const FsdBodyCaps FSD_BODY_CAPS[] = {
         {
             .action = FSD_ACT_MAP_LIGHT,
             /* An interior light is idempotent and its worst case is a light
-             * left on, so none of the motion gates apply. What DOES apply is
-             * that a drive must have happened: it stops a car that has sat
-             * untouched since yesterday from doing anything at all. */
+             * left on, so none of the motion gates apply. Nothing else does
+             * either now: the drive-session gate that used to stop a car which
+             * had sat untouched since yesterday, and the occupancy gate this
+             * row waived, were both removed on 2026-09-08. What holds this
+             * action is the rate limit and the rule the owner switched on. */
             .may_act_while_moving = true,
             .may_act_out_of_park = true,
-            .may_act_without_driver = true,
             .armable_at_runtime = true,
             .min_interval_ms = 500u,
             /* TSL holds the light by re-sending; whether we must too is not
@@ -57,8 +58,6 @@ static const FsdBodyCaps FSD_BODY_CAPS[] = {
      *
      *      may_act_while_moving         false -> 0x257 DI_speed, standstill
      *      may_act_out_of_park          false -> 0x118 DI_gear, P only
-     *      may_act_without_driver       false -> 0x3C2 mux 0: the belt,
-     *                                   or driverPresent. See the gate.
      *
      * 🔴 AND HERE IS WHAT NONE OF THEM COVER. A door swings OUTWARD, and
      * nothing on this bus says what is beside the car -- not a person, not a
@@ -96,7 +95,6 @@ static const FsdBodyCaps FSD_BODY_CAPS[] = {
              * the dashboard, not by a gate. */
             .may_act_while_moving = true,
             .may_act_out_of_park = true,
-            .may_act_without_driver = true,
             .armable_at_runtime = false, // FLIPS WHEN: step 3, first write test
             .min_interval_ms = 500u,
         },
@@ -407,53 +405,38 @@ FsdBodyVerdict fsd_body_caps_verdict(const FsdBodyCaps* c, const FsdBodyInputs* 
        (uint32_t)(now_ms - in->last_act_ms[a]) < c->min_interval_ms)
         return FSD_BODY_TOO_SOON;
 
-    /* "Is someone in the driver's seat", from TWO signals rather than one.
+    /* 🔴 THE OCCUPANCY GATE WAS HERE, AND IT IS GONE (owner's instruction,
+     * 2026-09-08). Removed rather than widened: the owner asked for the belt
+     * to be out of the safety gate entirely, not made easier to satisfy.
      *
-     * 🔴 driverPresent ALONE IS WRONG ON THIS CAR, and the bench found it by
-     * transmitting rather than by reading. 0x3C2 mux 0 bit 4 is set in 343 of
-     * 9,060 frames across every capture we hold -- so the bit is used -- but
-     * the pattern is the opposite of its name:
+     * WHAT IT ASKED. "Is this car being used by someone", from 0x3C2 mux 0 --
+     * driverPresent OR frontBuckleSwitch, either one counting. Three refusals
+     * lived here: NO_DRIVER (never heard the frame), DRIVER_STALE (heard, then
+     * it stopped), NO_DRIVER_PRESENT (heard, and nobody is there).
      *
-     *     기어D-A1 / A2   (parked, gear being worked)   100/100 set
-     *     후진 / 수동후진  (reversing)                   partial
-     *     돌아오는길      (ACTUALLY DRIVING)              0/100 set
+     * WHY IT TOOK TWO SIGNALS. driverPresent is a dead gate on this car: bit 4
+     * is set in 100/100 frames while parked with the gear being worked, and
+     * 0/100 across an entire drive home. Gating on it alone made a turn signal
+     * that may act at 88 km/h unable to fire at any speed. The belt was added
+     * on 2026-09-07 to carry the drive, and it read correctly both ways.
      *
-     * Whatever that bit means here, it is not "a person is sitting there":
-     * it was clear for an entire drive home. An action gated on it alone can
-     * never fire while moving, which is exactly what the turn signal and the
-     * hazards are for. That is not a tuning problem, it is a dead gate.
+     * 🔴 WHAT REMOVING IT COSTS, SAID PLAINLY RATHER THAN LEFT TO BE FOUND.
+     * Nothing in this axis now ties a body write to a person being in the car.
+     * What still stands: op mode, the session-only transmit unlock, the
+     * per-row gear and speed gates, the rate limit, a FRESH template frame
+     * from the car, the bit-granularity chokepoint, and the fact that the
+     * owner built the rule and switched it on.
      *
-     * 🟢 THE BELT IS THE HONEST SIGNAL. frontBuckleSwitch (0x3C2 mux 0 byte 6)
-     * is live on this car -- proved on the bench 2026-09-07 with two vectors
-     * differing in those two bits -- and latching a belt requires sitting
-     * down. It reads latched through the whole drive home and unlatched while
-     * parked, which is the behaviour driverPresent was assumed to have.
+     * 🔴 AND THE HONEST GAP. Today's rules fire on physical switches, which a
+     * person has to press -- so a press is still evidence of a person. But a
+     * rule may also be built on a STATE, and a state changes on a parked car
+     * with nobody in it. The door is the heaviest case: it opens outward, and
+     * NO signal on this bus says what is beside the car. Standstill, park and
+     * the interval hold it; occupancy no longer does.
      *
-     * Either one counts. Together they cover both cases: the belt carries a
-     * drive, driverPresent carries someone working the car in park.
-     *
-     * ⚠️ WHAT THIS STILL DOES NOT PROVE. A belt can be latched behind an empty
-     * seat -- people do it to silence the chime. So this answers "the car is
-     * being used by someone" and not "a body is in that seat", and no signal
-     * on this bus answers the second. The actions where that gap would matter
-     * are held by OTHER gates: the door needs standstill, park and a drive
-     * session as well, and every one of them is session-armed and dies with
-     * the power. */
-    if(!c->may_act_without_driver) {
-        const bool driver_fresh = in->driver_seen && !stale(now_ms, in->driver_ms);
-        const bool belt_fresh = in->belt_seen && !stale(now_ms, in->belt_ms);
-
-        /* Neither signal has ever arrived: we are not hearing the frame that
-         * carries both, which is a different fault from "nobody is there". */
-        if(!in->driver_seen && !in->belt_seen) return FSD_BODY_NO_DRIVER;
-        /* Seen, but both have gone quiet. Same frame carries them, so this is
-         * really "0x3C2 mux 0 stopped". */
-        if(!driver_fresh && !belt_fresh) return FSD_BODY_DRIVER_STALE;
-
-        const bool occupied = (driver_fresh && in->driver_present) ||
-                              (belt_fresh && in->belt_latched);
-        if(!occupied) return FSD_BODY_NO_DRIVER_PRESENT;
-    }
+     * requires_belt survives as a PER-ROW gate and still reads in->belt_*.
+     * Only FSD_ACT_GEAR_D sets it, and that row is armable_at_runtime = false.
+     */
 
     /* 🔴 THE DRIVE-SESSION GATE WAS HERE, AND IT IS GONE (owner's
      * instruction, 2026-09-08).
@@ -589,9 +572,6 @@ const char* fsd_body_verdict_str(FsdBodyVerdict v) {
     case FSD_BODY_OTA: return "tesla updating";
     case FSD_BODY_RX_STALE: return "bus quiet";
     case FSD_BODY_TOO_SOON: return "too soon";
-    case FSD_BODY_NO_DRIVER: return "no driver signal";
-    case FSD_BODY_DRIVER_STALE: return "driver signal stale";
-    case FSD_BODY_NO_DRIVER_PRESENT: return "no driver";
     case FSD_BODY_NO_GEAR: return "no gear signal";
     case FSD_BODY_GEAR_STALE: return "gear signal stale";
     case FSD_BODY_NOT_PARK: return "not in park";

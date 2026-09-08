@@ -304,7 +304,6 @@ static void test_door_row_is_open_but_narrow(void) {
      * quietly widening a row while adding something unrelated. */
     CHECK(!c->may_act_while_moving, "not while moving");
     CHECK(!c->may_act_out_of_park, "park only");
-    CHECK(!c->may_act_without_driver, "driver must be present");
 
     /* A rate limit an order above the light's. Not a debounce -- a bound on how
      * bad a stuck rule gets. */
