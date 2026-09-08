@@ -1013,6 +1013,24 @@ static void test_the_release_goes_out_where_the_press_did(void) {
     fsd_pipe_release(FSD_ACT_LIGHT_HORN, 0, 5u, &f, 3012u, &rel);
     CHECK(rel.stage == FSD_PIPE_OK, "release builds");
     CHECK(rel.bus == 1u, "on can1, where the press was, got %u", (unsigned)rel.bus);
+
+    /* 🔴 AND A REFUSED RELEASE REPORTS NO CHANNEL. Written because the
+     * mutation that let memset's 0 stand here survived: every other test
+     * looked at fsd_pipe_one()'s refusals, and nobody looked at this one's.
+     * can0 is a real channel, and handing it back for a frame that does not
+     * exist is the same defect as handing back a plausible id. */
+    FsdPipeFrames empty;
+    fsd_pipe_init(&empty);
+    FsdPipeResult none;
+    fsd_pipe_release(FSD_ACT_LIGHT_HORN, 0, 5u, &empty, 3012u, &none);
+    CHECK(none.stage != FSD_PIPE_OK, "no template -> no release");
+    CHECK(none.bus == FSD_PIPE_BUS_NONE, "and no channel, got %u", (unsigned)none.bus);
+
+    /* ...including the refusals that come before the template is even looked
+     * at -- an action that has no release at all. */
+    fsd_pipe_release(FSD_ACT_MAP_LIGHT, 0, 0u, &f, 3012u, &none);
+    CHECK(none.stage != FSD_PIPE_OK, "the map light is not a gesture");
+    CHECK(none.bus == FSD_PIPE_BUS_NONE, "still no channel, got %u", (unsigned)none.bus);
 }
 
 static void test_init_knows_nothing(void) {

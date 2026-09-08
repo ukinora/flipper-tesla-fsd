@@ -5,8 +5,17 @@
 void fsd_pipe_init(FsdPipeFrames* f) {
     if(!f) return;
     memset(f, 0, sizeof(*f));
-    /* 🔴 NOT memset's 0, which is can0 -- a real channel. Nothing has been
-     * heard yet and that has to be sayable. */
+    /* 🔴 NOT memset's 0, which is can0 -- a real channel.
+     *
+     * ⚠️ AND IT CANNOT BE OBSERVED TODAY, which is worth saying rather than
+     * leaving for someone to discover: bus[a] is only ever read after the
+     * emitter succeeded, which requires tpl[a].seen, which only observe()
+     * sets -- and observe() sets both together. A mutation that deletes this
+     * loop survives the whole suite.
+     *
+     * It stays because "unreachable" is a property of today's call graph, not
+     * of the field. The next reader of bus[] -- a diagnostic, an app field, a
+     * second emitter -- meets a defined value instead of a plausible one. */
     for(uint8_t a = 0; a < (uint8_t)FSD_ACT_COUNT; a++) f->bus[a] = FSD_PIPE_BUS_NONE;
 }
 
