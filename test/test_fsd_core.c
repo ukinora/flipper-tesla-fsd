@@ -4370,6 +4370,24 @@ static void test_rxstall_survives_the_millisecond_wrap(void) {
     CHECK(fsd_rxstall_sample(&st, rx, near_wrap + 100u + FSD_RXSTALL_QUIET_MS)
               == FSD_RXSTALL_RECOVER,
           "a stall that spans the wrap is still a stall");
+
+    /* 🔴 AND UNSIGNED IS NOT INTERCHANGEABLE WITH THE SIGNED TRICK USED FOR
+     * DEADLINES. release_due() asks "is this moment past", where the gap is
+     * small and a signed compare is right. This asks "how long since", and a
+     * signed compare silently answers "not yet" for every gap over 24.8 days
+     * — so a module left in a stored car would stop guarding the bus for
+     * another 24.8 days.
+     *
+     * Written because the mutation that swaps them survived the test above:
+     * a 3-second gap looks the same either way, which is exactly why the
+     * difference needs its own case. */
+    FsdRxStall far;
+    fsd_rxstall_reset(&far);
+    uint32_t r2 = 7u;
+    fsd_rxstall_sample(&far, r2, 0u);
+    fsd_rxstall_sample(&far, (r2 += 3u), 1u);
+    CHECK(fsd_rxstall_sample(&far, r2, 0x90000000u) == FSD_RXSTALL_RECOVER,
+          "a gap past 24.8 days is elapsed, not negative");
 }
 
 int main(void) {
