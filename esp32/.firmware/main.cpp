@@ -23,6 +23,7 @@
 #include "fsd_handler.h"
 #include "../../fsd_logic/fsd_autonomy.h"
 #include "../../fsd_logic/fsd_bushealth.h"
+#include "../../fsd_logic/fsd_rxstall.h"
 #include "can_quar.h"
 #include "../../fsd_logic/fsd_selftest.h"
 #include "can_driver.h"
@@ -74,6 +75,12 @@ static uint32_t   g_can_last_retry_ms[CAN_ACTIVE_BUS_COUNT] = {}; // periodic re
 // it — including the healthy bus. When one trips, we shut it down and stay up
 // on the other.
 static FsdBusHealth g_can_health[CAN_ACTIVE_BUS_COUNT] = {};
+// 🔴 The OTHER failure: a controller that stops receiving with nothing
+// complaining. Twice in the car, half an hour each time, two different causes
+// and one reading — see fsd_rxstall.h. g_can_health above watches a controller
+// that is shouting; this one watches one that has gone quiet, and on the
+// MCP2515 in Listen-Only silence is the only thing there is to read.
+static FsdRxStall g_can_stall[CAN_ACTIVE_BUS_COUNT] = {};
 // 🔴 Latched for this power cycle, deliberately.
 //
 // The periodic re-init below exists to rescue a bus that failed at boot, and
@@ -2699,6 +2706,45 @@ void loop() {
             g_can_ok[i] = false;
             g_can_stormed[i] = true;
             continue;   // nothing more to do with this bus this tick
+        }
+
+        // 🔴 And the opposite failure: a controller that was listening and
+        // stopped, with the error counter still at zero. Twice in the car —
+        // 2026-09-01 (reversed pair; the wiring fix alone did NOT unlatch it)
+        // and 2026-09-08 (wiring fine, car awake, Err 0) — and both times the
+        // answer was pulling the USB. See fsd_rxstall.h for why this needs a
+        // give-up rather than a timer.
+        if (fsd_rxstall_sample(&g_can_stall[i], g_can[i]->rxCount(), millis())
+                == FSD_RXSTALL_RECOVER) {
+            // 🔴 THE MODE HAS TO SURVIVE THE RESTART. Bringing an MCP2515 back
+            // in normal mode puts a node on the car's bus that ACKs, which is
+            // the one thing Listen-Only exists to prevent — and it would happen
+            // unattended, in the middle of a drive, because a counter stopped.
+            const bool was_listen_only = g_can[i]->isListenOnly();
+            Serial.printf("[CAN] %s 가 %u ms 째 조용하다 (RX=%lu, Err=%lu) — "
+                          "컨트롤러를 다시 올린다 (%u/%u번째)\n",
+                          can_bus_name(bus), (unsigned)FSD_RXSTALL_QUIET_MS,
+                          (unsigned long)g_can[i]->rxCount(),
+                          (unsigned long)g_can[i]->errorCount(),
+                          (unsigned)g_can_stall[i].tries, (unsigned)FSD_RXSTALL_MAX_TRIES);
+            g_can[i]->shutdown();
+            const bool up = g_can[i]->begin(was_listen_only);
+            g_can_ok[i] = up;
+            if (!up) {
+                Serial.printf("[CAN] 🔴 %s 를 다시 올리지 못했다 — 이 버스는 "
+                              "전원을 껐다 켜야 한다\n", can_bus_name(bus));
+                continue;
+            }
+            // Belt and braces: begin() takes the flag, and this says it again
+            // where a reader can see it. Being wrong here is a node the car
+            // did not ask for.
+            g_can[i]->setListenOnly(was_listen_only);
+            if (g_can_stall[i].gave_up) {
+                Serial.printf("[CAN] %s — %u번 해 봤고 안 돌아온다. 프레임이 다시 "
+                              "올 때까지 그만둔다 (차가 자는 것과 구분되지 "
+                              "않는다)\n", can_bus_name(bus),
+                              (unsigned)FSD_RXSTALL_MAX_TRIES);
+            }
         }
     }
 
