@@ -62,7 +62,6 @@ static FsdBodyInputs good_inputs(uint32_t now_ms) {
     in.ota_in_progress = false;
     in.rx_stale = false;
 
-    in.drive_session = true;
 
     in.driver_seen = true;
     in.driver_present = true;

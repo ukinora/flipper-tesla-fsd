@@ -35,7 +35,6 @@ static const FsdBodyCaps FSD_BODY_CAPS[] = {
             .may_act_while_moving = true,
             .may_act_out_of_park = true,
             .may_act_without_driver = true,
-            .may_act_without_drive_session = false,
             .armable_at_runtime = true,
             .min_interval_ms = 500u,
             /* TSL holds the light by re-sending; whether we must too is not
@@ -60,7 +59,6 @@ static const FsdBodyCaps FSD_BODY_CAPS[] = {
      *      may_act_out_of_park          false -> 0x118 DI_gear, P only
      *      may_act_without_driver       false -> 0x3C2 mux 0: the belt,
      *                                   or driverPresent. See the gate.
-     *      may_act_without_drive_session false -> a P->D/R with the belt latched
      *
      * 🔴 AND HERE IS WHAT NONE OF THEM COVER. A door swings OUTWARD, and
      * nothing on this bus says what is beside the car -- not a person, not a
@@ -457,9 +455,30 @@ FsdBodyVerdict fsd_body_caps_verdict(const FsdBodyCaps* c, const FsdBodyInputs* 
         if(!occupied) return FSD_BODY_NO_DRIVER_PRESENT;
     }
 
-    if(!c->may_act_without_drive_session && !in->drive_session) {
-        return FSD_BODY_NO_DRIVE_SESSION;
-    }
+    /* 🔴 THE DRIVE-SESSION GATE WAS HERE, AND IT IS GONE (owner's
+     * instruction, 2026-09-08).
+     *
+     * It asked "has a human driven this car since the module powered on",
+     * proved by a P->D/R transition with the belt latched, and it refused
+     * everything until that had happened.
+     *
+     * It was the single biggest field trap in this project. The module comes
+     * up, the owner presses the switch, nothing happens, and the answer is a
+     * sequence nobody performs on purpose -- belt on, brake, into D, back to
+     * P. Two visits lost time to it, and every field card in this repo had to
+     * carry a warning about it.
+     *
+     * WHAT IT UNIQUELY BLOCKED WAS NARROW. For every action but one, the
+     * driver gate above already refuses a car with nobody in it; this one only
+     * added "and they also drove at some point". The map light is the
+     * exception -- its row waives the driver -- so for that one action the
+     * remaining proof that a person is involved is that A RULE FIRED, and the
+     * rules that exist fire on physical switches.
+     *
+     * What still stands in front of every write: the mode, the transmit
+     * unlock (session-only, dies with the power), the driver/belt gate above,
+     * the gear and speed gates per row, the rate limit, the emitter's need
+     * for a fresh template, and the bit-granularity chokepoint. */
 
     /* Two different questions about the gear, and they are not the same gate.
      * may_act_out_of_park asks "may this happen anywhere but P"; requires_park
@@ -573,7 +592,6 @@ const char* fsd_body_verdict_str(FsdBodyVerdict v) {
     case FSD_BODY_NO_DRIVER: return "no driver signal";
     case FSD_BODY_DRIVER_STALE: return "driver signal stale";
     case FSD_BODY_NO_DRIVER_PRESENT: return "no driver";
-    case FSD_BODY_NO_DRIVE_SESSION: return "no drive since arming";
     case FSD_BODY_NO_GEAR: return "no gear signal";
     case FSD_BODY_GEAR_STALE: return "gear signal stale";
     case FSD_BODY_NOT_PARK: return "not in park";

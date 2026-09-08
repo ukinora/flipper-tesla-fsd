@@ -41,7 +41,6 @@ static bool g_bus_tx_open = false; // fail-closed until main.cpp says otherwise
  * Never cleared, and it does not need to be: the accessory feed is switched, so
  * this dies with the power every time the car sleeps. It therefore means "a
  * drive has happened since the car woke", which is exactly the question. */
-static bool g_drive_session = false;
 
 /* Only counted. Nothing acts on a T1 action because nothing can. */
 static uint16_t g_t1_actions = 0;
@@ -109,12 +108,10 @@ FsdBodyInputs body_task_permission_inputs(uint32_t now_ms) {
 
     in.bus_tx_open = g_bus_tx_open;
 
-    /* A drive has happened. Latched on purpose — "we drove here and parked" is
-     * the case T1 exists for, and asking whether a drive is happening RIGHT NOW
-     * would answer no exactly then. */
-    if(gear_seen && belt_seen && belt && (gear == FSD_GEAR_D || gear == FSD_GEAR_R))
-        g_drive_session = true;
-    in.drive_session = g_drive_session;
+    /* 🔴 THE DRIVE-SESSION LATCH WAS HERE AND IT IS GONE (owner's instruction,
+     * 2026-09-08). It set a flag the moment a P->D/R happened with the belt
+     * latched, and the axis refused everything until then — see fsd_body.c for
+     * what that cost and what still stands. */
 
     /* driverPresent rides in 0x3C2 mux 0, so the T2 observer already has it and
      * it costs nothing to carry. */
@@ -181,7 +178,7 @@ void body_task_tick(uint32_t now_ms) {
          *        person compares against the capture by eye
          *   last when the last T2 gesture landed, so it can be found in a dump */
         "[BODY] t1:%u(%s) win:%u latch L:%X R:%X | t2:%u press:%ums gap:%ums "
-        "rej:%u b5:%02X last:%ums | mux0:%ums drive:%s\n",
+        "rej:%u b5:%02X last:%ums | mux0:%ums\n",
         (unsigned)g_t1_actions, fsd_body_verdict_str(fsd_t1_last_verdict(&g_t1)),
         (unsigned)fsd_t1_window_count(&g_t1),
         (unsigned)fsd_t1_latch_raw(&g_t1, FSD_BODY_SIDE_LEFT),
@@ -189,8 +186,7 @@ void body_task_tick(uint32_t now_ms) {
         (unsigned)fsd_t2_last_press_ms(&g_t2), (unsigned)fsd_t2_last_gap_ms(&g_t2),
         (unsigned)fsd_t2_last_reject(&g_t2),
         (unsigned)fsd_t2_last_byte5(&g_t2), (unsigned)fsd_t2_last_gesture_ms(&g_t2),
-        (unsigned)fsd_t2_mux0_min_gap_ms(&g_t2),
-        g_drive_session ? "yes" : "no");
+        (unsigned)fsd_t2_mux0_min_gap_ms(&g_t2));
 }
 
 uint8_t body_task_t1_verdict(void) { return (uint8_t)fsd_t1_last_verdict(&g_t1); }
@@ -200,7 +196,6 @@ uint16_t body_task_t2_last_press_ms(void) { return fsd_t2_last_press_ms(&g_t2); 
 uint16_t body_task_t2_last_gap_ms(void) { return fsd_t2_last_gap_ms(&g_t2); }
 uint8_t body_task_t2_last_reject(void) { return fsd_t2_last_reject(&g_t2); }
 uint32_t body_task_mux0_period_ms(void) { return fsd_t2_mux0_min_gap_ms(&g_t2); }
-bool body_task_drive_session(void) { return g_drive_session; }
 
 uint8_t body_task_latch_raw(uint8_t side) {
     if(side >= FSD_BODY_SIDE_COUNT) return 0xFFu;
