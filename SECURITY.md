@@ -295,3 +295,28 @@ anything else — all of these are required, not optional:
 - [ ] Credentials for the update channel that are not shared with anything else
 - [ ] Secure Boot reconsidered, since signature checking in application code is
       only as trustworthy as the application doing the checking
+
+**Asked and deferred, 2026-09-08.** The owner asked whether the phone could
+flash the board over BLE. It can: the partition table is already
+`default_16MB.csv` — `otadata` plus `app0`/`app1` at **6.25 MB each**, against a
+**670 KB** image — the rollback self-test above is live and proven in the ELF,
+the `UPLOAD` characteristic already does sequenced chunks, CRC, progress, abort
+and the owner check, `ble_owner_open_window()` (the button-press window that
+gates enrolment) would serve as an arming gesture, and 55.8 KB/s puts a full
+image at **12–14 seconds**. The only missing piece is the two hundred lines that
+call `esp_ota_begin/write/end/set_boot_partition`; the sole implementation lived
+in `web_dashboard.cpp` and left with the rest of WiFi.
+
+It was deferred anyway, and **not primarily for the three unchecked boxes**. The
+board is one car visit away from a retest that must measure exactly one thing,
+and an install path that is easy to reach is the thing most likely to add a
+second. Recorded here so the next person does not re-derive the five facts
+above before arriving at the same answer.
+
+A middle position exists if signing turns out to be more than this project wants
+to carry: owner-only (already enforced) **plus** the button window (so the phone
+must be in the car) **plus** reading `esp_app_desc_t` out of the incoming image
+— every ESP32 image carries its project name, version and chip id, so the second
+box above costs a comparison rather than a key. That stops the wrong-board and
+wrong-version accidents. It does not stop a hostile image, and this file should
+not be read as claiming otherwise.
