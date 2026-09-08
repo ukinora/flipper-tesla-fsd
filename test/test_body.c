@@ -48,10 +48,6 @@ static FsdBodyInputs good_inputs(uint32_t now_ms) {
     in.rx_stale = false;
     in.action_enabled[FSD_ACT_MAP_LIGHT] = true;
     in.action_enabled[FSD_ACT_DOOR_OPEN] = true; // must not help; see below
-    in.drive_session = true;
-    in.driver_seen = true;
-    in.driver_present = true;
-    in.driver_ms = now_ms;
     in.gear_seen = true;
     in.gear = FSD_GEAR_P;
     in.gear_ms = now_ms;
@@ -84,16 +80,6 @@ static FsdBodyInputs good_inputs(uint32_t now_ms) {
  * list of struct assignments. */
 static void break_speed(FsdBodyInputs* in) { in->speed_kph = 5.0f; }
 static void break_gear(FsdBodyInputs* in) { in->gear = FSD_GEAR_D; }
-/* 🔴 BOTH, because either one on its own now passes. driverPresent is
- * dead through an entire drive on this car (0/100 frames in 돌아오는길)
- * and the belt is the signal that carries a drive; the gate takes either.
- * An empty seat is the absence of both, and a helper that clears one is a
- * helper that stopped testing anything. */
-static void break_driver(FsdBodyInputs* in) {
-    in->driver_present = false;
-    in->belt_latched = false;
-}
-static void break_session(FsdBodyInputs* in) { in->drive_session = false; }
 static void break_enable(FsdBodyInputs* in) { in->action_enabled[FSD_ACT_DOOR_OPEN] = false; }
 static void break_mode(FsdBodyInputs* in) { in->op_mode = OpMode_ListenOnly; }
 static void break_bus(FsdBodyInputs* in) { in->bus_tx_open = false; }
@@ -117,8 +103,6 @@ static void test_door_is_armed_but_every_gate_still_holds(void) {
     } cases[] = {
         {"moving", FSD_BODY_MOVING, break_speed},
         {"not in park", FSD_BODY_NOT_PARK, break_gear},
-        {"no driver", FSD_BODY_NO_DRIVER_PRESENT, break_driver},
-        {"no drive session", FSD_BODY_NO_DRIVE_SESSION, break_session},
         {"not enabled", FSD_BODY_NOT_ENABLED, break_enable},
         {"listen-only", FSD_BODY_NO_MODE, break_mode},
         {"bus shut", FSD_BODY_BUS_SHUT, break_bus},
@@ -151,7 +135,6 @@ static void test_zero_is_the_tightest_row(void) {
     FsdBodyCaps zero;
     memset(&zero, 0, sizeof(zero));
     CHECK(!zero.may_act_while_moving && !zero.may_act_out_of_park &&
-              !zero.may_act_without_driver && !zero.may_act_without_drive_session &&
               !zero.armable_at_runtime,
           "every field in a zeroed row is restrictive");
 }
@@ -186,15 +169,33 @@ static void test_axis_refuses_in_order(void) {
     in = good_inputs(now); in.rx_stale = true;
     CHECK(fsd_body_allows(&in, FSD_ACT_MAP_LIGHT, now) == FSD_BODY_RX_STALE, "bus quiet");
 
-    // T1's row waives the driver, gear and speed gates but NOT the drive
-    // session: a car that has sat untouched since yesterday does nothing.
-    in = good_inputs(now); in.drive_session = false;
-    CHECK(fsd_body_allows(&in, FSD_ACT_MAP_LIGHT, now) == FSD_BODY_NO_DRIVE_SESSION,
-          "no drive has happened");
-
-    in = good_inputs(now); in.driver_present = false; in.driver_seen = false;
+    /* 🔴 THE DRIVE-SESSION GATE IS GONE (owner's instruction, 2026-09-08).
+     *
+     * It asked "has a human driven this car since the module powered on",
+     * proved by a P->D/R transition with the belt latched. It was the single
+     * biggest field trap in this project: the module comes up, the owner
+     * presses the switch, nothing happens, and the reason is a sequence
+     * nobody performs on purpose. Two visits lost time to it.
+     *
+     * What it uniquely blocked is narrow. For every other enabled action the
+     * driver gate below already refuses an empty car; this one only added
+     * "and they also drove". The map light is the exception -- it waives the
+     * driver -- so for that one action the remaining proof that a person is
+     * involved is that a RULE FIRED, and rules fire on physical switches.
+     *
+     * This test used to assert the refusal. It asserts the opposite now, so
+     * that reintroducing the gate turns it red rather than quietly making the
+     * car unresponsive again. */
+    in = good_inputs(now);
     CHECK(fsd_body_allows(&in, FSD_ACT_MAP_LIGHT, now) == FSD_BODY_OK,
-          "T1 does not need a driver in the seat — that is its whole point");
+          "a car that has not been driven since power-on still acts");
+
+    /* T1 used to be the ONLY row that waived the driver. The question is not
+     * asked of any row now (owner's instruction, 2026-09-08), so what this
+     * asserts is no longer a waiver -- it is the absence of the gate. */
+    in = good_inputs(now);
+    CHECK(fsd_body_allows(&in, FSD_ACT_MAP_LIGHT, now) == FSD_BODY_OK,
+          "an empty car still acts — the occupancy gate is gone");
     in = good_inputs(now); in.gear = FSD_GEAR_D; in.speed_kph = 90.0f;
     CHECK(fsd_body_allows(&in, FSD_ACT_MAP_LIGHT, now) == FSD_BODY_OK,
           "nor a stationary car");
@@ -244,12 +245,16 @@ static void door(FsdT1* t, FsdBodySide side, uint8_t latch, uint32_t now_ms) {
  * Counts the actions rather than returning one, so "exactly once per edge" is
  * assertable. */
 static uint32_t doors_for(FsdT1* t, uint8_t left, uint8_t right, uint32_t now,
-                          uint32_t span_ms, bool drive_session, int* on_count,
+                          uint32_t span_ms, bool enabled, int* on_count,
                           int* off_count) {
     for (uint32_t e = 0; e <= span_ms; e += 50) {
         const uint32_t at = now + e;
         FsdBodyInputs in = good_inputs(at);
-        in.drive_session = drive_session;
+        /* 🔴 This used to spoil the DRIVE SESSION to make the axis refuse.
+         * That gate is gone (owner's instruction, 2026-09-08), so the refusal
+         * these tests need comes from the per-action enable instead. The
+         * subject is unchanged: a refused edge must not be replayed later. */
+        in.action_enabled[FSD_ACT_MAP_LIGHT] = enabled;
         door(t, FSD_BODY_SIDE_LEFT, left, at);
         door(t, FSD_BODY_SIDE_RIGHT, right, at);
         const FsdT1Action a = fsd_t1_tick(t, &in, at);
@@ -358,12 +363,16 @@ static void test_t1_respects_the_axis(void) {
     int on = 0, off = 0;
     now = t1_settle(&t, now);
 
-    // Refused: no drive has happened yet.
+    /* Refused: T1 is not enabled. This used to be refused for a DIFFERENT
+     * reason -- no drive had happened yet -- and that gate is gone (owner's
+     * instruction, 2026-09-08). The edge-consumption behaviour below is what
+     * this test is really about, so it keeps a refusal to consume the edge
+     * against; only the reason changed. */
     now += 1000;
     on = off = 0;
     now = doors_for(&t, FSD_LATCH_OPENED, FSD_LATCH_CLOSED, now, 1000, false, &on, &off);
     CHECK(on == 0, "refused, got %d ON", on);
-    CHECK(fsd_t1_last_verdict(&t) == FSD_BODY_NO_DRIVE_SESSION, "and says why");
+    CHECK(fsd_t1_last_verdict(&t) == FSD_BODY_NOT_ENABLED, "and says why");
 
     // The edge was CONSUMED. Granting permission afterwards must not replay a
     // door event that happened while we were not allowed to act — the world has
@@ -581,8 +590,6 @@ static void test_turn_signal_row_is_open_where_it_has_to_be(void) {
     CHECK(c->may_act_out_of_park, "may act out of park (same decision)");
 
     // And nothing else relaxed with it.
-    CHECK(!c->may_act_without_driver, "still needs someone in the driver's seat");
-    CHECK(!c->may_act_without_drive_session, "still needs a drive to have happened");
     CHECK(!c->requires_park && !c->requires_belt && !c->requires_passenger_empty,
           "no gate borrowed from another row");
 
@@ -613,41 +620,35 @@ static void test_turn_signal_row_is_open_where_it_has_to_be(void) {
     in.speed_kph = 88.0f;
     CHECK(fsd_body_allows(&in, FSD_ACT_TURN_SIGNAL, now) == FSD_BODY_OK,
           "88 km/h is fine — that is the point of the row");
-    /* 🟢 THE FIX THIS ROW EXISTS FOR. driverPresent reads 0 for an entire
-     * drive on this car, so gating on it alone made a turn signal that may act
-     * at 88 km/h unable to fire at any speed at all. The belt carries the
-     * drive instead, and it is latched here. */
-    in.driver_present = false;
-    CHECK(fsd_body_allows(&in, FSD_ACT_TURN_SIGNAL, now) == FSD_BODY_OK,
-          "the belt alone is enough — this is the whole point");
-
-    /* And the other way round: parked, belt off, someone working the car. */
-    in.driver_present = true;
+    /* 🔴 THE OCCUPANCY GATE IS GONE (owner's instruction, 2026-09-08).
+     *
+     * It asked "is this car being used by someone", from driverPresent OR the
+     * belt, and three refusals lived here: NO_DRIVER (0x3C2 mux 0 never
+     * arrived), DRIVER_STALE (it went quiet), NO_DRIVER_PRESENT (heard, and
+     * nobody is there).
+     *
+     * 🔴 WHAT THAT MEANS, WRITTEN DOWN SO IT IS NOT DISCOVERED LATER: nothing
+     * in this axis now ties a body write to a person being in the car. The
+     * remaining link is that A RULE HAS TO FIRE. Today's rules fire on
+     * physical switches, which a person has to press -- but a rule may also be
+     * built on a STATE, and a state can change on a parked car with nobody in
+     * it.
+     *
+     * These assertions are the opposite of the ones they replaced, so putting
+     * the gate back turns them red instead of quietly making the car
+     * unresponsive again. */
     in.belt_latched = false;
+    in.belt_seen = false;
     CHECK(fsd_body_allows(&in, FSD_ACT_TURN_SIGNAL, now) == FSD_BODY_OK,
-          "driverPresent alone is enough too");
+          "no belt, no signal, nobody there -- and it still acts");
 
-    /* Neither is an empty seat. */
-    in.driver_present = false;
-    CHECK(fsd_body_allows(&in, FSD_ACT_TURN_SIGNAL, now) == FSD_BODY_NO_DRIVER_PRESENT,
-          "an empty seat is not");
-
-    /* The frame that carries both went quiet: a different fault, and it has
-     * its own name so a log does not send someone looking for a passenger. */
-    in.driver_present = true;
-    in.belt_latched = true;
-    in.driver_ms = now - FSD_BODY_FRESH_MS;
-    in.belt_ms = now - FSD_BODY_FRESH_MS;
-    CHECK(fsd_body_allows(&in, FSD_ACT_TURN_SIGNAL, now) == FSD_BODY_DRIVER_STALE,
-          "both stale is stale, not empty");
-
-    /* Never heard it at all is a third thing. */
     in = good_inputs(now);
     in.action_enabled[FSD_ACT_TURN_SIGNAL] = true;
-    in.driver_seen = false;
-    in.belt_seen = false;
-    CHECK(fsd_body_allows(&in, FSD_ACT_TURN_SIGNAL, now) == FSD_BODY_NO_DRIVER,
-          "no signal at all is neither of the above");
+    in.belt_seen = true;
+    in.belt_latched = true;
+    in.belt_ms = now - FSD_BODY_FRESH_MS;
+    CHECK(fsd_body_allows(&in, FSD_ACT_TURN_SIGNAL, now) == FSD_BODY_OK,
+          "a stale occupancy signal is not a refusal either");
 }
 
 static void test_caps_table_is_well_formed(void) {
@@ -734,8 +735,6 @@ static void test_gear_row_shape(void) {
     CHECK(c->requires_park, "P is the only gear we transition from");
     CHECK(c->requires_belt, "a gate that trusts its trigger is not a gate");
     CHECK(!c->may_act_while_moving, "never while moving");
-    CHECK(!c->may_act_without_driver, "never with an empty seat");
-    CHECK(!c->may_act_without_drive_session || true, "(drive session: see row)");
     CHECK(c->min_interval_ms >= 1000u, "at most once a second");
     CHECK(c->max_hold_ms == 0u, "single shot — one frame moved the gear in the car");
 
@@ -774,10 +773,10 @@ static void test_gear_gates_when_armed(void) {
     CHECK(fsd_body_caps_verdict(&c, &in, FSD_ACT_GEAR_D, now) == FSD_BODY_MOVING,
           "moving refuses");
 
-    /* Both, for the reason break_driver() gives: either alone passes. */
-    in = good_inputs(now); in.driver_present = false; in.belt_latched = false;
-    CHECK(fsd_body_caps_verdict(&c, &in, FSD_ACT_GEAR_D, now) == FSD_BODY_NO_DRIVER_PRESENT,
-          "empty seat refuses");
+    /* 🔴 An "empty seat refuses" case stood here. The occupancy gate it asked
+     * about is gone (owner's instruction, 2026-09-08); requires_belt, asserted
+     * three cases above, is the only thing left in the axis that asks about a
+     * person at all -- and this is the only row that sets it. */
 }
 
 // The passenger seat is the only row with an occupancy gate, and it is the one
@@ -833,8 +832,7 @@ static void test_owner_decisions_are_in_the_table(void) {
      * out, and stated here so removing one is a red test. */
     const FsdBodyCaps* d = fsd_body_caps(FSD_ACT_DOOR_OPEN);
     CHECK(d->armable_at_runtime, "the door row opened: its frame was measured");
-    CHECK(!d->may_act_while_moving && !d->may_act_out_of_park &&
-              !d->may_act_without_driver && !d->may_act_without_drive_session,
+    CHECK(!d->may_act_while_moving && !d->may_act_out_of_park,
           "and every gate the all-zero row gave for free is still shut");
     CHECK(d->min_interval_ms >= 3000u,
           "a door is rate-limited an order above a light, got %u",
@@ -871,9 +869,6 @@ static void test_owner_decisions_are_in_the_table(void) {
     CHECK(!m->may_act_while_moving,
           "🔴 mirrors must not fold at speed -- that is rearward vision");
     CHECK(!m->may_act_out_of_park, "and not out of park, for the same reason");
-    CHECK(!m->may_act_without_driver && !m->may_act_without_drive_session,
-          "a body write on an unattended car needs its own reason, not the "
-          "hazard row's");
     CHECK(m->min_interval_ms >= 3000u,
           "the mirror drives a motor that takes seconds to travel, got %u",
           (unsigned)m->min_interval_ms);
@@ -892,8 +887,6 @@ static void test_owner_decisions_are_in_the_table(void) {
     CHECK(lh->armable_at_runtime, "light horn armable: frame measured 2026-09-06");
     CHECK(lh->may_act_while_moving, "a horn that only sounds in park is not a horn");
     CHECK(lh->may_act_out_of_park, "and out of park, for the same reason");
-    CHECK(!lh->may_act_without_driver && !lh->may_act_without_drive_session,
-          "but not on an unattended car -- same sentence as every other row");
     CHECK(lh->min_interval_ms >= 1000u,
           "a stuck rule must not be able to hold on the horn, got %u",
           (unsigned)lh->min_interval_ms);
@@ -969,32 +962,37 @@ static void test_belt_from_state_rescues_the_gate(void) {
     st.belt_seen = true;
     st.belt_seen_ms = now;
 
+    /* 🔴 ASKED OF GEAR_D, NOT THE TURN SIGNAL. The occupancy gate this test
+     * was written against is gone (2026-09-08) and the turn signal no longer
+     * reads the belt at all -- but the SUBJECT here is not the turn signal, it
+     * is that fsd_body_inputs_from_state() carries the belt from FSDState into
+     * the axis. requires_belt still reads it, and GEAR_D is the row that sets
+     * it. Retargeting keeps the subject; deleting the test would have lost it
+     * along with the gate. */
+    FsdBodyCaps c = *fsd_body_caps(FSD_ACT_GEAR_D);
+    CHECK(c.requires_belt, "the row this test leans on still asks for a belt");
+
     FsdBodyInputs in = good_inputs(now);
-    in.action_enabled[FSD_ACT_TURN_SIGNAL] = true;
-    in.driver_seen = true;
-    in.driver_present = false; // 0/100 across the whole drive
-    in.driver_ms = now;
+    in.action_enabled[FSD_ACT_GEAR_D] = true;
     /* Take away what the helper handed us, so ONLY the state copy can put the
      * belt back. Without this the test passes with the copy deleted. */
     in.belt_seen = false;
     in.belt_latched = false;
     in.belt_ms = 0;
 
-    CHECK(fsd_body_allows(&in, FSD_ACT_TURN_SIGNAL, now) ==
-              FSD_BODY_NO_DRIVER_PRESENT,
+    CHECK(fsd_body_caps_verdict(&c, &in, FSD_ACT_GEAR_D, now) == FSD_BODY_NO_BELT,
           "without the belt this is exactly what the bench said");
 
     fsd_body_inputs_from_state(&in, &st);
-    CHECK(fsd_body_allows(&in, FSD_ACT_TURN_SIGNAL, now) == FSD_BODY_OK,
+    CHECK(fsd_body_caps_verdict(&c, &in, FSD_ACT_GEAR_D, now) == FSD_BODY_OK,
           "the belt reached the axis on the bench but not here: got %s",
-          fsd_body_verdict_str(fsd_body_allows(&in, FSD_ACT_TURN_SIGNAL, now)));
+          fsd_body_verdict_str(fsd_body_caps_verdict(&c, &in, FSD_ACT_GEAR_D, now)));
 
     /* And it is the belt doing the work, not the copy loosening something
      * else: unlatch it in FSDState and the refusal comes straight back. */
     st.ui_buckle_status = false;
     fsd_body_inputs_from_state(&in, &st);
-    CHECK(fsd_body_allows(&in, FSD_ACT_TURN_SIGNAL, now) ==
-              FSD_BODY_NO_DRIVER_PRESENT,
+    CHECK(fsd_body_caps_verdict(&c, &in, FSD_ACT_GEAR_D, now) == FSD_BODY_NO_BELT,
           "an unlatched belt still let the action through");
 }
 

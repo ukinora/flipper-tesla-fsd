@@ -137,8 +137,6 @@ typedef struct {
     FsdBodyAction action; // must equal its own index; checked at runtime
     bool may_act_while_moving;
     bool may_act_out_of_park;
-    bool may_act_without_driver;
-    bool may_act_without_drive_session;
     bool armable_at_runtime; // false = nothing may set action_enabled for it
 
     /* Gear selection is the one action where the CURRENT gear is part of the
@@ -220,11 +218,7 @@ typedef struct {
      * now -- which is what lets a light act on a parked car whose driver just
      * got out, without granting anything to a car that has sat untouched all
      * night. */
-    bool drive_session;
 
-    bool driver_seen;
-    bool driver_present; // VCLEFT_driverPresent, 0x3C2 mux 0 bit 4
-    uint32_t driver_ms;
 
     bool gear_seen;
     uint8_t gear; // FSD_GEAR_* from fsd_autonomy.h
@@ -255,10 +249,6 @@ typedef enum {
     FSD_BODY_OTA,
     FSD_BODY_RX_STALE,
     FSD_BODY_TOO_SOON, // min_interval_ms, or a row that may never fire
-    FSD_BODY_NO_DRIVER,
-    FSD_BODY_DRIVER_STALE,
-    FSD_BODY_NO_DRIVER_PRESENT,
-    FSD_BODY_NO_DRIVE_SESSION,
     FSD_BODY_NO_GEAR,
     FSD_BODY_GEAR_STALE,
     FSD_BODY_NOT_PARK,

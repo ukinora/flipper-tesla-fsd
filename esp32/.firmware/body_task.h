@@ -89,7 +89,6 @@ uint16_t body_task_t2_last_press_ms(void);
 uint16_t body_task_t2_last_gap_ms(void);
 uint8_t  body_task_t2_last_reject(void);
 uint32_t body_task_mux0_period_ms(void); // smallest observed 0x3C2 mux-0 gap
-bool     body_task_drive_session(void);
 
 /* The permission inputs, assembled from the shared state and this file's
  * own detectors. Exposed so rule_task.cpp asks the same question with the
@@ -117,7 +116,6 @@ static inline uint16_t body_task_t2_last_press_ms(void) { return 0; }
 static inline uint16_t body_task_t2_last_gap_ms(void) { return 0; }
 static inline uint8_t  body_task_t2_last_reject(void) { return 0; }
 static inline uint32_t body_task_mux0_period_ms(void) { return 0; }
-static inline bool     body_task_drive_session(void) { return false; }
 static inline FsdBodyInputs body_task_permission_inputs(uint32_t) {
     FsdBodyInputs in;
     memset(&in, 0, sizeof(in));

@@ -62,11 +62,6 @@ static FsdBodyInputs good_inputs(uint32_t now_ms) {
     in.ota_in_progress = false;
     in.rx_stale = false;
 
-    in.drive_session = true;
-
-    in.driver_seen = true;
-    in.driver_present = true;
-    in.driver_ms = now_ms;
 
     in.gear_seen = true;
     in.gear = FSD_GEAR_D;
@@ -493,19 +488,25 @@ static void test_a_repeat_faces_every_gate(void) {
     CHECK(res[0].rule_index == 3, "the repeat carries the rule that started it");
     CHECK(res[0].frame.id == 0x249u, "and it is still the stalk frame");
 
-    /* 🔴 THE HALF THAT MATTERS. Take the belt off between frame two and
-     * frame three of a burst and the rest must stop -- with a name. A burst
-     * that bypassed the axis would be a rule that keeps acting on a car
-     * nobody is sitting in. */
-    in.driver_present = false;
-    in.belt_latched = false;
+    /* 🔴 THE HALF THAT MATTERS. Shut the bus between frame two and frame
+     * three of a burst and the rest must stop -- with a name. A burst that
+     * bypassed the axis would be a rule that keeps writing after the thing
+     * that let it write went away.
+     *
+     * ⚠️ This used to unlatch the belt instead. The occupancy gate it leaned
+     * on was removed on 2026-09-08 (owner's instruction), so the test now
+     * takes away the gate that IS still there and still session-scoped: the
+     * transmit unlock, which dies with the power. The subject is unchanged --
+     * a repeat faces the axis -- only the gate it is asked about. */
+    in.bus_tx_open = false;
     dirty(res);
     fsd_pipe_one(FSD_ACT_TURN_SIGNAL, 0, 3, &in, &f, now, &res[0]);
     CHECK(res[0].stage == FSD_PIPE_BLOCKED_BODY,
           "a repeat must face the axis, not skip it");
-    CHECK(res[0].reason == (uint8_t)FSD_BODY_NO_DRIVER_PRESENT,
+    CHECK(res[0].reason == (uint8_t)FSD_BODY_BUS_SHUT,
           "and it must say which gate, got %s",
           fsd_pipe_reason_str(res[0].stage, res[0].reason));
+    in.bus_tx_open = true;
 
     /* NULL in, nothing out -- same contract as fsd_pipe_run(). */
     fsd_pipe_one(FSD_ACT_TURN_SIGNAL, 0, 3, NULL, &f, now, &res[0]);
