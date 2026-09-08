@@ -30,6 +30,9 @@ bool fsd_burst_arm(FsdBurst* b, FsdBodyAction action, int32_t arg, uint8_t rule_
         s->remaining = reps;
         s->deadline_ms = now_ms + FSD_BURST_MAX_WAIT_MS;
         s->seq = b->next_seq++;
+        /* The command was ACCEPTED -- that is what min_interval_ms counts. It
+         * is recorded here and not in the slot, because the slot is reused. */
+        if ((unsigned)action < FSD_ACT_COUNT) b->last_act_ms[action] = now_ms;
         return true;
     }
 
@@ -80,4 +83,13 @@ uint8_t fsd_burst_pending(const FsdBurst* b) {
     for (unsigned i = 0; i < FSD_BURST_MAX; i++)
         if (b->slot[i].remaining != 0u) n++;
     return n;
+}
+
+void fsd_burst_fill_last_act(const FsdBurst* b, uint32_t* out, unsigned emitting) {
+    if (!out) return;
+    for (unsigned a = 0; a < FSD_ACT_COUNT; a++)
+        out[a] = b ? b->last_act_ms[a] : 0u;
+    /* The one exemption, and the reason the limiter could be switched on at
+     * all: this frame belongs to a command that already passed the interval. */
+    if (emitting < FSD_ACT_COUNT) out[emitting] = 0u;
 }

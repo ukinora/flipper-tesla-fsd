@@ -125,10 +125,12 @@ uint8_t fsd_pipe_observe(FsdPipeFrames* f, uint32_t can_id, const uint8_t* data,
  *      holding a button down, which is the exact failure the release exists to
  *      prevent.
  *
- *      ⚠️ It would not refuse it TODAY, because FsdBodyInputs.last_act_ms has
- *      no producer and every min_interval_ms is currently decorative. That is
- *      a defect, not a design, and this function must not depend on which way
- *      it gets resolved.
+ *      ⚠️ It could not have refused it before 2026-09-08 either, because
+ *      last_act_ms had no producer and every min_interval_ms was decorative.
+ *      That was a defect, not a design, and this function deliberately did not
+ *      depend on which way it got resolved -- it is resolved now (the column
+ *      counts commands, and a release is the second half of one), and this
+ *      function still does not depend on it.
  *
  *   2. Stopping half way through one gesture is strictly worse than not
  *      starting it. There is no reading of "safer" under which it is better.

@@ -791,6 +791,137 @@ static void test_burst_arming_zero_is_not_a_burst(void) {
     CHECK(fsd_burst_pending(&b) == 0u, "nothing armed");
 }
 
+
+/* ════════════════════════════════════════════════════════════════════════
+ * min_interval_ms — how often a COMMAND may be issued.
+ *
+ * 🔴 IT WAS DECORATIVE UNTIL 2026-09-08. FsdBodyInputs.last_act_ms had no
+ * producer anywhere in the firmware: body_task.cpp memset the struct and
+ * nothing ever wrote that array, so `now - 0` was always enormous and every
+ * row's interval passed. Four gates were advertised and three were enforced.
+ *
+ * It was found while writing the light horn's row — where the failure that
+ * matters is not one beep in the wrong place but a stuck rule leaning on the
+ * horn — and deliberately left alone, because switching it on naively breaks
+ * the indicator: that action sends FOUR frames about 50 ms apart and its own
+ * row allows 50 ms, so frames two through four would refuse themselves.
+ *
+ * 🔴 THE FIX IS NOT A BIGGER NUMBER. It is that the question was misread. The
+ * table has always meant commands, not frames — the door's 3000 is "do not
+ * open it twice in three seconds" and the horn's 1000 is "no two beeps in one
+ * second". A four-frame burst is ONE command. So the stamp goes down when a
+ * command is ACCEPTED, once, and the frames it owes are exempt.
+ *
+ * The record lives here because the burst table already is the record of
+ * commands issued, and because rule_task.cpp cannot be compiled on a host —
+ * which is how the previous scheduling defect reached the car.
+ * ════════════════════════════════════════════════════════════════════════ */
+
+static void test_last_act_is_stamped_once_per_command(void) {
+    printf("\n-- rate limit: the stamp is the press, not the frame --\n");
+    FsdBurst b;
+    fsd_burst_reset(&b);
+    uint32_t seen[FSD_ACT_COUNT];
+
+    fsd_burst_fill_last_act(&b, seen, FSD_ACT_COUNT);
+    CHECK(seen[FSD_ACT_TURN_SIGNAL] == 0u, "never fired reads 0");
+
+    CHECK(fsd_burst_arm(&b, FSD_ACT_TURN_SIGNAL, 0, 1u, 0x249u, 4u, 5000u), "armed");
+    fsd_burst_fill_last_act(&b, seen, FSD_ACT_COUNT);
+    CHECK(seen[FSD_ACT_TURN_SIGNAL] == 5000u, "stamped at the press");
+    CHECK(seen[FSD_ACT_MIRROR] == 0u, "and only that action");
+
+    /* 🔴 THE FRAMES DO NOT RE-STAMP. If they did, a burst would push its own
+     * next command out by the whole interval every time it ran. */
+    FsdBurstDue due;
+    fsd_burst_on_frame(&b, 0x249u, 5050u, &due);
+    fsd_burst_on_frame(&b, 0x249u, 5100u, &due);
+    fsd_burst_fill_last_act(&b, seen, FSD_ACT_COUNT);
+    CHECK(seen[FSD_ACT_TURN_SIGNAL] == 5000u, "still the press, got %u",
+          (unsigned)seen[FSD_ACT_TURN_SIGNAL]);
+}
+
+static void test_the_frames_of_a_command_are_exempt(void) {
+    printf("\n-- rate limit: a burst does not refuse itself --\n");
+    FsdBurst b;
+    fsd_burst_reset(&b);
+    CHECK(fsd_burst_arm(&b, FSD_ACT_TURN_SIGNAL, 0, 1u, 0x249u, 4u, 1000u), "armed");
+
+    uint32_t seen[FSD_ACT_COUNT];
+    /* 🔴 THE CASE THAT KEPT THE LIMITER SWITCHED OFF. The indicator's row
+     * allows 50 ms and its frames arrive about 50 ms apart, so with the press
+     * stamped and no exemption the axis would answer TOO_SOON for frames two
+     * through four of the command it just accepted — every time, on jitter
+     * alone. */
+    fsd_burst_fill_last_act(&b, seen, FSD_ACT_TURN_SIGNAL);
+    CHECK(seen[FSD_ACT_TURN_SIGNAL] == 0u, "the action being emitted reads 'never'");
+
+    /* ...and nothing else is exempted along with it. A burst on 0x273 must not
+     * open a hole for the door. */
+    CHECK(fsd_burst_arm(&b, FSD_ACT_DOOR_OPEN, 0, 2u, 0x1F9u, 1u, 1000u), "door armed");
+    fsd_burst_fill_last_act(&b, seen, FSD_ACT_TURN_SIGNAL);
+    CHECK(seen[FSD_ACT_DOOR_OPEN] == 1000u, "the door keeps its stamp");
+}
+
+static void test_a_refused_command_leaves_no_stamp(void) {
+    printf("\n-- rate limit: only an accepted command counts --\n");
+    FsdBurst b;
+    fsd_burst_reset(&b);
+    /* reps 0 is refused, so nothing was issued and nothing may be recorded --
+     * a stamp for a command that never happened would lock out the next real
+     * one. (The axis refusals happen before this is reached at all.) */
+    CHECK(!fsd_burst_arm(&b, FSD_ACT_MIRROR, 1, 3u, 0x273u, 0u, 7000u), "refused");
+    uint32_t seen[FSD_ACT_COUNT];
+    fsd_burst_fill_last_act(&b, seen, FSD_ACT_COUNT);
+    CHECK(seen[FSD_ACT_MIRROR] == 0u, "no stamp");
+
+    /* A full table is the same answer for the same reason. */
+    for (unsigned i = 0; i < FSD_BURST_MAX; i++)
+        fsd_burst_arm(&b, FSD_ACT_MAP_LIGHT, 0, (uint8_t)i, 0x273u, 1u, 7000u);
+    CHECK(!fsd_burst_arm(&b, FSD_ACT_MIRROR, 1, 3u, 0x273u, 1u, 8000u), "table full");
+    fsd_burst_fill_last_act(&b, seen, FSD_ACT_COUNT);
+    CHECK(seen[FSD_ACT_MIRROR] == 0u, "still no stamp for the mirror");
+    CHECK(seen[FSD_ACT_MAP_LIGHT] == 7000u, "the map light kept its own");
+}
+
+static void test_stamps_outlive_the_burst_that_made_them(void) {
+    printf("\n-- rate limit: the interval is measured from the last command --\n");
+    FsdBurst b;
+    fsd_burst_reset(&b);
+    fsd_burst_arm(&b, FSD_ACT_MIRROR, 1, 3u, 0x273u, 1u, 2000u);
+    FsdBurstDue due;
+    CHECK(fsd_burst_on_frame(&b, 0x273u, 2400u, &due), "the frame goes");
+    CHECK(fsd_burst_pending(&b) == 0u, "burst done");
+
+    uint32_t seen[FSD_ACT_COUNT];
+    fsd_burst_fill_last_act(&b, seen, FSD_ACT_COUNT);
+    /* 🔴 A slot is reused, so the stamp cannot live in the slot. Losing it when
+     * the burst finished would mean the interval only ever gated commands that
+     * overlapped -- which is every case it does not need to cover. */
+    CHECK(seen[FSD_ACT_MIRROR] == 2000u, "the stamp survives, got %u",
+          (unsigned)seen[FSD_ACT_MIRROR]);
+
+    /* And expiring the wait does not erase it either: the command WAS issued;
+     * what failed was the car answering. */
+    fsd_burst_arm(&b, FSD_ACT_MAP_LIGHT, 0, 0u, 0x273u, 1u, 3000u);
+    fsd_burst_tick(&b, 3000u + FSD_BURST_MAX_WAIT_MS);
+    fsd_burst_fill_last_act(&b, seen, FSD_ACT_COUNT);
+    CHECK(seen[FSD_ACT_MAP_LIGHT] == 3000u, "an expired command still counts");
+}
+
+static void test_reset_forgets_the_stamps_too(void) {
+    printf("\n-- rate limit: stop clears the record --\n");
+    FsdBurst b;
+    fsd_burst_reset(&b);
+    fsd_burst_arm(&b, FSD_ACT_MIRROR, 1, 3u, 0x273u, 1u, 4000u);
+    fsd_burst_reset(&b);
+    uint32_t seen[FSD_ACT_COUNT];
+    fsd_burst_fill_last_act(&b, seen, FSD_ACT_COUNT);
+    /* Session state, like the arm flag. Locking transmission and unlocking it
+     * again should not leave a command the operator cannot re-issue. */
+    CHECK(seen[FSD_ACT_MIRROR] == 0u, "cleared");
+}
+
 int main(void) {
     printf("test_pipeline: rule -> axis -> emitter -> chokepoint\n");
     test_turn_signal_needs_a_burst();
@@ -809,6 +940,11 @@ int main(void) {
     test_burst_slots_are_finite_and_say_so();
     test_burst_reset_stops_everything();
     test_burst_arming_zero_is_not_a_burst();
+    test_last_act_is_stamped_once_per_command();
+    test_the_frames_of_a_command_are_exempt();
+    test_a_refused_command_leaves_no_stamp();
+    test_stamps_outlive_the_burst_that_made_them();
+    test_reset_forgets_the_stamps_too();
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

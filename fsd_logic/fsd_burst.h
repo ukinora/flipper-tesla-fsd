@@ -104,6 +104,13 @@ typedef struct {
 /** The table. Session state: it dies with the power, like the arm flag. */
 typedef struct {
     FsdBurstSlot slot[FSD_BURST_MAX];
+    /* When each action last STARTED a command, for min_interval_ms. 0 = never.
+     *
+     * 🔴 NOT IN THE SLOT. A slot is freed and reused, so a stamp living there
+     * would vanish the moment the burst finished -- and then the interval
+     * would only ever gate commands that OVERLAP, which is the one case it
+     * does not need to cover. */
+    uint32_t last_act_ms[FSD_ACT_COUNT];
     uint16_t next_seq;
     uint16_t expired; /* bursts abandoned because the id never came back */
     uint16_t dropped; /* arms refused because every slot was busy */
@@ -141,6 +148,29 @@ uint8_t fsd_burst_tick(FsdBurst* b, uint32_t now_ms);
 
 /** How many decisions are still waiting. */
 uint8_t fsd_burst_pending(const FsdBurst* b);
+
+/** Fill `out` (FSD_ACT_COUNT entries) with when each action last STARTED a
+ *  command, for FsdBodyInputs.last_act_ms.
+ *
+ *  🔴 min_interval_ms WAS DECORATIVE UNTIL 2026-09-08: nothing in the firmware
+ *  ever wrote that array, so `now - 0` was always enormous and every row's
+ *  interval passed. Four gates advertised, three enforced.
+ *
+ *  🔴 IT COUNTS COMMANDS, NOT FRAMES, and that is what kept it switched off.
+ *  The indicator sends four frames about 50 ms apart and its own row allows
+ *  50 ms, so stamping every frame would make a burst refuse itself on jitter
+ *  alone. The table has always meant commands -- the door's 3000 is "do not
+ *  open it twice in three seconds" -- so the stamp goes down once, when a
+ *  command is ACCEPTED, and the frames it owes are exempt.
+ *
+ *  `emitting` is the action whose frame is going out right now; its entry
+ *  comes back 0 ("never"), because that frame belongs to a command which
+ *  already answered this question at the press. Pass FSD_ACT_COUNT on the
+ *  press path, where nothing is exempt.
+ *
+ *  A REFUSED arm leaves no stamp: a command that never happened must not lock
+ *  out the next real one. */
+void fsd_burst_fill_last_act(const FsdBurst* b, uint32_t* out, unsigned emitting);
 
 #ifdef __cplusplus
 }

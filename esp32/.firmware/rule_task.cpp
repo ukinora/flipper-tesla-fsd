@@ -154,11 +154,20 @@ bool rule_task_armed(void) {
  * operator armed the engine. Disarmed, every action_enabled stays false and
  * the axis answers NOT_ENABLED — the same refusal a disabled rule would get,
  * with a name. */
-static FsdBodyInputs rule_inputs(uint32_t now_ms) {
+/* `emitting` is the action whose frame is going out right now, or
+ * FSD_ACT_COUNT on the press path where nothing is. It exempts that one action
+ * from min_interval_ms -- see fsd_burst_fill_last_act(), which owns the reason.
+ *
+ * 🔴 body_task.cpp memsets last_act_ms and nothing else fills it, so before
+ * 2026-09-08 every min_interval_ms in FSD_BODY_CAPS was decorative: four gates
+ * advertised, three enforced. The record lives in the burst table because that
+ * table already is the list of commands accepted. */
+static FsdBodyInputs rule_inputs(uint32_t now_ms, unsigned emitting) {
     FsdBodyInputs in = body_task_permission_inputs(now_ms);
     if (g_armed) {
         for (unsigned a = 0; a < FSD_ACT_COUNT; a++) in.action_enabled[a] = true;
     }
+    fsd_burst_fill_last_act(&g_burst, in.last_act_ms, emitting);
     return in;
 }
 
@@ -250,9 +259,15 @@ static void arm_release(const FsdPipeResult* r, uint32_t now_ms) {
  * review caught: it went from the emitter straight to the bus with a
  * hand-written memcmp -- skipping fsd_body_wire_check(), which every other
  * write in this firmware goes through -- and its comment justified skipping
- * the axis by claiming the rate limit would refuse the release, which is not
- * true of this build (last_act_ms has no producer). Both halves moved into
- * fsd_logic/ where a host test can stand.
+ * the axis by claiming the rate limit would refuse the release, which was not
+ * true of that build: last_act_ms had no producer and every min_interval_ms
+ * was decorative. Both halves moved into fsd_logic/ where a host test can
+ * stand.
+ *
+ * ⚠️ The limiter IS enforced since 2026-09-08, so the claim is now arguable --
+ * and the skip is still not justified by it. The release is skipped because it
+ * is the second half of one gesture, not because of what any gate would
+ * answer; see fsd_pipe_release().
  *
  * What still stands in front of the frame after this: the arm flag and the bus
  * guard here, then send_on_bus()'s mode gate and id refusals in main.cpp. */
@@ -278,7 +293,10 @@ static void run_event(const FsdTriggerEvent* ev, uint32_t now_ms) {
     const FsdRules* rules = rules_store_table();
     if (!rules) return;
 
-    const FsdBodyInputs in = rule_inputs(now_ms);
+    /* Nothing is being emitted here, so nothing is exempt: this is the one
+     * place min_interval_ms is asked, and a press inside the interval is
+     * refused before a burst can be armed. */
+    const FsdBodyInputs in = rule_inputs(now_ms, FSD_ACT_COUNT);
 
     FsdPipeResult out[FSD_PIPE_MAX_OUT];
     memset(out, 0, sizeof(out));
@@ -327,7 +345,10 @@ static void burst_on_frame(uint32_t can_id, uint32_t now_ms) {
     FsdBurstDue due;
     if (!fsd_burst_on_frame(&g_burst, can_id, now_ms, &due)) return;
 
-    const FsdBodyInputs in = rule_inputs(now_ms);
+    /* Exempt this action: the command it belongs to already passed the
+     * interval at the press, and the indicator's own row (50 ms) would
+     * otherwise refuse frames two through four of its own burst. */
+    const FsdBodyInputs in = rule_inputs(now_ms, (unsigned)due.action);
     FsdPipeResult r;
     memset(&r, 0, sizeof(r));
     fsd_pipe_one(due.action, due.arg, due.rule_index, &in, &g_frames, now_ms, &r);
