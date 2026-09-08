@@ -996,10 +996,105 @@ static void test_belt_from_state_rescues_the_gate(void) {
           "an unlatched belt still let the action through");
 }
 
+/* ── The field vector that produced 19 refusals ────────────────────────────
+ *
+ * 🔴 THIS IS NOT A HAND-BUILT STRUCT. The eight bytes below are lifted from
+ * captures/2026-09-07-첫쓰기/운전석맵등6회 -- the run where the owner pressed
+ * the driver map-light switch six times with the belt UNFASTENED and not one
+ * frame left the board. `ruleq` said `axis: no driver`, nineteen times.
+ *
+ * Both vectors appear here because the pair is what proves the bits are the
+ * ones that mattered: the two captures from that visit differ in exactly two
+ * bits of byte 6, and the belted one DID transmit.
+ *
+ *   벨트 풀림  0x3C2#00 55 55 55 00 00 69 85   byte6 & 3 == 1  (unlatched)
+ *   벨트 착용  0x3C2#00 55 55 55 00 00 6A 85   byte6 & 3 == 2  (latched)
+ *
+ * driverPresent is bit 4 of byte 0 and is 0 in BOTH -- that is the dead-gate
+ * finding of 2026-09-07, still visible right here in the data.
+ *
+ * The frames go through the REAL observers, not through fields set by hand.
+ * A host test that assembles FsdBodyInputs itself is exactly what let the
+ * missing belt producer reach the bench on 2026-09-07, so this one starts
+ * from bytes and ends at a verdict. */
+static void test_the_capture_that_refused_now_passes(void) {
+    printf("\n-- 2026-09-07 벨트 풀림 캡처: 그때 19회 거부, 지금은 --\n");
+
+    const uint32_t now = 500000;
+    const uint8_t unlatched[8] = {0x00, 0x55, 0x55, 0x55, 0x00, 0x00, 0x69, 0x85};
+    const uint8_t latched[8]   = {0x00, 0x55, 0x55, 0x55, 0x00, 0x00, 0x6A, 0x85};
+
+    /* The bytes say what the capture said. If either of these is ever wrong the
+     * rest of the test is measuring something else. */
+    CHECK((unlatched[6] & 0x03u) == 1u, "the unfastened vector really is 1");
+    CHECK((latched[6] & 0x03u) == 2u, "and the fastened one really is 2");
+    CHECK(((unlatched[0] >> 4) & 0x01u) == 0u,
+          "driverPresent is 0 in the field data -- the dead gate, in the data");
+
+    FSDState st;
+    memset(&st, 0, sizeof(st));
+    st.op_mode = OpMode_Active;
+
+    CANFRAME f;
+    memset(&f, 0, sizeof(f));
+    f.id = 0x3C2u;
+    f.data_lenght = 8;
+    memcpy(f.buffer, unlatched, 8);
+    fsd_drive_observe_belt_switch(&st, &f, now);
+
+    CHECK(st.belt_seen, "the observer heard the frame");
+    CHECK(!st.ui_buckle_status, "and read the belt as unfastened");
+
+    FsdBodyInputs in;
+    memset(&in, 0, sizeof(in));
+    in.op_mode = OpMode_Active;
+    in.bus_tx_open = true;
+    in.action_enabled[FSD_ACT_TURN_SIGNAL] = true;
+    in.gear_seen = true;
+    in.gear = FSD_GEAR_P;
+    in.gear_ms = now;
+    in.speed_seen = true;
+    in.speed_ms = now;
+    fsd_body_inputs_from_state(&in, &st);
+
+    /* 🟢 THE WHOLE POINT. Same bytes, same action, and the answer flipped. */
+    const FsdBodyVerdict v = fsd_body_allows(&in, FSD_ACT_TURN_SIGNAL, now);
+    CHECK(v == FSD_BODY_OK,
+          "the vector that refused 19 times is allowed now, got %s",
+          fsd_body_verdict_str(v));
+
+    /* And the belted one is not treated any differently -- if it were, some
+     * gate would still be reading the belt for this action. */
+    memcpy(f.buffer, latched, 8);
+    fsd_drive_observe_belt_switch(&st, &f, now);
+    CHECK(st.ui_buckle_status, "the observer read the belt as fastened");
+    fsd_body_inputs_from_state(&in, &st);
+    CHECK(fsd_body_allows(&in, FSD_ACT_TURN_SIGNAL, now) == FSD_BODY_OK,
+          "and fastening it changes nothing -- nobody is reading it");
+
+    /* Never having heard 0x3C2 at all is the third case, and it was its own
+     * refusal (NO_DRIVER). It must not be a refusal any more either. */
+    FsdBodyInputs blind = in;
+    blind.belt_seen = false;
+    blind.belt_latched = false;
+    blind.belt_ms = 0;
+    CHECK(fsd_body_allows(&blind, FSD_ACT_TURN_SIGNAL, now) == FSD_BODY_OK,
+          "never hearing the frame is not a refusal either");
+
+    /* 🔴 AND THE ONE ROW THAT STILL READS THE BELT IS STILL SHUT -- but for a
+     * different reason, and it must be that reason. If GEAR_D ever refused
+     * with a belt verdict here it would mean the row had become reachable. */
+    const FsdBodyVerdict g = fsd_body_allows(&in, FSD_ACT_GEAR_D, now);
+    CHECK(g == FSD_BODY_NOT_ARMABLE,
+          "GEAR_D is refused for being unarmable, not for a belt: got %s",
+          fsd_body_verdict_str(g));
+}
+
 int main(void) {
     printf("test_body\n");
     test_state_fields_reach_the_inputs();
     test_belt_from_state_rescues_the_gate();
+    test_the_capture_that_refused_now_passes();
     test_door_is_armed_but_every_gate_still_holds();
     test_zero_is_the_tightest_row();
     test_axis_refuses_in_order();

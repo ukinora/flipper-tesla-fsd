@@ -176,10 +176,15 @@ static const FsdBodyCaps FSD_BODY_CAPS[] = {
      * has to survive is a stuck rule HOLDING them, and that is max_hold_ms --
      * not a gate on when it may start.
      *
-     * may_act_without_driver stays false. Not because an empty car must never
+     * 🔴 THE OCCUPANCY GATE THIS PARAGRAPH ARGUED ABOUT NO LONGER EXISTS
+     * (removed 2026-09-08, owner's instruction). Kept as a record of what
+     * the row was reasoning about; see fsd_body_caps_verdict() for what
+     * stands in its place.
+     *
+     * It said: the driver gate stays shut, not because an empty car must never
      * flash -- that is arguably what hazards are for -- but because no rule we
-     * have wants it yet, and a body write on an unattended car deserves its own
-     * reason written here rather than inheriting one.
+     * had wanted it yet. 🔴 THAT IS NOW ALLOWED. Nothing here refuses an
+     * unattended car any more.
      *
      * min_interval_ms 500 matches the car's own period (~495 ms): this is a
      * command that is held by re-sending, so the interval is a cadence, not a
@@ -221,9 +226,14 @@ static const FsdBodyCaps FSD_BODY_CAPS[] = {
      * else: refuse when we cannot see the car, and bound how long a stuck rule
      * can go on.
      *
-     * may_act_without_driver stays false. An empty car has no lane to change
-     * into, and the same sentence as the hazard row applies: a body write on an
-     * unattended car needs its own reason written here, not an inherited one.
+     * 🔴 THE OCCUPANCY GATE THIS PARAGRAPH ARGUED ABOUT NO LONGER EXISTS
+     * (removed 2026-09-08, owner's instruction). Kept as a record of what
+     * the row was reasoning about; see fsd_body_caps_verdict() for what
+     * stands in its place.
+     *
+     * It said: an empty car has no lane to change into. 🔴 THE INDICATOR CAN
+     * NOW FIRE ON AN EMPTY CAR. What bounds it is the 50 ms interval and the
+     * fact that a rule has to fire.
      *
      * min_interval_ms is 50, the car's own period for this frame. That number
      * was picked when the column was read as a FRAME spacing: TSL sends three
@@ -269,13 +279,22 @@ static const FsdBodyCaps FSD_BODY_CAPS[] = {
      *   owner would actually write -- fold on walking away, unfold on getting
      *   in -- happens in park, so the restriction costs nothing it protects.
      *
-     * may_act_without_driver stays false for the same sentence as the door and
-     * the hazards: a body write on an unattended car needs its own reason
-     * written here rather than an inherited one. ⚠️ That does refuse "fold the
-     * mirrors after I walk away", which is the most natural rule for this
-     * action. Refused on purpose and written down rather than quietly granted;
-     * if the owner wants it, this is the line that has to change and this is
-     * the paragraph that says what changing it gives up.
+     * 🔴 THE OCCUPANCY GATE THIS PARAGRAPH ARGUED ABOUT NO LONGER EXISTS
+     * (removed 2026-09-08, owner's instruction). Kept as a record of what
+     * the row was reasoning about; see fsd_body_caps_verdict() for what
+     * stands in its place.
+     *
+     * 🟢 AND IT CHANGES WHAT THIS ROW CAN DO. The paragraph below noted that
+     * the gate refused "fold the mirrors after I walk away" -- the most natural
+     * rule for this action. That refusal is gone: the rule is now buildable.
+     * The row still requires standstill and park, which that rule satisfies.
+     *
+     * (the paragraph as it stood) "That does refuse 'fold the mirrors after I
+     * walk away', which is the most natural rule for this action. Refused on
+     * purpose and written down rather than quietly granted; if the owner wants
+     * it, this is the line that has to change and this is the paragraph that
+     * says what changing it gives up." -- the line did change, and this is
+     * what it gave up: nothing now asks whether anyone is in the car.
      *
      * min_interval_ms is 3000. This one drives a MOTOR that takes a second or
      * two to finish, and a rule re-firing inside that is a rule fighting the
@@ -307,9 +326,14 @@ static const FsdBodyCaps FSD_BODY_CAPS[] = {
      * restriction costs nothing because nobody folds a mirror at 80 km/h on
      * purpose.
      *
-     * may_act_without_driver stays false, for the third time and the same
-     * reason: a body write on an unattended car needs its own argument written
-     * here rather than one inherited from the row above.
+     * 🔴 THE OCCUPANCY GATE THIS PARAGRAPH ARGUED ABOUT NO LONGER EXISTS
+     * (removed 2026-09-08, owner's instruction). Kept as a record of what
+     * the row was reasoning about; see fsd_body_caps_verdict() for what
+     * stands in its place.
+     *
+     * It said the same sentence a third time. 🔴 The horn can now sound with
+     * nobody in the car; the 1000 ms interval is what keeps a stuck rule from
+     * leaning on it.
      *
      * 🔴 min_interval_ms IS THE GATE THAT MATTERS HERE, because the failure to
      * survive is not one beep in the wrong place -- it is a stuck rule leaning
