@@ -193,6 +193,31 @@ static const uint32_t FSD_BLACKBOX_KEY_IDS[] = {
      *
      * Cheap: the car sends it at ~10 Hz with a constant payload. */
     0x1F9u,  // (unnamed) — TSL door-open command, byte1 = 0x03
+
+    /* ── the battery pair (2026-09-08) ───────────────────────────────────
+     *
+     * 🔴 THESE ARE HERE BECAUSE THEIR ABSENCE COST A CAR VISIT. The owner
+     * reported the app's battery reading 2-3 % above the car's screen. Every
+     * ordinary capture we held was useless for it: neither frame was in this
+     * list, so the question could only be answered from an UNFILTERED capture,
+     * and one had to be asked for and driven to.
+     *
+     * That is the same lesson as 0x1F9 four lines up, arriving by the other
+     * road. There the id could not be named; here it could -- 0x292 has been
+     * in config.h since the beginning -- and it still was not here, because
+     * the list was built from "what does the abort analysis read" and nobody
+     * revisited it when the dashboard grew a battery.
+     *
+     * 0x33A is the number ON THE CAR'S SCREEN, in none of the five DBCs,
+     * found by sweeping every id in an unfiltered capture for a field that
+     * tracked the pack's estimate across 30 files. 0x292 is that estimate.
+     * Keeping BOTH is the point: either one alone reproduces the original
+     * confusion, because the whole finding is that they differ.
+     *
+     * Cheap: 0x33A is exactly 1 Hz and 0x292 about 10 Hz, against a filtered
+     * total of ~227 f/s. */
+    0x292u,  // BMS_socStatus — the pack's own estimate (byte 8 of State)
+    0x33Au,  // (unnamed) — the % on the car's screen  (byte 28 of State)
 };
 
 #define FSD_BLACKBOX_KEY_ID_COUNT \

@@ -458,6 +458,46 @@ static inline bool fsd_decode_bms_soc(const uint8_t* d, uint8_t dlc, float* out)
     return true;
 }
 
+/* 0x33A — the state of charge THE CAR PUTS ON ITS OWN SCREEN.
+ *
+ * 🔴 NOT the same number as 0x292 above, and that is the whole point. The
+ * owner reported the app reading 2-3 % high across several drives; measured
+ * 2026-09-08 with both screens photographed together, the car said 22 % while
+ * 0x292's 10|10 said 24.5. Across all 30 captures the two move together and
+ * this one sits 0.8-2.9 below -- by a gap that varies within a single day, so
+ * they are two estimates that drift, not one estimate and a formula. No
+ * offset inside 0x292 reads 22 in that capture; the number simply is not in
+ * that frame.
+ *
+ * 🔴 SEVEN BITS. Bit 27 is set on some days and clear on others, so an
+ * eight-bit read turns 53 into 181 -- a number the phone then clamps to 100,
+ * drawing a full battery on a half-empty car. Bit 19 is clear in all 15
+ * distinct payloads we hold, so the field does not start there either.
+ *
+ * Values above 100 are refused rather than clamped: seven bits hold 0..127,
+ * so the top 27 are room the quantity does not use, and anything landing
+ * there means SNA or a moved field. Saying nothing is the safe direction --
+ * and that room is why this needs no "seen" flag, unlike ui_speed.
+ *
+ * ⚠️ In none of the five DBCs, like 0x1F9. Pinned by measurement; the frames
+ * are in test_fsd_core.c. Arrives at exactly 1 Hz on this car. */
+#define FSD_UI_SOC_BIT     20u
+#define FSD_UI_SOC_LEN     7u
+#define FSD_UI_SOC_MASK    0x7Fu
+#define FSD_UI_SOC_MIN_DLC 4u /* the field ends in byte 3 */
+#define FSD_UI_SOC_MAX     100u
+
+static inline bool fsd_decode_ui_soc(const uint8_t* d, uint8_t dlc, uint8_t* out) {
+    if(!d || !out || dlc < FSD_UI_SOC_MIN_DLC) return false;
+    const unsigned lo = FSD_UI_SOC_BIT / 8u; /* byte 2, bits 4..7 */
+    const unsigned sh = FSD_UI_SOC_BIT % 8u; /* 4 */
+    const uint8_t raw =
+        (uint8_t)((((uint16_t)d[lo + 1u] << (8u - sh)) | (d[lo] >> sh)) & FSD_UI_SOC_MASK);
+    if(raw > FSD_UI_SOC_MAX) return false;
+    *out = raw;
+    return true;
+}
+
 /* out4[0..3] = d[2..5], in that order and no other. out4[0] is the
  * DRIVER'S wheel -- front left on this LHD car -- pinned on 2026-09-06
  * by letting air out of that one tyre and watching exactly that byte

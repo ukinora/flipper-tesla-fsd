@@ -39,19 +39,23 @@ extern "C" {
 
 /* Both payloads are 20 bytes because that is the most a default 23-byte ATT MTU
  * carries. Not a coincidence and not adjustable without a version bump. */
-#define FSD_WIRE_STATE_LEN 28u
+#define FSD_WIRE_STATE_LEN 29u
 #define FSD_WIRE_CAMSTAT_LEN 20u
 #define FSD_WIRE_RESULT_LEN 4u
 
 /* Wire versions. Each payload carries its own — sharing one meant that bumping
  * State also announced a CamStat change that had not happened. */
-#define FSD_WIRE_STATE_VERSION 7u
+#define FSD_WIRE_STATE_VERSION 8u
 #define FSD_WIRE_CAMSTAT_VERSION 2u
 
 /* FSD v14 Lite exposes four speed profiles. */
 #define FSD_WIRE_PROFILE_MAX 3
 /* Byte 26 sentinel: the module has not decoded a profile yet. */
 #define FSD_WIRE_PROFILE_NONE 0x0Fu
+/* Byte 28 sentinel: the module has not decoded the car's own percentage yet.
+ * Above every legal percentage and inside the seven bits the CAN field is
+ * wide, so it can collide with neither a reading nor a widened mask. */
+#define FSD_WIRE_UI_SOC_NONE 0x7Fu
 
 /* Everything State is built from. Filled by the caller from FSDState.
  *
@@ -147,7 +151,31 @@ typedef struct {
      * unlike byte 26, whose field is 3 bits wide and leaves 0x0F free. */
     bool ui_speed_seen;
     uint8_t ui_speed;
-    float soc_percent; // clamped 0..100
+    float soc_percent; // clamped 0..100 — 0x292, the PACK's own estimate
+
+    /* Byte 28. 0x33A bit 20, seven bits: the percentage THE CAR PUTS ON ITS
+     * OWN SCREEN.
+     *
+     * 🔴 THIS EXISTS BECAUSE THE TWO NUMBERS ARE NOT THE SAME. The owner
+     * reported the dashboard reading 2-3 % above the car across several
+     * drives. Measured 2026-09-08 with both screens photographed together:
+     * car 22 %, app 25 %, and the capture from that moment has 0x292's 10|10
+     * at 24.5 and 0x33A's 20|7 at exactly 22.
+     *
+     * 🔴 They must not be merged, and no arithmetic converts one into the
+     * other. Across 30 captures the gap runs +0.8 to +2.9 and moves by 0.7
+     * between captures minutes apart -- two estimates that drift, not one
+     * estimate and a formula. soc_percent stays because it is the pack's own
+     * figure and the right input to anything reasoning about energy; this one
+     * is what the dashboard draws, because it is by definition the number the
+     * driver is looking at. Same split as speed_kph and ui_speed.
+     *
+     * 🔴 A SENTINEL, not a flag -- the opposite of ui_speed, and for a reason
+     * that is about the field and not about taste. Seven bits hold 0..127 and
+     * a percentage uses 0..100, so 27 values are free to mean "absent". Byte
+     * 27's field fills its byte and had no such room. */
+    bool ui_soc_seen;
+    uint8_t ui_soc;
 
     uint8_t gear; // 0=INVALID 1=P 2=R 3=N 4=D 7=SNA
 

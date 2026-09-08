@@ -66,7 +66,7 @@
  * three times; 288 bytes cannot. */
 #define BLE_UUID_RULES   "6b1a000b-4b53-4d4f-4432-43414e000001"
 
-#define BLE_STATE_LEN  28u   // v7: +byte 27, DI_uiSpeed (reverse shows 0 otherwise)
+#define BLE_STATE_LEN  29u   // v8: +byte 28, the % on the CAR'S screen (0x33A)
 #define BLE_RESULT_LEN 4u
 #define BLE_BULK_HDR   2u   // seq prefix on every bulk frame
 
@@ -287,6 +287,8 @@ static void ble_pack_state(uint8_t *out, uint16_t rx_fps) {
     w.ui_speed         = s.ui_speed;
     w.ui_speed_seen    = s.ui_speed_seen;
     w.soc_percent      = s.soc_percent;
+    w.ui_soc           = s.ui_soc;
+    w.ui_soc_seen      = s.ui_soc_seen;
     w.gear             = s.di_gear;
     /* 🔴 낡은 제한속도는 아예 안 보낸다. 세 프레임이 같은 칸을 덮어쓰는데
      * 아무도 지우지 않아서, 30분 전 값이 지금 도로의 값처럼 앉아 있었다.

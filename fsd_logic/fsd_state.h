@@ -85,6 +85,10 @@ typedef struct FSDState {
 
     uint8_t ui_speed;            // from 0x257 DI_uiSpeed (8-bit, display value)
     bool ui_speed_seen;          // 0 is a legal speed (stopped), so "never parsed"
+    uint8_t ui_soc;              // from 0x33A — the % on the car's OWN screen.
+                                 // Separate from soc_percent (0x292) because the
+                                 // two are different numbers; see fsd_types.h.
+    bool ui_soc_seen;
                                  // needs its own answer — the display must not
                                  // show a confident 0 it never received
     uint8_t steering_tune_mode;  // from 0x370 EPAS3S_currentTuneMode (0-6)

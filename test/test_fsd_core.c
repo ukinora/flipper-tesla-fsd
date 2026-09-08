@@ -2198,6 +2198,14 @@ static void test_blackbox_filter(void) {
     CHECK(fsd_blackbox_should_record(0x102u), "0x102 VCLEFT doors (T1 input)");
     CHECK(fsd_blackbox_should_record(0x103u), "0x103 VCRIGHT doors (T1 input)");
     CHECK(fsd_blackbox_should_record(0x311u), "0x311 anyDoorOpen — T1's third input");
+
+    /* 🔴 Both battery frames, named for the same reason as the rest of this
+     * block. Dropping either one puts the 2026-09-08 finding back out of
+     * reach of an ordinary capture -- and the finding IS that they differ, so
+     * one without the other reproduces exactly the confusion it settled. */
+    CHECK(fsd_blackbox_should_record(CAN_ID_BMS_SOC), "0x292 the pack's estimate");
+    CHECK(fsd_blackbox_should_record(CAN_ID_UI_SOC),
+          "0x33A the number on the car's screen");
     CHECK(fsd_blackbox_should_record(0x3F5u), "0x3F5 courtesy lighting (T1 output cand.)");
     CHECK(fsd_blackbox_should_record(0x3E2u), "0x3E2 map light state");
     CHECK(fsd_blackbox_should_record(0x119u), "0x119 window requests (T2 output cand.)");
@@ -4009,6 +4017,14 @@ static const struct {
     {{0xC4, 0x65, 0x26, 0xDE, 0x75, 0x01, 0x00, 0x00}, 40.9f, 45.2f, "2026-09-06 5th"},
 };
 
+/* 🟢 THE OPEN QUESTION ABOVE IS CLOSED, AND NOT BY PICKING A FIELD IN HERE.
+ * On 2026-09-08 the owner photographed the car's screen (22 %) beside the app
+ * (25 %) and captured the bus at that moment. The screen's number lives in a
+ * DIFFERENT FRAME -- 0x33A, seven bits at bit 20 -- and 0x292 does not carry
+ * it at any offset. See the block below. The paragraph above is left standing
+ * because what it says about 0x292 is still true and still the reason there
+ * is now one decoder instead of two. */
+
 static void test_bms_soc_has_one_decoder(void) {
     for (unsigned i = 0; i < sizeof(SOC) / sizeof(SOC[0]); i++) {
         float pct = -1.0f;
@@ -4067,11 +4083,141 @@ static void test_bms_soc_refuses_rather_than_guesses(void) {
     CHECK(!st.bms_seen, "nor mark the BMS seen");
 }
 
+
+/* ── 0x33A — THE PERCENTAGE ON THE CAR'S OWN SCREEN ────────────────────────
+ *
+ * 🔴 THIS FRAME CLOSES THE QUESTION THE 0x292 BLOCK ABOVE LEFT OPEN. The
+ * owner reported the app reading 2-3 % higher than the car, and no choice of
+ * field inside 0x292 could explain it: 10|10 is the LOWEST of that frame's
+ * four, so every alternative there makes our number BIGGER, not smaller.
+ *
+ * It was never the same number. 0x33A bit 20, seven bits, plain percent --
+ * and on 2026-09-08 it read 22 in the same capture in which the car's screen
+ * was photographed showing 22 % while the app showed 25 %.
+ *
+ * The proof is not that one photograph. It is that across all 30 captures we
+ * hold, this field moves with 0x292's 10|10 and sits below it by a gap that
+ * is NOT CONSTANT -- which is what rules out the two being one number with
+ * arithmetic in between:
+ *
+ *      0x33A   0x292 10|10   gap
+ *        84        85.0      +1.0     2026-09-03
+ *        69        70.9      +1.9     2026-09-05 4th
+ *        59        60.4      +1.4     2026-09-05 drive
+ *        53        55.4      +2.4     2026-09-06 5th
+ *        22        24.5      +2.5     2026-09-08  <- the photographed one
+ *
+ * The same day's captures disagree with each other by up to 0.7, minutes
+ * apart. Two estimates that drift, not one estimate and a formula.
+ *
+ * 🔴 SEVEN BITS, NOT EIGHT. Bit 27 is set on some days and clear on others,
+ * so a mask one bit too wide turns 53 into 181. Three of the frames below
+ * carry that bit for exactly that reason. Bit 19 is clear in all 15 distinct
+ * payloads we hold, so it is not the field's low bit either -- which is why
+ * this is 20|7 and not 19|8, though both fit today's numbers.
+ *
+ * 🔴 IN NONE OF THE FIVE DBCs, like 0x1F9 (door open). Found by looking, so
+ * it is pinned here by measurement rather than cited.
+ */
+static const struct {
+    uint8_t data[8];
+    uint8_t ui;   /* 20|7 -- the number on the car's screen */
+    uint8_t wide; /* 20|8 -- what one bit too many would report */
+    const char* where;
+} UISOC[] = {
+    {{0xF8, 0x70, 0x43, 0xA5, 0xFE, 0xFF, 0xCF, 0x64}, 84, 84, "2026-09-03 유휴"},
+    {{0xCC, 0x70, 0x53, 0x2C, 0xFE, 0xFF, 0xCF, 0x64}, 69, 197, "2026-09-05 4th"},
+    {{0xAD, 0x70, 0xB3, 0xDB, 0xFD, 0xFF, 0xCF, 0x64}, 59, 187, "2026-09-05 drive"},
+    {{0x9D, 0x70, 0x53, 0xAB, 0xFD, 0xFF, 0xCF, 0x64}, 53, 181, "2026-09-06 5th"},
+    {{0x41, 0x70, 0x63, 0xB1, 0xFC, 0xFF, 0xCF, 0x64}, 22, 22, "2026-09-08 배터리"},
+};
+
+static void test_ui_soc_is_the_number_on_the_car_screen(void) {
+    for(size_t i = 0; i < sizeof(UISOC) / sizeof(UISOC[0]); i++) {
+        uint8_t pct = 0xFF;
+        CHECK(fsd_decode_ui_soc(UISOC[i].data, 8, &pct), "%s decodes", UISOC[i].where);
+        CHECK(pct == UISOC[i].ui, "%s: expected %u %%, got %u", UISOC[i].where,
+              (unsigned)UISOC[i].ui, (unsigned)pct);
+
+        /* 🔴 AND THE MASK IS SEVEN BITS. One bit too many reports 181, 187,
+         * 197 -- numbers no percentage can be, which the app then clamps to
+         * 100, drawing a confidently full battery on a half-empty car. */
+        if(UISOC[i].wide != UISOC[i].ui)
+            CHECK(pct != UISOC[i].wide,
+                  "%s: 20|7 is %u but 20|8 is %u -- a widened mask must not pass",
+                  UISOC[i].where, (unsigned)UISOC[i].ui, (unsigned)UISOC[i].wide);
+
+        /* Handler and decoder are ONE, asserted for the same reason as 0x292
+         * above: this project has already shipped two decoders for one frame,
+         * in these very two files, and neither had a test. */
+        FSDState st;
+        memset(&st, 0, sizeof(st));
+        CANFRAME f;
+        zero(&f);
+        f.canId = CAN_ID_UI_SOC;
+        f.data_lenght = 8;
+        memcpy(f.buffer, UISOC[i].data, 8);
+        fsd_handle_ui_soc(&st, &f);
+        CHECK(st.ui_soc == pct, "%s: handler says %u, decoder says %u -- they must be one",
+              UISOC[i].where, (unsigned)st.ui_soc, (unsigned)pct);
+        CHECK(st.ui_soc_seen, "%s: and the frame is marked seen", UISOC[i].where);
+
+        /* 🔴 IT IS NOT THE BMS FIELD, stated as a number so that quietly
+         * pointing this at 0x292 -- the whole defect being fixed -- is loud. */
+        CHECK(st.soc_percent < 0.001f,
+              "%s: 0x33A must not touch soc_percent, which is 0x292's", UISOC[i].where);
+    }
+}
+
+static void test_ui_soc_refuses_rather_than_guesses(void) {
+    uint8_t pct = 33;
+    CHECK(!fsd_decode_ui_soc(NULL, 8, &pct), "NULL data refused");
+    CHECK(!fsd_decode_ui_soc(UISOC[0].data, 8, NULL), "NULL out refused");
+    /* The field ends in byte 3, so three bytes cannot hold it. */
+    CHECK(!fsd_decode_ui_soc(UISOC[0].data, 3, &pct), "dlc 3 refused");
+    CHECK(pct == 33, "a refusal leaves the caller's value alone");
+    CHECK(fsd_decode_ui_soc(UISOC[0].data, 4, &pct), "dlc 4 is enough");
+
+    /* 🔴 A SEVEN-BIT FIELD HOLDS 0..127 AND A PERCENTAGE IS 0..100, so the
+     * top 27 values mean something is wrong -- SNA, or the field moved. Say
+     * nothing rather than draw 127 %. The room to say it exists only because
+     * the field is wider than the quantity; byte 27 (ui_speed) has no such
+     * room, which is why that one needed a flag instead. */
+    uint8_t sna[8] = {0x00, 0x00, 0xF0, 0x07, 0, 0, 0, 0}; /* 20|7 = 127 */
+    CHECK(!fsd_decode_ui_soc(sna, 8, &pct), "127 %% refused");
+    uint8_t over[8] = {0x00, 0x00, 0x50, 0x06, 0, 0, 0, 0}; /* 20|7 = 101 */
+    CHECK(!fsd_decode_ui_soc(over, 8, &pct), "101 %% refused");
+    /* ...but 100 is a full battery, not a fault. */
+    uint8_t full[8] = {0x00, 0x00, 0x40, 0x06, 0, 0, 0, 0}; /* 20|7 = 100 */
+    CHECK(fsd_decode_ui_soc(full, 8, &pct) && pct == 100, "100 %% is legal, got %u",
+          (unsigned)pct);
+    /* ...and so is 0. A flat battery is a reading, not an absence -- which is
+     * why the ABSENCE needed the sentinel above and not a zero. */
+    uint8_t empty[8] = {0x00, 0x00, 0x00, 0x00, 0, 0, 0, 0};
+    CHECK(fsd_decode_ui_soc(empty, 8, &pct) && pct == 0, "0 %% is legal, got %u",
+          (unsigned)pct);
+
+    /* And the handler refuses the same way rather than writing a zero. */
+    FSDState st;
+    memset(&st, 0, sizeof(st));
+    st.ui_soc = 42;
+    CANFRAME f;
+    zero(&f);
+    f.data_lenght = 3;
+    memcpy(f.buffer, UISOC[0].data, 3);
+    fsd_handle_ui_soc(&st, &f);
+    CHECK(st.ui_soc == 42, "a short frame must not move the reading, got %u",
+          (unsigned)st.ui_soc);
+    CHECK(!st.ui_soc_seen, "nor mark it seen");
+}
+
 int main(void) {
     printf("test_fsd_core: Tesla FSD protocol core host tests\n");
     test_set_bit();
     test_bms_soc_has_one_decoder();
     test_bms_soc_refuses_rather_than_guesses();
+    test_ui_soc_is_the_number_on_the_car_screen();
+    test_ui_soc_refuses_rather_than_guesses();
     test_read_mux();
     test_is_selected();
     test_detect_hw();
