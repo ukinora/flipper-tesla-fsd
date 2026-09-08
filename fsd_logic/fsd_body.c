@@ -395,7 +395,19 @@ FsdBodyVerdict fsd_body_caps_verdict(const FsdBodyCaps* c, const FsdBodyInputs* 
      * missing: a row with min_interval_ms == 0 may never fire at all, and that
      * has to be answerable even on a car that is telling us nothing. */
     if(c->min_interval_ms == 0u) return FSD_BODY_TOO_SOON;
-    if((uint32_t)(now_ms - in->last_act_ms[a]) < c->min_interval_ms) return FSD_BODY_TOO_SOON;
+    /* 🔴 0 IS "NEVER", NOT "AT MILLISECOND ZERO". The field's own comment
+     * promises the unsigned wrap treats it as long ago, and that is true for
+     * every millis() except the first few thousand: at now = 300 the
+     * subtraction yields 300, below the map light's 500, so the FIRST command
+     * of a run would be refused for as long as the interval lasts.
+     *
+     * Nobody could have noticed while the limiter was decorative. Turning it
+     * on (2026-09-08) made the promise load-bearing. The cost of the explicit
+     * check is one millisecond of licence, once per boot, to an action that
+     * genuinely fired at millis() 0. */
+    if(in->last_act_ms[a] != 0u &&
+       (uint32_t)(now_ms - in->last_act_ms[a]) < c->min_interval_ms)
+        return FSD_BODY_TOO_SOON;
 
     /* "Is someone in the driver's seat", from TWO signals rather than one.
      *
