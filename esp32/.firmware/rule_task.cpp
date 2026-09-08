@@ -12,6 +12,7 @@
 #ifdef BLE_SERVER_ENABLED
 
 #include "../../fsd_logic/fsd_autonomy.h"
+#include "../../fsd_logic/fsd_burst.h"
 #include "../../fsd_logic/fsd_pipeline.h"
 #include "body_task.h"    // the permission inputs, already assembled there
 #include "rules_store.h"  // the owner's table
@@ -87,33 +88,31 @@ void rule_task_init(FSDState* state, portMUX_TYPE* mux, RuleTaskSend send) {
  * 안 바꾼다. 한쪽만 바꾸면 화면과 소스의 대조가 끊긴다. rules_store.cpp 가
  * 같은 규칙을 따르고, 이 파일은 2026-09-07 에 새로 생기면서 그것을 놓쳐
  * 하루 동안 "규칙" 을 찍고 있었다. */
-/* A burst in progress: the same decision, waiting for the car's next frames.
+/* Decisions waiting for the car's next frame of their id.
  *
- * 🔴 THE CAR'S CLOCK, NOT OURS. remaining counts DOWN on arrivals of the frame
- * this action writes, so our frame lands 0-1 ms after the car's own -- the
- * spacing TSL uses and the reason there is no timer here. A timer would drift
- * against a 50 ms bus and put us in the middle of a gap, which is where the
- * first car attempt died.
+ * 🔴 THE CAR'S CLOCK, NOT OURS — for EVERY frame, including the first. That
+ * last word is the 2026-09-08 fix: this used to ship frame one the instant the
+ * switch was pressed and only the repeats on arrivals, which worked on 0x249
+ * (50 ms) and could not work on 0x273 (500 ms). The blinker lighting up that
+ * day was luck, not a result.
  *
- * Session state, not settings. It dies with the power like the arm flag, and
- * anything that stops the burst early (a refusal, a mode change) just leaves
- * remaining at whatever it was -- the next arrival tries again and gets a named
- * refusal, which is the honest outcome. */
-static struct {
-    FsdBodyAction action;
-    int32_t arg;
-    uint8_t rule_index;
-    uint8_t remaining;
-    uint32_t id;      /* the CAN id whose arrival drives it */
-} g_burst = {(FsdBodyAction)0, 0, 0, 0u, 0u};
+ * The table itself is pure C in fsd_logic/fsd_burst.c, where a host test can
+ * drive it. This file owns a bus; that one owns the clock. */
+static FsdBurst g_burst;
 
 void rule_task_set_armed(bool armed) {
     if (g_armed == armed) return;
     g_armed = armed;
     /* Disarming stops a burst mid-flight. The axis would refuse the rest
      * anyway (NOT_ENABLED), but "stop" should not depend on a gate further
-     * down agreeing with it. */
-    g_burst.remaining = 0u;
+     * down agreeing with it.
+     *
+     * 🔴 AND SINCE 2026-09-08 IT DROPS THE WHOLE COMMAND, not just its tail:
+     * no frame goes out before the car's next one, so a press that has not
+     * seen an arrival yet has written nothing at all. That is the safer
+     * direction and worth saying, because it means "lock" now cancels
+     * commands that used to be half-sent. */
+    fsd_burst_reset(&g_burst);
     /* 🔴 AND IT DROPS A RELEASE THAT WAS OWED, which is the one place where
      * "stop" costs something: the horn stays pressed until the car's own next
      * mux-0 frame, up to 100 ms. That is the right trade -- disarm means stop
@@ -286,41 +285,53 @@ static void run_event(const FsdTriggerEvent* ev, uint32_t now_ms) {
     const uint8_t n = fsd_pipe_run(rules, ev, &in, &g_frames, now_ms, out, FSD_PIPE_MAX_OUT);
 
     for (uint8_t i = 0; i < n; i++) {
-        if (!ship(&out[i], now_ms, "보냄")) continue;
-
-        /* 🔴 AND ONE FRAME IS SOMETIMES ONLY HALF THE COMMAND. A gesture owes
-         * a release; everything else owes nothing and this returns at once. */
-        arm_release(&out[i], now_ms);
-
-        /* 🔴 ONE FRAME IS NOT ALWAYS THE COMMAND. Arm the rest of the burst;
-         * the car's next frames of this id drive it. See fsd_emit_repeat(). */
-        const uint8_t reps = fsd_emit_repeat(out[i].action);
+        /* 🔴 NOTHING IS SENT HERE. This used to ship frame one immediately and
+         * arm only the repeats; 2026-09-08 in the car showed why that cannot
+         * work — see fsd_burst.h. Every frame now waits for the car's next one
+         * of this id, which is both where TSL puts its frames and the only
+         * moment the emitter's template is fresh.
+         *
+         * The decision is still made HERE, at the press: which rules matched
+         * is a question about the event. Only the writing moved. */
         const FsdBodyWire* w = fsd_body_wire(out[i].action);
-        if (reps > 1u && w) {
-            g_burst.action = out[i].action;
-            g_burst.arg = out[i].arg;
-            g_burst.rule_index = out[i].rule_index;
-            g_burst.remaining = (uint8_t)(reps - 1u);
-            g_burst.id = w->can_id;
+        if (!w) {
+            /* Every action in the enum has a row, so this is unreachable
+             * today. It stays because the next person to add an action meets
+             * it here rather than finding a command that silently never
+             * fires. */
+            g_refused++;
+            snprintf(g_last_refusal, sizeof(g_last_refusal),
+                     "chokepoint: 이 동작에 행이 없다");
+            continue;
+        }
+        if (!fsd_burst_arm(&g_burst, out[i].action, out[i].arg, out[i].rule_index,
+                           w->can_id, fsd_emit_repeat(out[i].action), now_ms)) {
+            g_refused++;
+            snprintf(g_last_refusal, sizeof(g_last_refusal),
+                     "burst: 대기열이 가득 찼다");
+            Serial.printf("[RULE] 매핑 %u %s -> 대기열이 가득 찼다 (동시에 %u개까지)\n",
+                          (unsigned)out[i].rule_index,
+                          fsd_body_action_str(out[i].action), (unsigned)FSD_BURST_MAX);
         }
     }
 }
 
-/* The car's frame just landed. If a burst is owed on this id, put ours in
- * front of the next one -- 0-1 ms behind the frame we copied, which is where
- * TSL's are. */
+/* The car's frame just landed. If anything is owed on this id, put ours right
+ * behind it -- 0-1 ms after the frame we copied, which is where TSL's are.
+ *
+ * 🔴 THIS IS NOW THE ONLY PLACE A PRESS REACHES THE BUS. It used to handle
+ * frames 2..N while run_event() sent the first one on the trigger's clock. */
 static void burst_on_frame(uint32_t can_id, uint32_t now_ms) {
-    if (g_burst.remaining == 0u || can_id != g_burst.id) return;
     if (!g_state || !g_mux) return;
 
-    g_burst.remaining--;
+    FsdBurstDue due;
+    if (!fsd_burst_on_frame(&g_burst, can_id, now_ms, &due)) return;
 
     const FsdBodyInputs in = rule_inputs(now_ms);
     FsdPipeResult r;
     memset(&r, 0, sizeof(r));
-    fsd_pipe_one(g_burst.action, g_burst.arg, g_burst.rule_index, &in, &g_frames,
-                 now_ms, &r);
-    /* A refusal here stops nothing by itself -- remaining is already down, so
+    fsd_pipe_one(due.action, due.arg, due.rule_index, &in, &g_frames, now_ms, &r);
+    /* A refusal here stops nothing by itself -- the slot is already spent, so
      * the burst runs out on its own. What it does is name why, which is the
      * whole point of doing it through the pipeline instead of around it. */
     if (ship(&r, now_ms, "보냄")) arm_release(&r, now_ms);
@@ -359,6 +370,15 @@ void rule_task_tick(uint32_t now_ms) {
     /* The guaranteed path: a quiet bus delivers no frames, so rule_task_observe()
      * would never run and a release would sit pending forever. */
     release_due(now_ms);
+    /* 🔴 AND THE SAME ARGUMENT NOW APPLIES TO THE PRESS ITSELF. Since every
+     * frame waits for the car, a bus that goes quiet leaves a command armed
+     * with nobody behind it. fsd_burst_tick() drops those; without this call
+     * the deadline in fsd_burst.h would be a comment rather than a rule. */
+    const uint8_t gone = fsd_burst_tick(&g_burst, now_ms);
+    if (gone) {
+        Serial.printf("[RULE] 대기 중이던 명령 %u개를 버렸다 — 그 프레임이 %u ms 동안 "
+                      "안 왔다\n", (unsigned)gone, (unsigned)FSD_BURST_MAX_WAIT_MS);
+    }
     FsdTriggerEvent ev[RULE_EVENTS_MAX];
     const uint8_t n = fsd_trig_tick(&g_trig, now_ms, ev, RULE_EVENTS_MAX);
     for (uint8_t i = 0; i < n; i++) run_event(&ev[i], now_ms);
@@ -380,6 +400,13 @@ void rule_task_print(void) {
     Serial.printf("[RULE] %s · 보냄 %u · 거부 %u · 마지막 거부: %s\n",
                   g_armed ? "송신 허용" : "송신 잠금", (unsigned)g_sent, (unsigned)g_refused,
                   g_last_refusal);
+    /* 🔴 WITHOUT THIS LINE "보냄 0" HAS TWO MEANINGS since 2026-09-08: nothing
+     * was decided, or something was decided and is still waiting for the car.
+     * At the car those look identical and the second one is not a failure. */
+    Serial.printf("[RULE] 차의 프레임을 기다리는 명령 %u개 · 기다리다 버린 것 %u · "
+                  "대기열이 가득 차 못 받은 것 %u\n",
+                  (unsigned)fsd_burst_pending(&g_burst), (unsigned)g_burst.expired,
+                  (unsigned)g_burst.dropped);
     if (!g_armed) {
         Serial.println("[RULE] 허용하려면 'rulearm on'. 이 세션에만 유효하고 "
                        "전원이 끊기면 꺼집니다.");

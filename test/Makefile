@@ -75,9 +75,9 @@ test_body_wire: $(BODYWIRE_SRC) $(ROOT)/fsd_logic/fsd_body_wire.h $(ROOT)/fsd_lo
 # The four layers joined. Links every one of them because that is the
 # point: this binary is the only place the whole chain runs, and it runs
 # on frames copied out of captures rather than on a fixture.
-PIPE_SRC := test_pipeline.c $(ROOT)/fsd_logic/fsd_pipeline.c $(ROOT)/fsd_logic/fsd_rules.c $(ROOT)/fsd_logic/fsd_body.c $(ROOT)/fsd_logic/fsd_body_emit.c $(ROOT)/fsd_logic/fsd_body_wire.c $(ROOT)/fsd_logic/fsd_signal.c
+PIPE_SRC := test_pipeline.c $(ROOT)/fsd_logic/fsd_burst.c $(ROOT)/fsd_logic/fsd_pipeline.c $(ROOT)/fsd_logic/fsd_rules.c $(ROOT)/fsd_logic/fsd_body.c $(ROOT)/fsd_logic/fsd_body_emit.c $(ROOT)/fsd_logic/fsd_body_wire.c $(ROOT)/fsd_logic/fsd_signal.c
 
-test_pipeline: $(PIPE_SRC) $(ROOT)/fsd_logic/fsd_pipeline.h $(ROOT)/fsd_logic/fsd_rules.h $(ROOT)/fsd_logic/fsd_body.h $(ROOT)/fsd_logic/fsd_body_emit.h $(ROOT)/fsd_logic/fsd_body_wire.h $(ROOT)/fsd_logic/fsd_trigger.h
+test_pipeline: $(PIPE_SRC) $(ROOT)/fsd_logic/fsd_burst.h $(ROOT)/fsd_logic/fsd_pipeline.h $(ROOT)/fsd_logic/fsd_rules.h $(ROOT)/fsd_logic/fsd_body.h $(ROOT)/fsd_logic/fsd_body_emit.h $(ROOT)/fsd_logic/fsd_body_wire.h $(ROOT)/fsd_logic/fsd_trigger.h
 	$(CC) $(CFLAGS) -I$(ROOT)/fsd_logic $(PIPE_SRC) -o $@
 
 SIGNAL_SRC := test_signal.c $(ROOT)/fsd_logic/fsd_signal.c

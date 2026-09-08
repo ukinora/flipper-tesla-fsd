@@ -17,6 +17,7 @@
 #include <string.h>
 
 #include "fsd_autonomy.h"
+#include "fsd_burst.h"
 #include "fsd_pipeline.h"
 
 static int g_pass = 0;
@@ -606,6 +607,190 @@ static void test_release_faces_the_chokepoint(void) {
     fsd_pipe_release(FSD_ACT_LIGHT_HORN, 0, 0u, &f, 1000u, NULL);
 }
 
+
+/* ════════════════════════════════════════════════════════════════════════
+ * fsd_burst — WHEN a decided frame goes out.
+ *
+ * 🔴 THIS EXISTS BECAUSE OF A FAILURE IN THE CAR, 2026-09-08. The blinker
+ * worked and the mirror did not, from the same board, the same session and
+ * the same permission state. The capture said why: 0x273 arrived twenty times
+ * and every one of them was the car's — not one of ours reached the bus.
+ *
+ * The scheduler shipped the FIRST frame on the trigger's clock, the instant
+ * the switch was pressed, and only the repeats on the car's. For 0x249 that
+ * is harmless: at 50 ms the reference is never more than 50 ms old and the
+ * 200 ms freshness window always covers it. For 0x273 at 500 ms it almost
+ * never does, and the mirror is reps=1 — so that one frame was the whole
+ * command.
+ *
+ * 🔴 THE BLINKER WAS NOT A SUCCESS, IT WAS LUCK. Both actions had the same
+ * defect; one of them ran on a bus fast enough to hide it.
+ *
+ * So every frame waits for the car's. That is not a tuning choice — the
+ * emitter COPIES the car's last frame of that id and changes a few bits, so a
+ * frame sent between arrivals is built from a template up to a full period
+ * old. The chokepoint then refuses it, correctly, as a stale reference. There
+ * was never a version of "send now" that could work.
+ *
+ * The cost is latency: up to one frame period, so 50 ms for the blinker and
+ * 500 ms for the mirror. That is the trade this file makes on purpose.
+ * ════════════════════════════════════════════════════════════════════════ */
+
+static void test_burst_waits_for_the_cars_frame(void) {
+    printf("\n-- burst: nothing goes out until the car's frame does --\n");
+    FsdBurst b;
+    fsd_burst_reset(&b);
+
+    /* Nothing armed: an arrival produces nothing. */
+    FsdBurstDue due;
+    CHECK(!fsd_burst_on_frame(&b, 0x249u, 1000u, &due), "idle: no emission");
+
+    /* The mirror. One frame, on 0x273. */
+    CHECK(fsd_burst_arm(&b, FSD_ACT_MIRROR, 1, 3u, 0x273u, 1u, 1000u), "armed");
+    CHECK(fsd_burst_pending(&b) == 1u, "one burst waiting");
+
+    /* 🔴 THE ASSERTION THE CAR PAID FOR. Arming consumes NOTHING: the
+     * first arrival still has a frame to emit. The old code shipped here, on
+     * the trigger's clock, and that frame is the one the chokepoint refused
+     * twenty times out of twenty. If arming emitted, reps=1 would be spent
+     * and the arrival below would find an empty slot. */
+
+    /* Another id arriving is not ours. */
+    CHECK(!fsd_burst_on_frame(&b, 0x249u, 1010u, &due), "a different id does nothing");
+    CHECK(fsd_burst_pending(&b) == 1u, "and the burst is still waiting");
+
+    /* Ours arrives. */
+    CHECK(fsd_burst_on_frame(&b, 0x273u, 1400u, &due), "our id fires it");
+    CHECK(due.action == FSD_ACT_MIRROR && due.arg == 1 && due.rule_index == 3u,
+          "and it carries the decision unchanged");
+    CHECK(fsd_burst_pending(&b) == 0u, "reps=1 leaves nothing");
+    CHECK(!fsd_burst_on_frame(&b, 0x273u, 1900u, &due), "the next frame is not ours");
+}
+
+static void test_burst_counts_four_arrivals_for_the_blinker(void) {
+    printf("\n-- burst: four frames, four arrivals --\n");
+    FsdBurst b;
+    fsd_burst_reset(&b);
+    CHECK(fsd_burst_arm(&b, FSD_ACT_TURN_SIGNAL, 0, 1u, 0x249u, 4u, 0u), "armed 4");
+
+    FsdBurstDue due;
+    for (unsigned i = 0; i < 4u; i++) {
+        CHECK(fsd_burst_on_frame(&b, 0x249u, 50u * (i + 1u), &due),
+              "arrival %u emits", i + 1u);
+        CHECK(due.action == FSD_ACT_TURN_SIGNAL, "arrival %u is the blinker", i + 1u);
+    }
+    /* 🔴 FOUR, NOT FIVE. The old code sent one immediately and armed reps-1,
+     * so switching to reps here without dropping the immediate send would put
+     * an extra frame on the bus. */
+    CHECK(!fsd_burst_on_frame(&b, 0x249u, 250u, &due), "and then it is done");
+    CHECK(fsd_burst_pending(&b) == 0u, "nothing left");
+}
+
+static void test_burst_gives_up_when_the_id_never_comes(void) {
+    printf("\n-- burst: a deadline, because waiting forever is not waiting --\n");
+    FsdBurst b;
+    fsd_burst_reset(&b);
+    CHECK(fsd_burst_arm(&b, FSD_ACT_MIRROR, 1, 3u, 0x273u, 1u, 1000u), "armed");
+
+    /* 🔴 THE COST OF WAITING FOR THE CAR IS THAT THE CAR MIGHT NOT SPEAK. A
+     * burst with no deadline outlives the press that made it: the operator
+     * gives up, walks away, and the frame goes out whenever the bus comes
+     * back — a command with no one behind it. */
+    CHECK(fsd_burst_tick(&b, 1000u + FSD_BURST_MAX_WAIT_MS - 1u) == 0u,
+          "inside the window it keeps waiting");
+    CHECK(fsd_burst_pending(&b) == 1u, "still armed");
+    CHECK(fsd_burst_tick(&b, 1000u + FSD_BURST_MAX_WAIT_MS) == 1u, "at the window it expires");
+    CHECK(fsd_burst_pending(&b) == 0u, "and the slot is free");
+    CHECK(b.expired == 1u, "counted, so ruleq can say it happened");
+
+    FsdBurstDue due;
+    CHECK(!fsd_burst_on_frame(&b, 0x273u, 9999u, &due),
+          "a late frame does not resurrect it");
+}
+
+static void test_burst_deadline_is_per_frame_not_per_press(void) {
+    printf("\n-- burst: each arrival buys the next one time --\n");
+    FsdBurst b;
+    fsd_burst_reset(&b);
+    /* 🔴 A four-frame burst on a bus that stalls halfway must not be judged
+     * by when the button was pressed. The question a deadline answers is "has
+     * this id gone quiet", and that clock restarts every time it speaks. */
+    CHECK(fsd_burst_arm(&b, FSD_ACT_TURN_SIGNAL, 0, 1u, 0x249u, 4u, 0u), "armed 4");
+    FsdBurstDue due;
+    CHECK(fsd_burst_on_frame(&b, 0x249u, FSD_BURST_MAX_WAIT_MS - 10u, &due),
+          "an arrival just inside the window");
+    CHECK(fsd_burst_tick(&b, FSD_BURST_MAX_WAIT_MS + 10u) == 0u,
+          "does not expire on the ORIGINAL deadline");
+    CHECK(fsd_burst_pending(&b) == 1u, "it is still going");
+    /* ...but the new one still applies, so a bus that then goes quiet ends it. */
+    CHECK(fsd_burst_tick(&b, 2u * FSD_BURST_MAX_WAIT_MS) == 1u,
+          "and does expire on the refreshed one");
+    CHECK(fsd_burst_pending(&b) == 0u, "gone");
+}
+
+static void test_burst_one_frame_per_arrival(void) {
+    printf("\n-- burst: two rules on one id do not stack in one millisecond --\n");
+    FsdBurst b;
+    fsd_burst_reset(&b);
+    /* The map light and the mirror are both 0x273. If the owner puts both on
+     * one switch, two decisions arrive together.
+     *
+     * 🔴 ONE FRAME PER ARRIVAL. Emitting both on the same arrival would put
+     * two of our frames in the same millisecond slot behind one reference —
+     * and the second would be built from a template the first has already
+     * contradicted. They take turns instead. */
+    CHECK(fsd_burst_arm(&b, FSD_ACT_MAP_LIGHT, 0, 0u, 0x273u, 1u, 0u), "map light armed");
+    CHECK(fsd_burst_arm(&b, FSD_ACT_MIRROR, 1, 3u, 0x273u, 1u, 0u), "mirror armed");
+    CHECK(fsd_burst_pending(&b) == 2u, "both waiting");
+
+    FsdBurstDue due;
+    CHECK(fsd_burst_on_frame(&b, 0x273u, 500u, &due), "first arrival emits one");
+    CHECK(due.action == FSD_ACT_MAP_LIGHT, "and it is the one armed first");
+    CHECK(fsd_burst_pending(&b) == 1u, "the other still waits");
+    CHECK(fsd_burst_on_frame(&b, 0x273u, 1000u, &due), "second arrival emits the other");
+    CHECK(due.action == FSD_ACT_MIRROR, "the mirror, second");
+    CHECK(fsd_burst_pending(&b) == 0u, "and now nothing");
+}
+
+static void test_burst_slots_are_finite_and_say_so(void) {
+    printf("\n-- burst: a full table refuses rather than forgets --\n");
+    FsdBurst b;
+    fsd_burst_reset(&b);
+    for (unsigned i = 0; i < FSD_BURST_MAX; i++)
+        CHECK(fsd_burst_arm(&b, FSD_ACT_MIRROR, 1, (uint8_t)i, 0x273u, 1u, 0u),
+              "slot %u", i);
+    /* 🔴 REFUSE, do not overwrite. Silently dropping the oldest would make a
+     * command vanish with nothing said — and the counter is what lets ruleq
+     * say it happened at all. */
+    CHECK(!fsd_burst_arm(&b, FSD_ACT_MIRROR, 1, 9u, 0x273u, 1u, 0u), "full: refused");
+    CHECK(b.dropped == 1u, "and counted");
+    CHECK(fsd_burst_pending(&b) == FSD_BURST_MAX, "nothing was evicted");
+}
+
+static void test_burst_reset_stops_everything(void) {
+    printf("\n-- burst: stop means stop --\n");
+    FsdBurst b;
+    fsd_burst_reset(&b);
+    CHECK(fsd_burst_arm(&b, FSD_ACT_TURN_SIGNAL, 0, 1u, 0x249u, 4u, 0u), "armed");
+    /* Locking transmission mid-burst has to drop it here, not rely on a gate
+     * further down refusing the rest. Same argument as the release flag. */
+    fsd_burst_reset(&b);
+    CHECK(fsd_burst_pending(&b) == 0u, "reset clears the table");
+    FsdBurstDue due;
+    CHECK(!fsd_burst_on_frame(&b, 0x249u, 50u, &due), "and arrivals do nothing");
+}
+
+static void test_burst_arming_zero_is_not_a_burst(void) {
+    printf("\n-- burst: reps 0 --\n");
+    FsdBurst b;
+    fsd_burst_reset(&b);
+    /* fsd_emit_repeat() returns at least 1 for every action, so 0 means a
+     * caller got confused. Refuse it: an armed slot that can never emit would
+     * hold a slot until the deadline. */
+    CHECK(!fsd_burst_arm(&b, FSD_ACT_MIRROR, 1, 3u, 0x273u, 0u, 0u), "reps 0 refused");
+    CHECK(fsd_burst_pending(&b) == 0u, "nothing armed");
+}
+
 int main(void) {
     printf("test_pipeline: rule -> axis -> emitter -> chokepoint\n");
     test_turn_signal_needs_a_burst();
@@ -616,6 +801,14 @@ int main(void) {
     test_quiet_cases();
     test_names();
     test_release_faces_the_chokepoint();
+    test_burst_waits_for_the_cars_frame();
+    test_burst_counts_four_arrivals_for_the_blinker();
+    test_burst_gives_up_when_the_id_never_comes();
+    test_burst_deadline_is_per_frame_not_per_press();
+    test_burst_one_frame_per_arrival();
+    test_burst_slots_are_finite_and_say_so();
+    test_burst_reset_stops_everything();
+    test_burst_arming_zero_is_not_a_burst();
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }
