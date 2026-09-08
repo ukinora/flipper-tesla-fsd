@@ -311,6 +311,27 @@ static void run_event(const FsdTriggerEvent* ev, uint32_t now_ms) {
          *
          * The decision is still made HERE, at the press: which rules matched
          * is a question about the event. Only the writing moved. */
+        /* 🔴🔴 A REFUSAL ARMS NOTHING. Dropping the ship() call that used to
+         * stand here removed the only thing that separated an accepted
+         * decision from a refused one -- and arming on a refusal is worse
+         * than sending on one: fsd_burst_arm() STAMPS last_act_ms, so a
+         * command the axis just rejected would lock the next, valid press out
+         * for the whole interval. It would also hold a slot until the
+         * deadline, and report its reason 500 ms late instead of under the
+         * finger that caused it.
+         *
+         * Found while wiring the rate limiter -- the same commit that made the
+         * stamp mean anything is the one that made this dangerous. */
+        if (out[i].stage != FSD_PIPE_OK) {
+            note_refusal(&out[i]);
+            Serial.printf("[RULE] 매핑 %u %s 거부 — %s: %s\n",
+                          (unsigned)out[i].rule_index,
+                          fsd_body_action_str(out[i].action),
+                          fsd_pipe_stage_str(out[i].stage),
+                          fsd_pipe_reason_str(out[i].stage, out[i].reason));
+            continue;
+        }
+
         const FsdBodyWire* w = fsd_body_wire(out[i].action);
         if (!w) {
             /* Every action in the enum has a row, so this is unreachable
