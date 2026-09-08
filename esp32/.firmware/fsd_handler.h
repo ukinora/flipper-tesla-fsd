@@ -185,6 +185,12 @@ void fsd_handle_esp_status(FSDState *state, const CanFrame *frame);
 void fsd_handle_bms_hv(FSDState *state, const CanFrame *frame);
 
 /** Parse BMS_socStatus (0x292) — updates soc_percent. */
+/** Parse UI_status (0x33A) — updates ui_soc, the % on the car's OWN screen.
+ *  🔴 Deliberately does NOT touch soc_percent. 0x292 carries the pack's own
+ *  estimate and this carries the screen's; they differ by 1-3 %% and the gap
+ *  is not constant, so neither can be derived from the other. */
+void fsd_handle_ui_soc(FSDState *state, const CanFrame *frame);
+
 void fsd_handle_bms_soc(FSDState *state, const CanFrame *frame);
 
 /** Parse BMS_thermalStatus (0x312) — updates batt_temp_min/max_c. */

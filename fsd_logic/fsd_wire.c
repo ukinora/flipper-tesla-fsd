@@ -120,6 +120,20 @@ void fsd_wire_pack_state(const FsdWireState* in, uint8_t* out) {
      * Sent raw: it is the car's own display value, in the car's own unit, and
      * converting it here would be inventing a unit we were not told. */
     out[27] = in->ui_speed_seen ? in->ui_speed : 0u;
+
+    /* Byte 28, added in version 8. THE CAR'S OWN PERCENTAGE (0x33A).
+     *
+     * 🔴 Byte 8 is not this. Byte 8 is 0x292 -- the pack's estimate -- and it
+     * reads 1-3 % higher, which is the defect the owner reported and which no
+     * choice of field inside 0x292 could have fixed: 10|10 is the LOWEST of
+     * that frame's four. The number on the screen is in another frame.
+     *
+     * 🔴 0x7F means "never decoded", not "127 %". 0 is a real reading -- a
+     * flat battery -- so a zero cannot carry the absence, and an out-of-range
+     * input is refused rather than clamped to 100: a confidently full battery
+     * on an empty car is worse than a blank. */
+    out[28] = (in->ui_soc_seen && in->ui_soc <= 100u) ? in->ui_soc
+                                                      : FSD_WIRE_UI_SOC_NONE;
 }
 
 void fsd_wire_pack_camstat(const FsdWireCamStat* in, uint8_t* out) {

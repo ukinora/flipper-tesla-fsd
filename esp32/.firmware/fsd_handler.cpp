@@ -824,6 +824,16 @@ void fsd_handle_bms_soc(FSDState *state, const CanFrame *frame) {
     state->bms_seen = true;
 }
 
+void fsd_handle_ui_soc(FSDState *state, const CanFrame *frame) {
+    // One decoder, shared with the Flipper path — see fsd_decode_ui_soc() in
+    // fsd_types.h. The frame next door (0x292) had two of them for the life of
+    // this project, in these very two files, and neither had a test.
+    uint8_t pct = 0;
+    if (!fsd_decode_ui_soc(frame->data, frame->dlc, &pct)) return;
+    state->ui_soc = pct;
+    state->ui_soc_seen = true;
+}
+
 void fsd_handle_bms_thermal(FSDState *state, const CanFrame *frame) {
     if (frame->dlc < 6) return;
     // Temperatures: raw byte − 40 = °C

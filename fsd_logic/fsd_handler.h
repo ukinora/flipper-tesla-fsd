@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#define CAN_ID_UI_SOC         0x33A  // 826 - UI_status: the % ON THE CAR'S SCREEN
 #define CAN_ID_STW_ACTN_RQ    0x045  // 69 - steering wheel stalk (Legacy follow distance)
 #define CAN_ID_AP_LEGACY      0x3EE  // 1006 - autopilot control (Legacy)
 #define CAN_ID_ISA_SPEED      0x399  // 921 - ISA speed chime (HW4)
@@ -163,6 +164,12 @@ bool fsd_can_transmit(const FSDState* state);
 void fsd_handle_bms_hv(FSDState* state, const CANFRAME* frame);
 
 /** Parse a BMS SoC frame (0x292) and update soc_percent. */
+/** Parse UI_status (0x33A) — updates ui_soc, the % on the car's OWN screen.
+ *  🔴 Deliberately does NOT touch soc_percent. 0x292 carries the pack's own
+ *  estimate and this carries the screen's; they differ by 1-3 %% and the gap
+ *  is not constant, so neither can be derived from the other. */
+void fsd_handle_ui_soc(FSDState* state, const CANFRAME* frame);
+
 void fsd_handle_bms_soc(FSDState* state, const CANFRAME* frame);
 
 /** Parse a BMS thermal frame (0x312) and update battery temp min/max. */

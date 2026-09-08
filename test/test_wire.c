@@ -62,8 +62,61 @@ static void test_profile_sentinel(void) {
     CHECK(FSD_WIRE_PROFILE_NONE > FSD_PROFILE_MASK,
           "sentinel 0x%02X must not be a real profile (mask 0x%02X)",
           FSD_WIRE_PROFILE_NONE, FSD_PROFILE_MASK);
-    CHECK(FSD_WIRE_STATE_LEN == 28u, "State is 28 bytes in v7");
-    CHECK(FSD_WIRE_STATE_VERSION == 7u, "version bumped with the length");
+    CHECK(FSD_WIRE_STATE_LEN == 29u, "State is 29 bytes in v8");
+    CHECK(FSD_WIRE_STATE_VERSION == 8u, "version bumped with the length");
+
+    /* 🔴 Byte 28 carries the car's OWN percentage (0x33A) and needs a way to
+     * say "never decoded". 0 cannot do it -- a flat battery reads 0 -- so the
+     * sentinel must sit above every legal percentage while still fitting the
+     * seven bits the CAN field is wide. Same argument as byte 26, and the
+     * OPPOSITE of byte 27, whose field fills its byte and needed a flag. */
+    CHECK(FSD_WIRE_UI_SOC_NONE > 100u, "sentinel must not be a percentage");
+    CHECK(FSD_WIRE_UI_SOC_NONE <= FSD_UI_SOC_MASK,
+          "sentinel 0x%02X must fit the CAN field (mask 0x%02X)",
+          FSD_WIRE_UI_SOC_NONE, FSD_UI_SOC_MASK);
+}
+
+/* 🔴 THE BATTERY DEFECT, pinned as two numbers rather than a story.
+ *
+ * The owner reported the app reading 2-3 % above the car across several
+ * drives. Measured 2026-09-08 with the two screens photographed together:
+ * car 22 %, app 25 %. Byte 8 is 0x292's 10|10, the BMS estimate; byte 28 is
+ * 0x33A's 20|7, the number the car itself displays. They are different
+ * quantities and the packer must carry BOTH -- byte 8 still feeds anything
+ * that wants the pack's own figure, byte 28 is what the dashboard draws. */
+static void test_ui_soc_is_carried_beside_the_bms_figure(void) {
+    printf("\n-- State: the car's own percentage --\n");
+    FsdWireState w;
+    memset(&w, 0, sizeof(w));
+    w.soc_percent = 24.5f; /* what the BMS frame said that day */
+    w.ui_soc_seen = true;
+    w.ui_soc = 22; /* what the screen said at the same moment */
+
+    uint8_t b[FSD_WIRE_STATE_LEN];
+    fsd_wire_pack_state(&w, b);
+    CHECK(b[8] == 25u, "byte 8 stays the BMS figure, rounded: got %u", b[8]);
+    CHECK(b[28] == 22u, "byte 28 is the car's own number: got %u", b[28]);
+    CHECK(b[8] != b[28],
+          "and they are allowed to differ -- merging them is the defect");
+
+    /* Unseen is a sentinel, not a zero, and not the last good value. */
+    w.ui_soc_seen = false;
+    fsd_wire_pack_state(&w, b);
+    CHECK(b[28] == FSD_WIRE_UI_SOC_NONE,
+          "a percentage nobody saw is sent as the sentinel, got %u", b[28]);
+    CHECK(b[8] == 25u, "and byte 8 is unaffected -- the two do not share a flag");
+
+    /* 0 is a reading. This is the assertion the sentinel exists for. */
+    w.ui_soc_seen = true;
+    w.ui_soc = 0;
+    fsd_wire_pack_state(&w, b);
+    CHECK(b[28] == 0u, "a flat battery is 0, not the sentinel, got %u", b[28]);
+
+    /* Out-of-range input cannot become a plausible percentage by truncation. */
+    w.ui_soc = 200;
+    fsd_wire_pack_state(&w, b);
+    CHECK(b[28] == FSD_WIRE_UI_SOC_NONE,
+          "an impossible percentage is refused, not clamped to 100, got %u", b[28]);
 }
 
 /* 🔴 The reverse-speed defect, pinned as an equation rather than a story.
@@ -843,6 +896,7 @@ int main(void) {
     test_state_blind_spot();
     test_state_tyre_pressure();
     test_profile_sentinel();
+    test_ui_soc_is_carried_beside_the_bms_figure();
     test_tyre_freshness();
     test_state_speed_limit_source();
     test_speed_limit_freshness();

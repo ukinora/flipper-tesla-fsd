@@ -96,6 +96,16 @@ void fsd_handle_bms_soc(FSDState* state, const CANFRAME* frame) {
     state->bms_seen = true;
 }
 
+void fsd_handle_ui_soc(FSDState* state, const CANFRAME* frame) {
+    /* One decoder, shared with the ESP32 path. Written that way from the first
+     * line because the frame next door -- 0x292 -- shipped two of them for the
+     * life of this project and neither had a test. */
+    uint8_t pct = 0;
+    if(!fsd_decode_ui_soc(frame->buffer, (uint8_t)frame->data_lenght, &pct)) return;
+    state->ui_soc = pct;
+    state->ui_soc_seen = true;
+}
+
 void fsd_handle_bms_thermal(FSDState* state, const CANFRAME* frame) {
     if(frame->data_lenght < 6) return;
     state->batt_temp_min_c = (int8_t)(frame->buffer[4] - 40);
