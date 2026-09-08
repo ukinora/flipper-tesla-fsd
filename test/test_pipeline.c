@@ -137,7 +137,7 @@ static void test_observe(void) {
     CHECK(!f.tpl[FSD_ACT_TURN_SIGNAL].seen, "nothing seen after init");
 
     /* The stalk frame reaches the turn signal's slot. */
-    CHECK(fsd_pipe_observe(&f, 0x249u, LSTALK, 4u, 1000u) == 1u, "0x249 stored once");
+    CHECK(fsd_pipe_observe(&f, 1u, 0x249u, LSTALK, 4u, 1000u) == 1u, "0x249 stored once");
     CHECK(f.tpl[FSD_ACT_TURN_SIGNAL].seen, "turn signal has a template");
     CHECK(f.tpl[FSD_ACT_TURN_SIGNAL].id == 0x249u, "id kept");
     CHECK(f.tpl[FSD_ACT_TURN_SIGNAL].dlc == 4u, "dlc kept");
@@ -152,7 +152,7 @@ static void test_observe(void) {
      * mirror both write 0x273, which is exactly why the template store is
      * keyed by ACTION and not by CAN id -- a single slot would make "which of
      * these two did I mean" a question this layer cannot answer. */
-    CHECK(fsd_pipe_observe(&f, 0x273u, BODY273, 8u, 1000u) == 2u,
+    CHECK(fsd_pipe_observe(&f, 1u, 0x273u, BODY273, 8u, 1000u) == 2u,
           "0x273 feeds the map light AND the mirror");
     CHECK(f.tpl[FSD_ACT_MAP_LIGHT].seen && f.tpl[FSD_ACT_MIRROR].seen,
           "both actions have a template");
@@ -161,7 +161,7 @@ static void test_observe(void) {
 
     /* Wrong length is not the frame the row describes. */
     fsd_pipe_init(&f);
-    CHECK(fsd_pipe_observe(&f, 0x249u, LSTALK, 3u, 1000u) == 0u, "dlc 3 refused");
+    CHECK(fsd_pipe_observe(&f, 1u, 0x249u, LSTALK, 3u, 1000u) == 0u, "dlc 3 refused");
     CHECK(!f.tpl[FSD_ACT_TURN_SIGNAL].seen, "and nothing was written");
 
     /* The multiplex is checked. 0x3C2 mux 1 is the scroll wheel; mux 0 is the
@@ -170,19 +170,19 @@ static void test_observe(void) {
     fsd_pipe_init(&f);
     const uint8_t mux29[8] = {0x29, 0x55, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40};
     const uint8_t mux00[8] = {0x00, 0x55, 0x55, 0x55, 0x00, 0x00, 0x65, 0x85};
-    (void)fsd_pipe_observe(&f, 0x3C2u, mux29, 8u, 1000u);
+    (void)fsd_pipe_observe(&f, 1u, 0x3C2u, mux29, 8u, 1000u);
     CHECK(f.tpl[FSD_ACT_CAMERA].seen, "mux 0x29 reached the camera slot");
     CHECK(!f.tpl[FSD_ACT_SEAT_DRIVER].seen, "and not the driver seat slot");
     fsd_pipe_init(&f);
-    (void)fsd_pipe_observe(&f, 0x3C2u, mux00, 8u, 1000u);
+    (void)fsd_pipe_observe(&f, 1u, 0x3C2u, mux00, 8u, 1000u);
     CHECK(f.tpl[FSD_ACT_SEAT_DRIVER].seen, "mux 0 reached the driver seat slot");
     CHECK(!f.tpl[FSD_ACT_CAMERA].seen, "and not the camera slot");
 
     /* NULL is survivable: this runs on every frame on the bus. */
-    CHECK(fsd_pipe_observe(NULL, 0x249u, LSTALK, 4u, 1000u) == 0u, "NULL store");
-    CHECK(fsd_pipe_observe(&f, 0x249u, NULL, 4u, 1000u) == 0u, "NULL data");
-    CHECK(fsd_pipe_observe(&f, 0x249u, LSTALK, 0u, 1000u) == 0u, "dlc 0");
-    CHECK(fsd_pipe_observe(&f, 0x249u, LSTALK, 9u, 1000u) == 0u, "dlc 9");
+    CHECK(fsd_pipe_observe(NULL, 1u, 0x249u, LSTALK, 4u, 1000u) == 0u, "NULL store");
+    CHECK(fsd_pipe_observe(&f, 1u, 0x249u, NULL, 4u, 1000u) == 0u, "NULL data");
+    CHECK(fsd_pipe_observe(&f, 1u, 0x249u, LSTALK, 0u, 1000u) == 0u, "dlc 0");
+    CHECK(fsd_pipe_observe(&f, 1u, 0x249u, LSTALK, 9u, 1000u) == 0u, "dlc 9");
 }
 
 /* ── the whole chain, on the one action that can complete it ───────────── */
@@ -198,7 +198,7 @@ static void test_turn_signal_end_to_end(void) {
 
     FsdPipeFrames f;
     fsd_pipe_init(&f);
-    (void)fsd_pipe_observe(&f, 0x249u, LSTALK, 4u, now);
+    (void)fsd_pipe_observe(&f, 1u, 0x249u, LSTALK, 4u, now);
 
     const FsdBodyInputs in = good_inputs(now);
     const FsdTriggerEvent ev = ev_of(FSD_SIG_MAP_SW_FR, FSD_TRIG_PRESS, 0, now);
@@ -242,7 +242,7 @@ static void test_each_layer_refuses(void) {
     one_rule(&rules, FSD_SIG_MAP_SW_FR, FSD_TRIG_PRESS, 0, FSD_ACT_TURN_SIGNAL,
              FSD_EMIT_TURN_LEFT);
     fsd_pipe_init(&f);
-    (void)fsd_pipe_observe(&f, 0x249u, LSTALK, 4u, now);
+    (void)fsd_pipe_observe(&f, 1u, 0x249u, LSTALK, 4u, now);
     FsdBodyInputs in = good_inputs(now);
     in.op_mode = OpMode_ListenOnly;
     in.bus_tx_open = false;
@@ -281,7 +281,7 @@ static void test_each_layer_refuses(void) {
      * on the wire. */
     one_rule(&rules, FSD_SIG_MAP_SW_FL, FSD_TRIG_PRESS, 0, FSD_ACT_MAP_LIGHT, 0);
     fsd_pipe_init(&f);
-    (void)fsd_pipe_observe(&f, 0x273u, BODY273, 8u, now);
+    (void)fsd_pipe_observe(&f, 1u, 0x273u, BODY273, 8u, now);
     in = good_inputs(now);
     const FsdTriggerEvent map_ev = ev_of(FSD_SIG_MAP_SW_FL, FSD_TRIG_PRESS, 0, now);
     dirty(out);
@@ -313,7 +313,7 @@ static void test_each_layer_refuses(void) {
     /* A template that has gone stale is the same refusal with a different
      * name: the car stopped talking, so the counter we would build on is old. */
     fsd_pipe_init(&f);
-    (void)fsd_pipe_observe(&f, 0x249u, LSTALK, 4u, 0u);
+    (void)fsd_pipe_observe(&f, 1u, 0x249u, LSTALK, 4u, 0u);
     dirty(out);
     CHECK(fsd_pipe_run(&rules, &ev, &in, &f, now, out, FSD_PIPE_MAX_OUT) == 1u, "one result");
     CHECK(out[0].stage == FSD_PIPE_BLOCKED_EMIT, "a stale template is refused");
@@ -338,7 +338,7 @@ static void test_each_layer_refuses(void) {
     one_rule(&rules, FSD_SIG_MAP_SW_FR, FSD_TRIG_PRESS, 0, FSD_ACT_TURN_SIGNAL,
              FSD_EMIT_TURN_LEFT);
     fsd_pipe_init(&f);
-    (void)fsd_pipe_observe(&f, 0x249u, LSTALK, 4u, now - 500u);
+    (void)fsd_pipe_observe(&f, 1u, 0x249u, LSTALK, 4u, now - 500u);
     in = good_inputs(now);
     dirty(out);
     CHECK(fsd_pipe_run(&rules, &ev, &in, &f, now, out, FSD_PIPE_MAX_OUT) == 1u, "one result");
@@ -367,7 +367,7 @@ static void test_each_layer_refuses(void) {
     one_rule(&rules, FSD_SIG_MAP_SW_FR, FSD_TRIG_PRESS, 0, FSD_ACT_CAMERA, 0);
     fsd_pipe_init(&f);
     const uint8_t mux29[8] = {0x29, 0x55, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40};
-    (void)fsd_pipe_observe(&f, 0x3C2u, mux29, 8u, now);
+    (void)fsd_pipe_observe(&f, 1u, 0x3C2u, mux29, 8u, now);
     CHECK(f.tpl[FSD_ACT_CAMERA].seen, "the camera's template really is there");
     CHECK(fsd_body_wire(FSD_ACT_CAMERA) != NULL, "and so is its wire row");
     in = good_inputs(now);
@@ -393,7 +393,7 @@ static void test_quiet_cases(void) {
     one_rule(&rules, FSD_SIG_MAP_SW_FR, FSD_TRIG_PRESS, 0, FSD_ACT_TURN_SIGNAL,
              FSD_EMIT_TURN_LEFT);
     fsd_pipe_init(&f);
-    (void)fsd_pipe_observe(&f, 0x249u, LSTALK, 4u, now);
+    (void)fsd_pipe_observe(&f, 1u, 0x249u, LSTALK, 4u, now);
     const FsdBodyInputs in = good_inputs(now);
 
     /* An event no rule wants produces nothing at all — not a refusal. */
@@ -476,7 +476,7 @@ static void test_a_repeat_faces_every_gate(void) {
 
     FsdPipeFrames f;
     fsd_pipe_init(&f);
-    fsd_pipe_observe(&f, 0x249u, LSTALK, sizeof(LSTALK), now);
+    fsd_pipe_observe(&f, 1u, 0x249u, LSTALK, sizeof(LSTALK), now);
 
     FsdBodyInputs in = good_inputs(now);
     in.action_enabled[FSD_ACT_TURN_SIGNAL] = true;
@@ -553,7 +553,7 @@ static void test_release_faces_the_chokepoint(void) {
      * 🟢 A RELEASE DIFFERS FROM THE CAR'S OWN FRAME IN NOTHING. So it clears
      * a bit-granularity check by construction -- and asserting the FRAME here,
      * not just the verdict, is what makes that structural rather than lucky. */
-    (void)fsd_pipe_observe(&f, 0x3C2u, HORN_MUX0, 8u, 1000u);
+    (void)fsd_pipe_observe(&f, 1u, 0x3C2u, HORN_MUX0, 8u, 1000u);
     memset(&r, 0, sizeof(r));
     fsd_pipe_release(FSD_ACT_LIGHT_HORN, 0, 3u, &f, 1050u, &r);
     CHECK(r.stage == FSD_PIPE_OK, "the release goes through, got %s (%s)",
@@ -581,7 +581,7 @@ static void test_release_faces_the_chokepoint(void) {
     held[0] = 0x04u;
     FsdPipeFrames hf;
     fsd_pipe_init(&hf);
-    (void)fsd_pipe_observe(&hf, 0x3C2u, held, 8u, 1000u);
+    (void)fsd_pipe_observe(&hf, 1u, 0x3C2u, held, 8u, 1000u);
     memset(&r, 0, sizeof(r));
     fsd_pipe_release(FSD_ACT_LIGHT_HORN, 0, 3u, &hf, 1050u, &r);
     CHECK(r.stage == FSD_PIPE_BLOCKED_EMIT, "a held horn refuses the release, got %s",
@@ -922,6 +922,116 @@ static void test_reset_forgets_the_stamps_too(void) {
     CHECK(seen[FSD_ACT_MIRROR] == 0u, "cleared");
 }
 
+
+/* ════════════════════════════════════════════════════════════════════════
+ * WHICH BUS a command goes out on.
+ *
+ * 🔴 rule_task.h has always promised "a command goes back out the way it came
+ * in", and it was written after that promise was broken on the bench: a write
+ * went out on can0 while every frame we read arrived on can1. Nothing answers
+ * on can0, so the controller saw no ACK, the error counters ran away and the
+ * isolator took the bus down.
+ *
+ * 🔴 THE IMPLEMENTATION KEPT THAT PROMISE ONLY BECAUSE THERE IS ONE BUS. It
+ * was a single global set on every received frame -- "whichever channel spoke
+ * most recently". With one channel wired that is the same thing. With two it
+ * is not: a 0x273 template arrives on Vehicle, a Party frame arrives a
+ * millisecond later, and the command built from the Vehicle template goes out
+ * on Party. The chokepoint cannot catch it -- it compares bytes, not channels.
+ *
+ * So the bus belongs to the TEMPLATE, not to the clock. Found while preparing
+ * the second channel, which is the only reason it is not still a defect
+ * waiting in the car.
+ * ════════════════════════════════════════════════════════════════════════ */
+
+static void test_a_command_goes_out_where_its_template_came_in(void) {
+    printf("\n-- bus: the template carries it, not the clock --\n");
+    FsdPipeFrames f;
+    fsd_pipe_init(&f);
+
+    /* Nothing heard yet. */
+    FsdBodyInputs in = good_inputs(1000u);
+    FsdPipeResult r;
+    fsd_pipe_one(FSD_ACT_MAP_LIGHT, 0, 0u, &in, &f, 1000u, &r);
+    CHECK(r.stage != FSD_PIPE_OK, "no template -> no frame");
+    CHECK(r.bus == FSD_PIPE_BUS_NONE,
+          "and no bus either -- a caller that skips the stage must not get a "
+          "plausible channel, same rule as the zeroed frame");
+
+    /* The car's 0x273 arrives on can1. */
+    CHECK(fsd_pipe_observe(&f, 1u, 0x273u, BODY273, 8u, 1000u) > 0, "0x273 stored");
+    fsd_pipe_one(FSD_ACT_MAP_LIGHT, 0, 0u, &in, &f, 1010u, &r);
+    CHECK(r.stage == FSD_PIPE_OK, "map light builds");
+    CHECK(r.bus == 1u, "and goes out on can1, got %u", (unsigned)r.bus);
+
+    /* 🔴 THE CASE A SECOND CHANNEL CREATES. Something else speaks on can0 in
+     * between. The old global would now say 0, and the command built from a
+     * can1 template would be written to a channel nothing on it answers. */
+    CHECK(fsd_pipe_observe(&f, 0u, 0x249u, LSTALK, 4u, 1015u) > 0,
+          "an unrelated id arrives on can0");
+    fsd_pipe_one(FSD_ACT_MAP_LIGHT, 0, 0u, &in, &f, 1020u, &r);
+    CHECK(r.stage == FSD_PIPE_OK, "still builds");
+    CHECK(r.bus == 1u, "STILL can1 -- the other channel's traffic is not ours, got %u",
+          (unsigned)r.bus);
+
+    /* ...and the action that DID arrive on can0 goes out there. */
+    fsd_pipe_one(FSD_ACT_TURN_SIGNAL, 0, 1u, &in, &f, 1020u, &r);
+    CHECK(r.stage == FSD_PIPE_OK, "turn signal builds");
+    CHECK(r.bus == 0u, "on can0, where its template came from, got %u", (unsigned)r.bus);
+}
+
+static void test_a_template_that_moves_bus_moves_with_it(void) {
+    printf("\n-- bus: re-cabling is followed, not remembered --\n");
+    FsdPipeFrames f;
+    fsd_pipe_init(&f);
+    FsdBodyInputs in = good_inputs(2000u);
+    FsdPipeResult r;
+
+    CHECK(fsd_pipe_observe(&f, 0u, 0x273u, BODY273, 8u, 2000u) > 0, "heard on can0");
+    fsd_pipe_one(FSD_ACT_MAP_LIGHT, 0, 0u, &in, &f, 2005u, &r);
+    CHECK(r.bus == 0u, "can0");
+
+    /* The same id now arrives on the other channel -- which is what a re-cable
+     * looks like, and also what a gateway forwarding to both looks like. The
+     * newest frame is the template, so the newest frame's channel is the
+     * answer. */
+    CHECK(fsd_pipe_observe(&f, 1u, 0x273u, BODY273, 8u, 2010u) > 0, "now on can1");
+    fsd_pipe_one(FSD_ACT_MAP_LIGHT, 0, 0u, &in, &f, 2015u, &r);
+    CHECK(r.bus == 1u, "the answer follows the template, got %u", (unsigned)r.bus);
+}
+
+static void test_the_release_goes_out_where_the_press_did(void) {
+    printf("\n-- bus: both halves of a gesture on one channel --\n");
+    FsdPipeFrames f;
+    fsd_pipe_init(&f);
+    /* The light horn's press and release are one gesture 12 ms apart. Sending
+     * the release on the other channel would leave the car holding a button
+     * that nothing can let go -- the exact failure the release exists to
+     * prevent, with an extra step. */
+    CHECK(fsd_pipe_observe(&f, 1u, 0x3C2u, HORN_MUX0, 8u, 3000u) > 0, "mux0 stored");
+    FsdPipeResult rel;
+    fsd_pipe_release(FSD_ACT_LIGHT_HORN, 0, 5u, &f, 3012u, &rel);
+    CHECK(rel.stage == FSD_PIPE_OK, "release builds");
+    CHECK(rel.bus == 1u, "on can1, where the press was, got %u", (unsigned)rel.bus);
+}
+
+static void test_init_knows_nothing(void) {
+    printf("\n-- bus: nothing is assumed before the car speaks --\n");
+    FsdPipeFrames f;
+    memset(&f, 0xAAu, sizeof(f));
+    fsd_pipe_init(&f);
+    FsdBodyInputs in = good_inputs(10u);
+    for (unsigned a = 0; a < FSD_ACT_COUNT; a++) {
+        FsdPipeResult r;
+        fsd_pipe_one((FsdBodyAction)a, 0, 0u, &in, &f, 10u, &r);
+        CHECK(r.bus == FSD_PIPE_BUS_NONE, "action %u starts with no bus", a);
+    }
+    /* 🔴 0 is a real channel (can0), so it cannot mean "never heard". The same
+     * argument as byte 26's profile sentinel and byte 28's percentage. */
+    CHECK(FSD_PIPE_BUS_NONE != 0u && FSD_PIPE_BUS_NONE != 1u,
+          "the sentinel is not a channel");
+}
+
 int main(void) {
     printf("test_pipeline: rule -> axis -> emitter -> chokepoint\n");
     test_turn_signal_needs_a_burst();
@@ -945,6 +1055,10 @@ int main(void) {
     test_a_refused_command_leaves_no_stamp();
     test_stamps_outlive_the_burst_that_made_them();
     test_reset_forgets_the_stamps_too();
+    test_a_command_goes_out_where_its_template_came_in();
+    test_a_template_that_moves_bus_moves_with_it();
+    test_the_release_goes_out_where_the_press_did();
+    test_init_knows_nothing();
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

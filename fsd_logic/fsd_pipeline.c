@@ -5,6 +5,9 @@
 void fsd_pipe_init(FsdPipeFrames* f) {
     if(!f) return;
     memset(f, 0, sizeof(*f));
+    /* 🔴 NOT memset's 0, which is can0 -- a real channel. Nothing has been
+     * heard yet and that has to be sayable. */
+    for(uint8_t a = 0; a < (uint8_t)FSD_ACT_COUNT; a++) f->bus[a] = FSD_PIPE_BUS_NONE;
 }
 
 /* Does this frame carry the multiplex this action's row wants?
@@ -19,8 +22,8 @@ static bool mux_matches(const FsdBodyWire* w, const uint8_t* data, uint8_t dlc) 
     return (uint8_t)(data[w->mux_byte] & w->mux_mask) == w->mux_value;
 }
 
-uint8_t fsd_pipe_observe(FsdPipeFrames* f, uint32_t can_id, const uint8_t* data, uint8_t dlc,
-                         uint32_t now_ms) {
+uint8_t fsd_pipe_observe(FsdPipeFrames* f, uint8_t bus, uint32_t can_id,
+                         const uint8_t* data, uint8_t dlc, uint32_t now_ms) {
     if(!f || !data) return 0;
     if(dlc == 0u || dlc > FSD_BODY_WIRE_MAX_DLC) return 0;
 
@@ -44,6 +47,10 @@ uint8_t fsd_pipe_observe(FsdPipeFrames* f, uint32_t can_id, const uint8_t* data,
         memcpy(t->data, data, dlc);
         if(dlc < sizeof(t->data)) memset(t->data + dlc, 0, sizeof(t->data) - dlc);
         t->seen_ms = now_ms;
+        /* The newest frame is the template, so the newest frame's channel is
+         * the answer -- which is also what a re-cable and a gateway forwarding
+         * to both look like. */
+        f->bus[a] = bus;
         n++;
     }
     return n;
@@ -111,6 +118,11 @@ static void emit_and_check(FsdBodyAction action, int32_t arg, const FsdPipeFrame
 
     r->stage = FSD_PIPE_OK;
     r->reason = 0u;
+    /* 🔴 THE CHANNEL THE TEMPLATE CAME IN ON, not the one that spoke last. Set
+     * here and nowhere else: every path that produces a frame goes through
+     * this function, so there is no way to produce one without answering the
+     * question. */
+    r->bus = f->bus[(uint8_t)action];
     r->frame = frame;
 }
 
@@ -151,6 +163,9 @@ void fsd_pipe_one(FsdBodyAction action, int32_t arg, uint8_t rule_index,
         dec[0].arg = arg;
         dec[0].rule_index = rule_index;
         memset(r, 0, sizeof(*r));
+        /* 0 is can0. A refusal must not hand back a plausible channel,
+         * for the same reason the frame is zeroed rather than left stale. */
+        r->bus = FSD_PIPE_BUS_NONE;
         r->rule_index = dec[i].rule_index;
         r->action = dec[i].action;
         r->arg = dec[i].arg;
@@ -202,6 +217,7 @@ void fsd_pipe_release(FsdBodyAction action, int32_t arg, uint8_t rule_index,
                       const FsdPipeFrames* f, uint32_t now_ms, FsdPipeResult* out) {
     if(!f || !out) return;
     memset(out, 0, sizeof(*out));
+    out->bus = FSD_PIPE_BUS_NONE;
     out->rule_index = rule_index;
     out->action = action;
     out->arg = arg;
