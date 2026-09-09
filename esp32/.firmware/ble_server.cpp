@@ -32,6 +32,7 @@
 #include "mode_switch.h"
 #include "prefs.h"
 #include "rules_store.h"
+#include "rule_task.h" // rule_task_armed/set_armed — the transmission lock
 #include <NimBLEDevice.h>
 #include <string.h>
 
@@ -67,7 +68,7 @@
  * three times; 288 bytes cannot. */
 #define BLE_UUID_RULES   "6b1a000b-4b53-4d4f-4432-43414e000001"
 
-#define BLE_STATE_LEN  29u   // v8: +byte 28, the % on the CAR'S screen (0x33A)
+#define BLE_STATE_LEN  31u   // v9: +bytes 29-30, the RANGE on that same screen
 #define BLE_RESULT_LEN 4u
 #define BLE_BULK_HDR   2u   // seq prefix on every bulk frame
 
@@ -208,6 +209,10 @@ static volatile bool     g_btn_req_pending  = false;
 static volatile uint8_t  g_dbl_req          = 0;
 static volatile bool     g_dbl_req_pending  = false;
 static volatile uint8_t  g_bb_req           = 0;
+/* v9: the transmission lock, parked by the BLE task for loop(). Volatile and
+ * beside the recorder's pair for the same reason -- two tasks touch them. */
+static volatile bool     g_rulearm_req_pending = false;
+static volatile uint8_t  g_rulearm_req         = 0;
 static volatile bool     g_bb_mark_pending  = false;
 /* Delete every capture, parked for loop(). blackbox_delete_all() walks the
  * filesystem removing files one at a time, which is not something the BLE host
@@ -290,6 +295,14 @@ static void ble_pack_state(uint8_t *out, uint16_t rx_fps) {
     w.soc_percent      = s.soc_percent;
     w.ui_soc           = s.ui_soc;
     w.ui_soc_seen      = s.ui_soc_seen;
+    /* v9. The range on the car's own screen, raw miles -- the phone converts.
+     * Sits beside ui_soc because they ride in one 0x33A. */
+    w.ui_range         = s.ui_range;
+    w.ui_range_seen    = s.ui_range_seen;
+    /* v9, flags bit 7. Not from FSDState: the transmission lock lives in
+     * rule_task and dies with the power, so it is asked rather than mirrored.
+     * Without this the phone could not tell "locked" from "no rule matched". */
+    w.rule_armed       = rule_task_armed();
     w.gear             = s.di_gear;
     /* 🔴 낡은 제한속도는 아예 안 보낸다. 세 프레임이 같은 칸을 덮어쓰는데
      * 아무도 지우지 않아서, 30분 전 값이 지금 도로의 값처럼 앉아 있었다.
@@ -682,6 +695,24 @@ static void ble_apply_blackbox_request(void) {
         ble_send_result(BLE_CMD_BB_ALL,
                         now_all == want ? BLE_RES_OK : BLE_RES_REJECTED,
                         now_all ? 1u : 0u);
+    }
+
+    if (g_rulearm_req_pending) {
+        g_rulearm_req_pending = false;
+        const bool want = (g_rulearm_req != 0);
+
+        rule_task_set_armed(want);
+
+        /* What IS, not what was asked -- the same rule BB_ENABLE follows. On a
+         * build without the rule engine the setter is a no-op stub and the
+         * getter answers false, so a phone told "OK" would wait for frames
+         * that cannot come. */
+        const bool now_on = rule_task_armed();
+        ble_send_result(BLE_CMD_RULE_ARM,
+                        now_on == want ? BLE_RES_OK : BLE_RES_REJECTED,
+                        now_on ? 1u : 0u);
+        /* 🔴 NOT persisted, and that is the whole design of this switch: it
+         * dies with the power. g_prefs_dirty is deliberately not touched. */
     }
 
     if (g_bb_req_pending) {
@@ -1160,6 +1191,18 @@ class CommandCB : public NimBLECharacteristicCallbacks {
         case BLE_CMD_CAP_RECHECK:
             capability_start(millis());
             ble_send_result(cmd, BLE_RES_OK, 0);
+            break;
+
+        /* Parked for loop() like the recorder's switch, and for the same two
+         * reasons: rule_task's tick runs there, and the answer has to report
+         * what the switch IS rather than what was asked.
+         *
+         * The owner check is above, once, for every command -- see
+         * CommandCB::onWrite. */
+        case BLE_CMD_RULE_ARM:
+            if (g_rulearm_req_pending) { ble_send_result(cmd, BLE_RES_BUSY, 0); break; }
+            g_rulearm_req         = arg ? 1u : 0u;
+            g_rulearm_req_pending = true;
             break;
 
         case BLE_CMD_BB_ENABLE:

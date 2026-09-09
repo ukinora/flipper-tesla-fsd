@@ -487,6 +487,47 @@ static inline bool fsd_decode_bms_soc(const uint8_t* d, uint8_t dlc, float* out)
 #define FSD_UI_SOC_MIN_DLC 4u /* the field ends in byte 3 */
 #define FSD_UI_SOC_MAX     100u
 
+/* 0x33A bit 0, TWELVE bits: the RANGE the car puts on its own screen,
+ * in the unit the car's display is set to -- MILES on this car.
+ *
+ * 🔴 THE UNIT IS AN INFERENCE, AND THE HONEST VERSION IS THIS: the owner
+ * photographed the car's two screens on 2026-09-09 -- 79 %, 378 km -- and the
+ * least-squares fit over ten captures predicts this field at 233.6 for that
+ * moment. 378 km is 234.9 MILES, 1.3 counts away. The other candidates are not
+ * close: km would need 378 (+144), half-km 756, two-km 189. So the unit is
+ * settled by the other three being wrong by orders, not by 1.3 being small.
+ * ⚠️ The byte at that instant was PREDICTED, not captured. A capture taken
+ * beside a photograph would turn the prediction into a measurement.
+ *
+ * 🟢 Cross-checked a second way: 84 % reads 249 here, so 100 % extrapolates to
+ * 296 miles = 476 km, and the car's own screen extrapolates to 478. Two
+ * different roads to a 2 km disagreement, on a Long Range that has done
+ * 110,000 km -- about 90 % of its original 528 km, which is what a battery
+ * that age should have.
+ *
+ * 🔴 TWELVE BITS, NOT EIGHT, AND THE MEASUREMENT SAYS SO. 249 at 84 % puts
+ * 100 % at ~296, which is 0x128 -- nine bits. Every one of the 15 distinct
+ * payloads we hold has byte1 == 0x70, i.e. the upper nibble of this field is
+ * zero, so today an eight-bit read agrees with a twelve-bit one and would
+ * KEEP agreeing until the charge limit went past 86 %. The owner charges to
+ * 80. Reading eight bits would therefore be correct for as long as nobody
+ * changed a setting, and then draw a full tank on a half-empty battery --
+ * which is the shape of the mistake this repo already made once, reading the
+ * percentage above as 20|8 and turning 53 into 181.
+ *
+ * The field ends in byte 1, so four bytes are not needed -- but the caller is
+ * the same frame as fsd_decode_ui_soc(), which does need them. */
+#define FSD_UI_RANGE_BIT     0u
+#define FSD_UI_RANGE_LEN     12u
+#define FSD_UI_RANGE_MASK    0x0FFFu
+#define FSD_UI_RANGE_MIN_DLC 2u /* the field ends in byte 1 */
+
+static inline bool fsd_decode_ui_range(const uint8_t* d, uint8_t dlc, uint16_t* out) {
+    if(!d || !out || dlc < FSD_UI_RANGE_MIN_DLC) return false;
+    *out = (uint16_t)((((uint16_t)d[1] << 8) | d[0]) & FSD_UI_RANGE_MASK);
+    return true;
+}
+
 static inline bool fsd_decode_ui_soc(const uint8_t* d, uint8_t dlc, uint8_t* out) {
     if(!d || !out || dlc < FSD_UI_SOC_MIN_DLC) return false;
     const unsigned lo = FSD_UI_SOC_BIT / 8u; /* byte 2, bits 4..7 */

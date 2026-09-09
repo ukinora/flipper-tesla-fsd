@@ -55,6 +55,60 @@ static uint32_t le32(const uint8_t* p) {
 
 // ── State ────────────────────────────────────────────────────────────────────
 
+/* Bytes 29-30, v9. The range on the car's own screen.
+ *
+ * 🔴 THE SENTINEL IS THE WHOLE DESIGN HERE. 0 miles is a real reading and so
+ * is 4095, so nothing INSIDE the twelve-bit CAN field can mean "absent" --
+ * and a range check to carve one out would be a guess about a maximum nobody
+ * has measured. The wire field is sixteen bits, so 0xFFFF is outside by
+ * construction. That is asserted, not described: if either width ever moved,
+ * this is where it is caught. */
+static void test_range_sentinel_is_outside_the_field(void) {
+    printf("\n-- State: the range, and a sentinel the car cannot say --\n");
+
+    CHECK(FSD_WIRE_RANGE_NONE > FSD_UI_RANGE_MASK,
+          "sentinel 0x%04X must be unreachable by a %u-bit field (mask 0x%04X)",
+          (unsigned)FSD_WIRE_RANGE_NONE, (unsigned)FSD_UI_RANGE_LEN,
+          (unsigned)FSD_UI_RANGE_MASK);
+
+    FsdWireState w;
+    memset(&w, 0, sizeof(w));
+    uint8_t b[FSD_WIRE_STATE_LEN];
+
+    /* Never decoded. */
+    w.ui_range_seen = false;
+    w.ui_range = 249u; /* a plausible leftover, to prove it is not sent */
+    fsd_wire_pack_state(&w, b);
+    CHECK(le16(&b[29]) == FSD_WIRE_RANGE_NONE, "unseen sends the sentinel, got %u",
+          (unsigned)le16(&b[29]));
+
+    /* 2026-09-03, the car's own frame: 84 %, 248 miles. */
+    w.ui_range_seen = true;
+    w.ui_range = 248u;
+    fsd_wire_pack_state(&w, b);
+    CHECK(le16(&b[29]) == 248u, "248 miles, got %u", (unsigned)le16(&b[29]));
+
+    /* Both ends of the CAN field survive the trip, which is what makes the
+     * sentinel necessary in the first place. */
+    w.ui_range = 0u;
+    fsd_wire_pack_state(&w, b);
+    CHECK(le16(&b[29]) == 0u, "0 miles is a reading, not an absence");
+
+    w.ui_range = FSD_UI_RANGE_MASK;
+    fsd_wire_pack_state(&w, b);
+    CHECK(le16(&b[29]) == FSD_UI_RANGE_MASK, "4095 is a reading too, got %u",
+          (unsigned)le16(&b[29]));
+    CHECK(le16(&b[29]) != FSD_WIRE_RANGE_NONE,
+          "and it must not be mistaken for the sentinel");
+
+    /* 🔴 NOT CONVERTED HERE. The wire carries what the car said; the phone
+     * multiplies by 1.609344. If this ever starts arriving in kilometres the
+     * number below changes and someone has to decide on purpose. */
+    w.ui_range = 249u;
+    fsd_wire_pack_state(&w, b);
+    CHECK(le16(&b[29]) == 249u, "miles go out raw, got %u", (unsigned)le16(&b[29]));
+}
+
 static void test_profile_sentinel(void) {
     /* 🔴 0 is a real speed profile on this car (컴포트), so "never decoded"
      * cannot be carried by a zero -- the phone would draw a confident wrong
@@ -63,8 +117,8 @@ static void test_profile_sentinel(void) {
     CHECK(FSD_WIRE_PROFILE_NONE > FSD_PROFILE_MASK,
           "sentinel 0x%02X must not be a real profile (mask 0x%02X)",
           FSD_WIRE_PROFILE_NONE, FSD_PROFILE_MASK);
-    CHECK(FSD_WIRE_STATE_LEN == 29u, "State is 29 bytes in v8");
-    CHECK(FSD_WIRE_STATE_VERSION == 8u, "version bumped with the length");
+    CHECK(FSD_WIRE_STATE_LEN == 31u, "State is 31 bytes in v9");
+    CHECK(FSD_WIRE_STATE_VERSION == 9u, "version bumped with the length");
 
     /* 🔴 Byte 28 carries the car's OWN percentage (0x33A) and needs a way to
      * say "never decoded". 0 cannot do it -- a flat battery reads 0 -- so the
@@ -238,7 +292,7 @@ static void test_state_layout(void) {
  * plausible numbers in a square look right whichever way they are shuffled.
  * Nobody spots that by looking. */
 static void test_state_tyre_pressure(void) {
-    printf("''' + NL + '''-- State: four tyres, four bytes, in order --''' + NL + '''");
+    printf("\n-- State: four tyres, four bytes, in order --\n");
 
     for(size_t w = 0; w < 4; w++) {
         FsdWireState in = {0};
@@ -261,7 +315,7 @@ static void test_state_tyre_pressure(void) {
  * identical from here, and the two want opposite answers. Sixty seconds is
  * long enough for the first and short enough for the second. */
 static void test_tyre_freshness(void) {
-    printf("''' + NL + '''-- State: a tyre reading stops being believable --''' + NL + '''");
+    printf("\n-- State: a tyre reading stops being believable --\n");
 
     CHECK(!fsd_tyre_fresh(false, 1000u, 1000u), "never seen is never fresh");
     CHECK(fsd_tyre_fresh(true, 1000u, 1000u), "same instant is fresh");
@@ -284,7 +338,7 @@ static void test_tyre_freshness(void) {
  * A left value leaking into the right half would put a warning on the wrong
  * side of the car, which is worse than no warning at all. */
 static void test_state_blind_spot(void) {
-    printf("''' + NL + '''-- State: blind spot, two bits a side --''' + NL + '''");
+    printf("\n-- State: blind spot, two bits a side --\n");
 
     struct {
         uint8_t l, r, want;
@@ -320,7 +374,7 @@ static void test_state_blind_spot(void) {
  * limit to label. A source on an empty box reads as "we know where this
  * nothing came from". */
 static void test_state_speed_limit_source(void) {
-    printf("''' + NL + '''-- State: speed limit source --''' + NL + '''");
+    printf("\n-- State: speed limit source --\n");
 
     struct {
         bool seen;
@@ -360,7 +414,7 @@ static void test_state_speed_limit_source(void) {
  * went true and speed_limit_last_ms was stamped and never read, so a value
  * picked up half an hour ago sat on the dashboard as the road you are on. */
 static void test_speed_limit_freshness(void) {
-    printf("''' + NL + '''-- State: a speed limit stops being believable --''' + NL + '''");
+    printf("\n-- State: a speed limit stops being believable --\n");
 
     CHECK(!fsd_speed_limit_fresh(false, 1000u, 1000u), "never seen is never fresh");
     CHECK(fsd_speed_limit_fresh(true, 1000u, 1000u), "same instant is fresh");
@@ -429,7 +483,18 @@ static void test_state_structural_zeros(void) {
      * away -- it becomes the assertion that the bit TRACKS ITS FIELD, which is
      * strictly more than "it is zero". */
     CHECK((b[1] & (1u << 5)) != 0, "ui_speed_seen set when the field is true");
-    CHECK((b[1] & (1u << 7)) == 0, "profile-change never set");
+    /* 🔴 Bit 7 asserted "never set" until v9, on the grounds that it belonged
+     * to the SET_PROFILE closed loop -- which emits nothing, both of its gates
+     * being shut. A bit reserved for something that does not exist is a bit
+     * nobody can see, and the transmission lock was exactly the thing the
+     * phone could not see. Same move bit 5 made, and the assertion becomes the
+     * same stronger one: it TRACKS ITS FIELD, in both directions. */
+    CHECK((b[1] & (1u << 7)) != 0, "rule_armed set when the field is true");
+    w.rule_armed = false;
+    fsd_wire_pack_state(&w, b);
+    CHECK((b[1] & (1u << 7)) == 0, "and clear when it is false");
+    w.rule_armed = true;
+    fsd_wire_pack_state(&w, b);
 
     w.ui_speed_seen = false;
     fsd_wire_pack_state(&w, b);
@@ -711,6 +776,22 @@ static void emit_fixture(FILE* f) {
           .soc_percent = 24.5f, /* 0x292 — the pack said this... */
           .ui_soc_seen = true,
           .ui_soc = 22}}, /* ...and the car's screen said this */
+        /* 🔴 THE ONLY VECTOR THAT CARRIES A RANGE OR AN ARMED ENGINE, and it
+         * exists for the reason the one above it does: every other fixture
+         * here leaves bytes 29-30 at the sentinel and flags bit 7 clear, so a
+         * phone that never reads either would pass the whole set. The eighth
+         * pattern in CLAUDE.md is that fixtures which only ever say "absent"
+         * teach nothing.
+         *
+         * Both numbers are the car's own, from captures/2026-09-03: 84 % on
+         * the screen and 249 in 0x33A's low twelve bits. 249 miles is 401 km,
+         * which is what that day's screen showed. */
+        {"car_screen_range_and_armed",
+         {.rx_seen = true, .op_mode = 1, .hw_version = 2, .gear = 1,
+          .rx_fps = 1000, .uptime_s = 700,
+          .ui_soc_seen = true, .ui_soc = 84,
+          .ui_range_seen = true, .ui_range = 249u,
+          .rule_armed = true}},
     };
 
     const size_t ns = sizeof(states) / sizeof(states[0]);
@@ -725,7 +806,7 @@ static void emit_fixture(FILE* f) {
                 "\"hw\": %u, \"speed_profile\": %u, \"ap_state\": %u, "
                 "\"speed_kph_x10\": %u, \"soc\": %u, \"gear\": %u, "
                 "\"speed_limit\": %u, \"rx_fps\": %u, \"crc_err\": %u, "
-                "\"uptime_s\": %u, \"blink_l\": %u, \"blink_r\": %u, \"limit_src\": %u, \"bs_l\": %u, \"bs_r\": %u, \"tyre0\": %u, \"tyre1\": %u, \"tyre2\": %u, \"tyre3\": %u, \"ui_soc\": %u } }%s\n",
+                "\"uptime_s\": %u, \"blink_l\": %u, \"blink_r\": %u, \"limit_src\": %u, \"bs_l\": %u, \"bs_r\": %u, \"tyre0\": %u, \"tyre1\": %u, \"tyre2\": %u, \"tyre3\": %u, \"ui_soc\": %u, \"ui_range\": %u, \"rule_armed\": %s } }%s\n",
                 (unsigned)b[0], (unsigned)b[1], (unsigned)w->op_mode,
                 (unsigned)w->hw_version, (unsigned)b[4], (unsigned)w->ap_state,
                 (unsigned)le16(&b[6]), (unsigned)b[8], (unsigned)w->gear,
@@ -735,7 +816,8 @@ static void emit_fixture(FILE* f) {
                 (unsigned)((b[20] >> 4) & 0x03u),
                 (unsigned)(b[21] & 0x03u), (unsigned)((b[21] >> 2) & 0x03u),
                 (unsigned)b[22], (unsigned)b[23], (unsigned)b[24], (unsigned)b[25],
-                (unsigned)b[28],
+                (unsigned)b[28], (unsigned)le16(&b[29]),
+                (b[1] & 0x80u) ? "true" : "false",
                 (i + 1 < ns) ? "," : "");
     }
     fprintf(f, "  ],\n  \"camstat\": [\n");
@@ -978,6 +1060,7 @@ int main(void) {
     test_state_blind_spot();
     test_state_tyre_pressure();
     test_profile_sentinel();
+    test_range_sentinel_is_outside_the_field();
     test_ui_soc_is_carried_beside_the_bms_figure();
     test_tyre_freshness();
     test_state_speed_limit_source();

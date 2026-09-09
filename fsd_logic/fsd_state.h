@@ -89,6 +89,21 @@ typedef struct FSDState {
                                  // Separate from soc_percent (0x292) because the
                                  // two are different numbers; see fsd_types.h.
     bool ui_soc_seen;
+
+    /* 0x33A bits 0..11 — the RANGE on the car's own screen, in MILES.
+     * Same frame as ui_soc above and the same argument for keeping it: it is
+     * what the driver is looking at, not what anything computed.
+     *
+     * 🔴 TWELVE BITS. 249 at 84 % puts a full charge near 296, which does not
+     * fit in eight -- see fsd_decode_ui_range() for why an eight-bit read
+     * would be right until the charge limit went past 86 % and wrong after.
+     *
+     * uint16_t and a seen flag, not a sentinel: 0 miles is a real reading and
+     * so is 4095, so no value inside the field can mean "absent". (The WIRE
+     * uses a sentinel instead, and can: its field is 16 bits wide and the CAN
+     * field is 12, so 0xFFFF is outside by construction.) */
+    uint16_t ui_range;
+    bool ui_range_seen;
                                  // needs its own answer — the display must not
                                  // show a confident 0 it never received
     uint8_t steering_tune_mode;  // from 0x370 EPAS3S_currentTuneMode (0-6)
