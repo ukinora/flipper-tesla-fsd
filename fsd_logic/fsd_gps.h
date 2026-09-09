@@ -90,6 +90,21 @@ extern "C" {
 #define FSD_GPS_VEL_FRESH_MS 3000u
 #define FSD_GPS_REF_FRESH_MS 1000u
 
+/* 🔴 이보다 부정확하다고 스스로 말하는 fix 는 쓰지 않는다.
+ *
+ * 2026-09-09 에 앱이 생 GPS 만 쓰다가 실내에서 3분 동안 한 건도 못 잡았다.
+ * 고치는 방향은 "출처를 넓히고 **믿을 수 없는 값은 여기서 거절**한다" 였다 —
+ * 정확도는 fix 에 실려 오므로, 어느 공급자가 줬는지가 아니라 그 값이 판단
+ * 기준이다.
+ *
+ * 50 m 인 이유: 생 GPS 는 5~15 m, WiFi 는 20~50 m, 기지국은 500~2000 m 다.
+ * WiFi 급은 살리고 기지국 급은 버린다. 추적기가 600 m 안의 카메라를 줍고
+ * CPA 판정이 수십 m 자리에서 벌어지므로, 이보다 크면 판정이 자리를 잃는다.
+ *
+ * 🔴 0 이하는 **모름**이지 완벽이 아니다(FsdCamFix 가 그렇게 적고 있다).
+ * 차의 0x3D8 은 흔히 0 을 주므로 거절하면 CAN 경로가 통째로 닫힌다. */
+#define FSD_GPS_ACCURACY_MAX_M 50.0f
+
 /* Freeze detection. All three conditions must hold together:
  *
  *   - the drivetrain says we have been above FREEZE_MIN_KPH for the whole
@@ -122,6 +137,11 @@ typedef enum {
     FSD_GPS_NO_FIX,        // UI_gpsNmeaMIA: the receiver itself reports no data
     FSD_GPS_NO_MOTION_REF, // 0x257 missing or stale: a freeze would be invisible
     FSD_GPS_FROZEN,        // moving for seconds, position did not move with us
+    /* The source told us how wrong it might be, and it is too wrong to judge a
+     * camera by. Added 2026-09-09 when the phone became a source: a network fix
+     * indoors is hundreds of metres out and would move every camera in the
+     * country by more than a block. See FSD_GPS_ACCURACY_MAX_M. */
+    FSD_GPS_INACCURATE,
 } FsdGpsVerdict;
 
 typedef struct {

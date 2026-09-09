@@ -630,6 +630,46 @@ static void test_stamp_backdates_an_already_old_fix(void) {
           "a 30-second-old fix is stale, not fresh");
 }
 
+/* 🔴 정확도가 나쁜 fix 는 위치가 아니다 — 2026-09-09 에 배웠다.
+ *
+ * 앱이 처음에는 생 GPS 만 썼다. "네트워크 위치는 실내에서 수백 미터라 못
+ * 쓴다" 는 판단이었는데, 그 판단이 틀린 자리는 결론이 아니라 **누가 결정하느냐**
+ * 였다. 정확도는 fix 에 실려 오므로 출처를 막을 것이 아니라 **믿을 수 없는
+ * 값을 여기서 거절**하면 된다. 그리고 생 GPS 만 쓴 결과는 실내에서 3분 동안
+ * locations = 0 — 기능이 아예 안 도는 것이었다.
+ *
+ * 🔴 0 은 "모름" 이지 "완벽" 이 아니다(FsdCamFix 가 그렇게 적고 있다). 차의
+ * 0x3D8 은 흔히 0 을 주므로, 0 을 거절하면 CAN 경로가 통째로 닫힌다. */
+static void test_a_fix_too_vague_to_use(void) {
+    printf("\n-- 정확도가 나쁘면 위치가 아니다 --\n");
+
+    FsdGps g;
+    const uint32_t now = 100000;
+    const int32_t LAT = 375665000, LON = 1269780000;
+
+    fsd_gps_init(&g);
+    fsd_gps_observe_phone(&g, LAT, LON, 12.0f, 90.0f, 0.0f, now);
+    fsd_gps_observe_motion_ref(&g, 60.0f, now);
+    CHECK(fsd_gps_fix_why(&g, now, NULL) == FSD_GPS_OK, "12 m 는 쓸 수 있다");
+
+    fsd_gps_init(&g);
+    fsd_gps_observe_phone(&g, LAT, LON, 800.0f, 90.0f, 0.0f, now);
+    fsd_gps_observe_motion_ref(&g, 60.0f, now);
+    CHECK(fsd_gps_fix_why(&g, now, NULL) == FSD_GPS_INACCURATE,
+          "800 m 는 이름을 달고 거절된다 — 조용히 쓰면 카메라가 통째로 어긋난다");
+
+    /* 🔴 0 은 모름이다. 여기서 거절하면 차의 0x3D8 이 통째로 막힌다. */
+    fsd_gps_init(&g);
+    fsd_gps_observe_phone(&g, LAT, LON, 0.0f, 90.0f, 0.0f, now);
+    fsd_gps_observe_motion_ref(&g, 60.0f, now);
+    CHECK(fsd_gps_fix_why(&g, now, NULL) == FSD_GPS_OK,
+          "정확도 모름은 거절 사유가 아니다");
+
+    /* 경계는 넉넉히 잡는다 — WiFi 급(20~50 m)은 살리고 기지국 급은 버린다. */
+    CHECK(FSD_GPS_ACCURACY_MAX_M >= 40.0f && FSD_GPS_ACCURACY_MAX_M <= 150.0f,
+          "경계가 %.0f m 다", (double)FSD_GPS_ACCURACY_MAX_M);
+}
+
 int main(void) {
     printf("test_gps\n");
     test_position_decode();
@@ -649,6 +689,7 @@ int main(void) {
     test_phone_fix_gets_no_easier_treatment();
     test_phone_fix_goes_stale_and_can_freeze();
     test_stamp_backdates_an_already_old_fix();
+    test_a_fix_too_vague_to_use();
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }
