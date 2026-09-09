@@ -2273,6 +2273,10 @@ void setup() {
     Serial.println(" Tesla FSD Unlock — ESP32   ");
     Serial.println("============================");
     Serial.printf("[FSD] Build: %s\n", FSD_BUILD_STAMP);
+    /* 🔴 읽는 것이 목적의 절반이다 — 아무도 안 읽으면 링커가 표식을 버리고,
+     * 그러면 OTA 가 자기 이미지를 "우리가 구운 것이 아니다" 로 거부한다.
+     * 나머지 절반은 배너가 어느 보드용 판인지 말해 주는 것이다. */
+    Serial.printf("[FSD] Board: %.*s\n", (int)FSD_OTA_MARK_BOARD_LEN, FSD_OTA_MARK.board);
 
     const esp_partition_t *running = esp_ota_get_running_partition();
     if (running) {

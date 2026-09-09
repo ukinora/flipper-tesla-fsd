@@ -18,7 +18,15 @@ void fsd_ota_scan_init(FsdOtaScan* s) {
  *
  * 🔴 `strncpy` 가 아니라 memcpy + 강제 NUL 이다. 표식의 칸은 꽉 찰 수 있고
  * (보드 이름이 정확히 24자), 그러면 원본에 NUL 이 없다. 그 값이 그대로 화면에
- * 나가므로, 안 끝나면 읽는 쪽이 뒤 메모리를 따라간다. */
+ * 나가므로, 안 끝나면 읽는 쪽이 뒤 메모리를 따라간다.
+ *
+ * ⚠️ 그 두 줄은 **오늘 도달 불가이고, 돌연변이가 그것을 증명했다**
+ * (2026-09-10): 지우면 아무 시험도 안 깨진다. `fsd_ota_scan_init()` 이 구조체
+ * 전체를 0 으로 채우므로 마지막 칸이 이미 0 이기 때문이다.
+ *
+ * 🔴 그래도 남긴다. 이 함수의 계약은 "72바이트를 읽어 **끝나는** 문자열을
+ * 만든다" 이고, 그 계약이 저 멀리 init 의 memset 에 매달려 있으면 읽는 사람이
+ * 그것을 알 길이 없다. 초록 화면을 이 두 줄이 도는 증거로 읽지 말 것. */
 static void take_mark(FsdOtaMark* out, const uint8_t* at) {
     memcpy(out->board, at + FSD_OTA_MARK_MAGIC_LEN, FSD_OTA_MARK_BOARD_LEN);
     out->board[FSD_OTA_MARK_BOARD_LEN] = '\0';
@@ -27,20 +35,22 @@ static void take_mark(FsdOtaMark* out, const uint8_t* at) {
     out->stamp[FSD_OTA_MARK_STAMP_LEN] = '\0';
 }
 
-/* 겹침 버퍼 + 새 조각을 이어 붙인 창에서 표식을 찾는다.
+/* 창 하나에서 **첫** 표식을 찾는다.
  *
  * 앞의 조각에서 남긴 꼬리(최대 71바이트)와 새 조각을 한 줄로 놓고 훑으므로,
- * 조각 경계에 걸친 표식도 정확히 한 번 보인다. */
+ * 조각 경계에 걸친 표식도 정확히 한 번 보인다.
+ *
+ * 🔴 부르는 쪽이 `!s->found` 를 보장한다 — 그래서 여기에 그 검사가 없다.
+ * 한때 있었는데, **어떤 시험도 그것을 켜고 끌 수 없었다**(돌연변이로 확인,
+ * 2026-09-10): 바깥에서 이미 막고 있어 안쪽 가드는 도달 불가였다. 도달 불가인
+ * 가드는 게이트처럼 보이면서 아무것도 안 하고, 그것이 이 저장소가 반복해서
+ * 물린 자리다. 앞의 것이 이긴다는 규칙은 **바깥의 조기 반환**이 지킨다. */
 static void scan_window(FsdOtaScan* s, const uint8_t* win, uint32_t len) {
     if(len < FSD_OTA_MARK_LEN) return;
     for(uint32_t i = 0; i + FSD_OTA_MARK_LEN <= len; i++) {
         if(memcmp(win + i, MAGIC, FSD_OTA_MARK_MAGIC_LEN) != 0) continue;
-        /* 🔴 앞의 것이 이긴다. 이미 찾았으면 뒤엣것은 안 본다 — 우리 이미지
-         * 뒤에 덧붙인 표식이 앞의 진짜를 덮어쓰지 못하게. */
-        if(!s->found) {
-            take_mark(&s->mark, win + i);
-            s->found = true;
-        }
+        take_mark(&s->mark, win + i);
+        s->found = true;
         return;
     }
 }

@@ -134,6 +134,14 @@ jobs:
         if: matrix.env == 'lilygo-t2can'
         working-directory: esp32
         run: python ci_check_no_wifi.py ${{ matrix.env }}
+      # 🔴 EVERY board, not just ours. The mark is what lets a board recognise
+      # its own image over BLE, and a linker that drops it turns into "the
+      # phone's update is refused" — a symptom nobody diagnoses beside a car.
+      # The banner line in main.cpp is what keeps it alive today, and that is
+      # exactly the kind of line someone tidies away.
+      - name: OTA mark in ${{ matrix.env }}
+        working-directory: esp32
+        run: python ci_check_ota_mark.py ${{ matrix.env }}
       - name: Stage firmware
         working-directory: esp32
         run: |
