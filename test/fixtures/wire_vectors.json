@@ -43,5 +43,12 @@
     { "name": "disabled_but_filled", "hex": "001405040000000201000000", "fields": { "enabled": 0, "signal": 20, "kind": 5, "value": 4, "action": 2, "arg": 1 } },
     { "name": "big_negative_arg", "hex": "0101020000000003006cca88", "fields": { "enabled": 1, "signal": 1, "kind": 2, "value": 0, "action": 3, "arg": -2000000000 } },
     { "name": "max_enums", "hex": "011907ffffff7f0affffff7f", "fields": { "enabled": 1, "signal": 25, "kind": 7, "value": 2147483647, "action": 10, "arg": 2147483647 } }
+  ],
+  "gps_fix_len": 17,
+  "gps_fix": [
+    { "name": "seoul_city_hall", "hex": "68316416204eaf4b200328236810000000", "fields": { "lat_e7": 375665000, "lon_e7": 1269780000, "acc_cm": 800, "brg_cd": 9000, "spd_ckh": 4200, "age_ms": 0 } },
+    { "name": "southern_western", "hex": "40d463e700a3cf975e0150460000dc0500", "fields": { "lat_e7": -412888000, "lon_e7": -1748000000, "acc_cm": 350, "brg_cd": 18000, "spd_ckh": 0, "age_ms": 1500 } },
+    { "name": "accuracy_unknown", "hex": "68316416204eaf4b000000000000000000", "fields": { "lat_e7": 375665000, "lon_e7": 1269780000, "acc_cm": 0, "brg_cd": 0, "spd_ckh": 0, "age_ms": 0 } },
+    { "name": "scale_ceilings", "hex": "68316416204eaf4bffff9f8cfffffeffff", "fields": { "lat_e7": 375665000, "lon_e7": 1269780000, "acc_cm": 65535, "brg_cd": 35999, "spd_ckh": 65535, "age_ms": 16777214 } }
   ]
 }

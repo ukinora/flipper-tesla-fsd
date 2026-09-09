@@ -30,6 +30,7 @@
 #include "../fsd_logic/fsd_rules.h"
 
 #include "fsd_wire.h"
+#include "fsd_gps.h"
 
 static int g_pass = 0;
 static int g_fail = 0;
@@ -872,6 +873,75 @@ static void emit_fixture(FILE* f) {
                 (unsigned)rules[i].r.action, (long)rules[i].r.arg,
                 (i + 1 < nu) ? "," : "");
     }
+
+    /* ── the phone's GPS fix, app → module ────────────────────────────────
+     *
+     * 🔴 THE ONLY DIRECTION THAT HAD NO VECTOR. Everything else here is
+     * module → app, and the app parses it. This one the APP packs and the
+     * MODULE parses, so a disagreement shows up as "the camera path sees a
+     * position 400 km away" rather than as a parse error. That is the failure
+     * this file exists to prevent, and it did not cover this direction until
+     * the phone became the position source (2026-09-09).
+     *
+     * The cases are picked for what a hand-written codec gets wrong: a
+     * SOUTHERN, WESTERN position proves both int32s are two's-complement in
+     * both languages (Korea is positive on both axes, so a sign bug would
+     * never show here); zero accuracy proves "unknown" survives as zero rather
+     * than becoming 0.00 m; a bearing just under a full circle and an age near
+     * the uint24 ceiling prove the scales and the widths. */
+    fprintf(f, "  ],\n  \"gps_fix_len\": %u,\n  \"gps_fix\": [\n",
+            (unsigned)FSD_GPS_BLE_FIX_LEN);
+    static const struct {
+        const char* name;
+        int32_t lat_e7, lon_e7;
+        uint16_t acc_cm, brg_cd, spd_ckh;
+        uint32_t age_ms;
+    } fixes[] = {
+        {"seoul_city_hall", 375665000, 1269780000, 800u, 9000u, 4200u, 0u},
+        /* Wellington, New Zealand: both coordinates negative. */
+        {"southern_western", -412888000, -1748000000, 350u, 18000u, 0u, 1500u},
+        {"accuracy_unknown", 375665000, 1269780000, 0u, 0u, 0u, 0u},
+        /* 359.99 deg and 655.35 km/h are the top of their scales; the age is
+         * one below the uint24 ceiling. A width that truncates fails here. */
+        {"scale_ceilings", 375665000, 1269780000, 65535u, 35999u, 65535u, 16777214u},
+    };
+    const size_t ng = sizeof(fixes) / sizeof(fixes[0]);
+    for(size_t i = 0; i < ng; i++) {
+        uint8_t b[FSD_GPS_BLE_FIX_LEN];
+        const uint32_t lat = (uint32_t)fixes[i].lat_e7;
+        const uint32_t lon = (uint32_t)fixes[i].lon_e7;
+        b[0] = (uint8_t)lat; b[1] = (uint8_t)(lat >> 8);
+        b[2] = (uint8_t)(lat >> 16); b[3] = (uint8_t)(lat >> 24);
+        b[4] = (uint8_t)lon; b[5] = (uint8_t)(lon >> 8);
+        b[6] = (uint8_t)(lon >> 16); b[7] = (uint8_t)(lon >> 24);
+        b[8] = (uint8_t)fixes[i].acc_cm;  b[9]  = (uint8_t)(fixes[i].acc_cm >> 8);
+        b[10] = (uint8_t)fixes[i].brg_cd; b[11] = (uint8_t)(fixes[i].brg_cd >> 8);
+        b[12] = (uint8_t)fixes[i].spd_ckh; b[13] = (uint8_t)(fixes[i].spd_ckh >> 8);
+        b[14] = (uint8_t)fixes[i].age_ms; b[15] = (uint8_t)(fixes[i].age_ms >> 8);
+        b[16] = (uint8_t)(fixes[i].age_ms >> 16);
+
+        /* 🔴 THE BYTES ABOVE ARE THE SPEC, AND THE PRODUCTION UNPACKER HAS TO
+         * AGREE WITH THEM. Emitting them without this check would publish a
+         * layout nothing on the module reads. */
+        FsdGpsBleFix got;
+        memset(&got, 0, sizeof(got));
+        CHECK(fsd_gps_unpack_ble_fix(b, sizeof(b), &got), "%s unpacks", fixes[i].name);
+        CHECK(got.lat_e7 == fixes[i].lat_e7, "%s latitude", fixes[i].name);
+        CHECK(got.lon_e7 == fixes[i].lon_e7, "%s longitude", fixes[i].name);
+        CHECK(got.age_ms == fixes[i].age_ms, "%s age", fixes[i].name);
+
+        fprintf(f, "    { \"name\": \"%s\", \"hex\": ", fixes[i].name);
+        emit_hex(f, b, sizeof(b));
+        fprintf(f,
+                ", \"fields\": { \"lat_e7\": %ld, \"lon_e7\": %ld, "
+                "\"acc_cm\": %u, \"brg_cd\": %u, \"spd_ckh\": %u, "
+                "\"age_ms\": %lu } }%s\n",
+                (long)fixes[i].lat_e7, (long)fixes[i].lon_e7,
+                (unsigned)fixes[i].acc_cm, (unsigned)fixes[i].brg_cd,
+                (unsigned)fixes[i].spd_ckh, (unsigned long)fixes[i].age_ms,
+                (i + 1 < ng) ? "," : "");
+    }
+    (void)ng;
 
     fprintf(f, "  ]\n}\n");
     (void)ns;

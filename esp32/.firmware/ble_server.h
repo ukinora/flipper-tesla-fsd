@@ -84,6 +84,28 @@
 #define BLE_CMD_BB_ALL       0x37u
 #define BLE_CMD_CAP_RECHECK  0x40u  // re-run the capability listen window
 #define BLE_CMD_SET_AUTONOMY 0x41u  // arg: 0/1 — operator intent, persisted
+/* A position from the phone. 0x3D8/0x2F8 do not carry one on this car, so
+ * without this the camera path is permanently NO_POSITION (owner's decision,
+ * 2026-09-09). Payload after the command byte, little-endian, 17 bytes:
+ *
+ *   [0..3]   int32  latitude  in 1e-7 degrees
+ *   [4..7]   int32  longitude in 1e-7 degrees
+ *   [8..9]   uint16 accuracy in centimetres (0 = unknown)
+ *   [10..11] uint16 bearing in centidegrees (0..36000)
+ *   [12..13] uint16 speed in 0.01 km/h        — recorded, NOT used for the fix
+ *   [14..16] uint24 age of the fix in ms when the phone sent it
+ *
+ * 🔴 THE SPEED IS NOT WHAT THE FIX USES. fsd_gps_fix_why() takes speed from the
+ * drivetrain (0x257) on purpose — "the tunnel-proof one" — so a phone reporting
+ * a stale speed cannot make the module believe the car is moving. It is carried
+ * only so a bring-up log can compare the two.
+ *
+ * 🔴 THE AGE MATTERS. Android hands out a Location that may be seconds old, and
+ * the module stamps arrival, not measurement. Subtracting the age is what keeps
+ * a cached fix from looking fresh. */
+#define BLE_CMD_GPS_FIX      0x42u
+/* 길이는 FSD_GPS_BLE_FIX_LEN 하나뿐이다 — 여기 사본을 두면 갈라진다 */
+
 #define BLE_CMD_PING         0x50u
 
 /* ── Bluetooth button (BLE Central) ───────────────────────────────────────────

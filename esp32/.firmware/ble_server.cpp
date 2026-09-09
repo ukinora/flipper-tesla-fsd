@@ -14,6 +14,7 @@
  */
 
 #include "ble_server.h"
+#include "../../fsd_logic/fsd_gps.h"
 
 #ifdef BLE_SERVER_ENABLED
 
@@ -1034,6 +1035,44 @@ class CommandCB : public NimBLECharacteristicCallbacks {
         case BLE_CMD_PING:
             ble_send_result(cmd, BLE_RES_OK, BLE_PROTO_VERSION);
             break;
+
+        /* A position from the phone. The car does not broadcast one on this bus
+         * (swept 2026-09-05), so this is the only producer the camera path has.
+         *
+         * 🔴 ANSWERED HERE RATHER THAN PARKED FOR loop(). Every other command
+         * that touches state is deferred because it writes NVS or drives the
+         * CAN controllers; this writes one struct and must land at 1 Hz. Parking
+         * it would add a tick of latency to the one input whose whole value is
+         * being current.
+         *
+         * 🔴 IT IS STILL NOT TRUSTED. fsd_gps_observe_phone() applies the same
+         * bounds, Null Island and freeze bookkeeping the frame observers do, and
+         * the 0x257 motion witness sits below all of it — which the phone cannot
+         * satisfy. A refused fix is answered so the app can say so rather than
+         * appear to be working. */
+        case BLE_CMD_GPS_FIX: {
+            if (v.size() < 1u + FSD_GPS_BLE_FIX_LEN) {
+                ble_send_result(cmd, BLE_RES_REJECTED, (uint16_t)v.size());
+                break;
+            }
+            /* 🔴 UNPACKED IN fsd_logic, NOT HERE. A byte layout written in this
+             * file is one no host test can reach, and this repo has paid for
+             * that twice (the OTA verdict and the battery field each lived in
+             * two copies and only one was tested). */
+            FsdGpsBleFix f;
+            if (!fsd_gps_unpack_ble_fix((const uint8_t*)v.data() + 1,
+                                        v.size() - 1u, &f)) {
+                ble_send_result(cmd, BLE_RES_REJECTED, (uint16_t)v.size());
+                break;
+            }
+
+            const bool ok = camera_task_observe_phone_fix(
+                f.lat_e7, f.lon_e7, f.accuracy_m, f.bearing_deg, f.speed_kph,
+                fsd_gps_stamp_for_age(millis(), f.age_ms));
+            ble_send_result(cmd, ok ? BLE_RES_OK : BLE_RES_REJECTED,
+                            (uint16_t)camera_task_gps_verdict());
+            break;
+        }
 
         case BLE_CMD_SET_MODE: {
             // 🔴 Deliberately NOT answered here.

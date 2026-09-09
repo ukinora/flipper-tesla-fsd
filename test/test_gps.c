@@ -472,6 +472,164 @@ static void test_null_safety(void) {
     CHECK(near_f(bearing, 45.0f, 0.01f), "and filled correctly");
 }
 
+/* ── A position from outside the bus ───────────────────────────────────────
+ *
+ * 🔴 THE POINT IS NOT "the phone can supply a position". It is that supplying
+ * it from the phone must not weaken ANYTHING. The freeze detector, the 0x257
+ * witness, the bounds check and Null Island all live below the observer, so a
+ * phone fix has to land in the same fields the 0x3D8/0x2F8 observers write --
+ * and then the CAR gets to decide whether the phone is lying.
+ *
+ * The owner's decision (2026-09-09): the car does not broadcast GPS on Vehicle
+ * CAN (proved 2026-09-05), so the phone supplies it instead of a second bus or
+ * a GPS module. This reverses "works with the phone left at home" for the
+ * camera path -- fsd_gps.h says so out loud. It does not reverse anything about
+ * how the position is checked. */
+static void test_phone_fix_lands_where_the_car_can_check_it(void) {
+    printf("\n-- 폰이 준 위치, 차가 검사한다 --\n");
+
+    FsdGps g;
+    fsd_gps_init(&g);
+    uint32_t now = 100000;
+
+    /* Seoul City Hall, and a plausible phone fix around it. */
+    const int32_t LAT = 375665000, LON = 1269780000;
+
+    CHECK(fsd_gps_fix_why(&g, now, NULL) == FSD_GPS_NO_POSITION,
+          "nothing yet");
+
+    CHECK(fsd_gps_observe_phone(&g, LAT, LON, 8.0f, 90.0f, 42.0f, now),
+          "a good phone fix is accepted");
+    CHECK(g.pos_seen && g.vel_seen,
+          "and it fills BOTH halves -- the phone gives position and heading in "
+          "one message, unlike the car's two frames");
+
+    /* 🔴 THE MOTION WITNESS IS STILL REQUIRED. The phone cannot satisfy it:
+     * 0x257 is the drivetrain, and it is the only thing that can prove the car
+     * moved when the position did not. A phone fix without it must refuse. */
+    CHECK(fsd_gps_fix_why(&g, now, NULL) == FSD_GPS_NO_MOTION_REF,
+          "a phone fix alone is not enough -- the car still has to witness it");
+
+    fsd_gps_observe_motion_ref(&g, 42.0f, now);
+    FsdCamFix fix;
+    memset(&fix, 0, sizeof(fix));
+    CHECK(fsd_gps_fix_why(&g, now, &fix) == FSD_GPS_OK, "with 0x257, allowed");
+    CHECK(fix.lat_e7 == LAT && fix.lon_e7 == LON, "the phone's position came through");
+    CHECK(fix.bearing_deg == 90.0f, "and its bearing");
+    CHECK(fix.accuracy_m == 8.0f, "and its accuracy");
+
+    /* 🔴 BUT NOT ITS SPEED. fsd_gps_fix_why() takes speed from the drivetrain
+     * on purpose -- "the tunnel-proof one". A phone that keeps reporting the
+     * last speed while sitting in a garage must not be able to say so. */
+    fsd_gps_observe_motion_ref(&g, 7.0f, now);
+    CHECK(fsd_gps_fix_why(&g, now, &fix) == FSD_GPS_OK, "still allowed");
+    CHECK(fix.speed_kph == 7.0f,
+          "the fix carries the CAR's speed, not the phone's (got %.1f)",
+          (double)fix.speed_kph);
+}
+
+static void test_phone_fix_gets_no_easier_treatment(void) {
+    printf("\n-- 폰이라고 봐주지 않는다 --\n");
+
+    FsdGps g;
+    fsd_gps_init(&g);
+    const uint32_t now = 100000;
+
+    CHECK(!fsd_gps_observe_phone(&g, 0, 0, 5.0f, 0.0f, 0.0f, now),
+          "Null Island is refused, exactly as on the bus");
+    CHECK(!g.pos_seen, "and leaves no stamp -- rubbish must go stale, not linger");
+    CHECK(g.rejects == 1, "counted");
+
+    /* 🔴 900000000 IS NOT OFF THE PLANET -- it is exactly 90.0000000 deg, the
+     * North Pole, and the frame decoder accepts it for the same reason. The
+     * first draft of this test asserted it was refused and was wrong about the
+     * world, not about the code. One count past the pole is the real edge. */
+    CHECK(fsd_gps_observe_phone(&g, 900000000, 1269780000, 5.0f, 0.0f, 0.0f, now),
+          "the pole itself is a latitude");
+    CHECK(!fsd_gps_observe_phone(&g, 900000001, 1269780000, 5.0f, 0.0f, 0.0f, now),
+          "one count past it is not");
+    CHECK(!fsd_gps_observe_phone(&g, 375665000, 1800000001, 5.0f, 0.0f, 0.0f, now),
+          "and the same on the other axis");
+
+    /* 🔴 THE 0x2F8 END-STOP TRAP, WHICH THE PHONE HAS ITS OWN VERSION OF.
+     * The car's heading field holds up to 511.99, so folding >360 with modulo
+     * would turn a saturated field into a plausible wrong bearing. Android's
+     * Location.getBearing() is documented 0..360, but "documented" is not
+     * "measured" -- refuse rather than fold. */
+    CHECK(!fsd_gps_observe_phone(&g, 375665000, 1269780000, 5.0f, 400.0f, 0.0f, now),
+          "a bearing past a full circle is refused, not folded");
+    CHECK(!fsd_gps_observe_phone(&g, 375665000, 1269780000, 5.0f, -1.0f, 0.0f, now),
+          "and so is a negative one");
+    CHECK(!fsd_gps_observe_phone(&g, 375665000, 1269780000, 5.0f, 90.0f, -1.0f, now),
+          "a negative speed is refused");
+
+    CHECK(!fsd_gps_observe_phone(NULL, 375665000, 1269780000, 5.0f, 0.0f, 0.0f, now),
+          "NULL is refused");
+}
+
+static void test_phone_fix_goes_stale_and_can_freeze(void) {
+    printf("\n-- 폰 위치도 낡고, 얼어붙으면 잡힌다 --\n");
+
+    FsdGps g;
+    fsd_gps_init(&g);
+    uint32_t now = 100000;
+    const int32_t LAT = 375665000, LON = 1269780000;
+
+    fsd_gps_observe_phone(&g, LAT, LON, 8.0f, 90.0f, 60.0f, now);
+    fsd_gps_observe_motion_ref(&g, 60.0f, now);
+    CHECK(fsd_gps_fix_why(&g, now, NULL) == FSD_GPS_OK, "fresh");
+
+    /* The phone stops sending -- app killed, BLE dropped, screen policy. */
+    now += FSD_GPS_POS_FRESH_MS;
+    fsd_gps_observe_motion_ref(&g, 60.0f, now);
+    CHECK(fsd_gps_fix_why(&g, now, NULL) == FSD_GPS_POSITION_STALE,
+          "a phone that stopped sending goes stale like any other source");
+
+    /* 🔴 THE TUNNEL. The phone keeps sending the SAME position while the car
+     * is demonstrably moving. This is the failure the whole freeze detector
+     * exists for, and it must fire on phone data exactly as on bus data. */
+    fsd_gps_init(&g);
+    now = 200000;
+    for (int i = 0; i < 6; i++) {
+        fsd_gps_observe_phone(&g, LAT, LON, 8.0f, 90.0f, 0.0f, now);
+        fsd_gps_observe_motion_ref(&g, 80.0f, now);
+        now += 1000;
+    }
+    CHECK(fsd_gps_fix_why(&g, now - 1000, NULL) == FSD_GPS_FROZEN,
+          "80 km/h with a position that never moves is a frozen phone, and the "
+          "CAR is what noticed");
+}
+
+/* 🔴 ANDROID HANDS OUT A LOCATION THAT MAY ALREADY BE OLD. getLastLocation()
+ * can return a fix from minutes ago, and even a live update carries an
+ * elapsed-time stamp. The module stamps ARRIVAL, so without this a cached fix
+ * looks brand new — the freshness gate would be measuring the BLE link instead
+ * of the position. One line, but it lives here rather than in ble_server.cpp so
+ * a host test can stand where the firmware cannot be reached. */
+static void test_stamp_backdates_an_already_old_fix(void) {
+    printf("\n-- 폰이 준 위치가 이미 낡았으면 그만큼 뒤로 찍는다 --\n");
+
+    CHECK(fsd_gps_stamp_for_age(100000u, 0u) == 100000u, "a fresh fix stamps now");
+    CHECK(fsd_gps_stamp_for_age(100000u, 2500u) == 97500u, "an old one stamps back");
+
+    /* 🔴 millis() starts at 0. A phone reporting a 30 s old fix nine seconds
+     * after the module booted must not wrap to 4.29 billion, which would read
+     * as a fix from 49 days in the future and never go stale. */
+    CHECK(fsd_gps_stamp_for_age(9000u, 30000u) == 0u,
+          "near boot it clamps instead of wrapping, got %u",
+          (unsigned)fsd_gps_stamp_for_age(9000u, 30000u));
+
+    /* And the clamped value is still refused by the gate above, because 0 is
+     * older than the freshness window once the clock has run. */
+    FsdGps g;
+    fsd_gps_init(&g);
+    fsd_gps_observe_phone(&g, 375665000, 1269780000, 8.0f, 90.0f, 0.0f,
+                          fsd_gps_stamp_for_age(9000u, 30000u));
+    fsd_gps_observe_motion_ref(&g, 60.0f, 9000u);
+    CHECK(fsd_gps_fix_why(&g, 9000u, NULL) == FSD_GPS_POSITION_STALE,
+          "a 30-second-old fix is stale, not fresh");
+}
+
 int main(void) {
     printf("test_gps\n");
     test_position_decode();
@@ -487,6 +645,10 @@ int main(void) {
     test_freeze_needs_frames_not_just_time();
     test_verdict_strings();
     test_null_safety();
+    test_phone_fix_lands_where_the_car_can_check_it();
+    test_phone_fix_gets_no_easier_treatment();
+    test_phone_fix_goes_stale_and_can_freeze();
+    test_stamp_backdates_an_already_old_fix();
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }
