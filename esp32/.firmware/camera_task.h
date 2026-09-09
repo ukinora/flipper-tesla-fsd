@@ -61,6 +61,24 @@ bool camera_task_observe(uint32_t id, const uint8_t* data, uint8_t dlc, uint32_t
  *  AP-control handler still needs this frame. */
 void camera_task_observe_profile(bool hw4, const uint8_t* data, uint8_t dlc, uint32_t now_ms);
 
+/** A position from the phone, arriving over BLE instead of over CAN.
+ *
+ * 🔴 THE CAR DOES NOT BROADCAST ITS POSITION ON THIS BUS. A full sweep on
+ * 2026-09-05 found no latitude/longitude pair on Vehicle CAN — 0x3D8 is four
+ * constant bytes here and 0x2F8 never arrives — so without this the entire
+ * camera path is permanently FSD_GPS_NO_POSITION. Owner's decision 2026-09-09.
+ *
+ * 🟢 IT DOES NOT GET A SHORTCUT. This lands in the same FsdGps the frames would
+ * have filled, so the bounds check, Null Island, the 0x257 motion witness and
+ * the freeze detector all still apply — see fsd_gps_observe_phone(). The phone
+ * cannot satisfy the motion witness, which is exactly why a phone frozen in a
+ * tunnel is still caught.
+ *
+ * Returns false if the fix was refused, so the caller can answer the phone. */
+bool camera_task_observe_phone_fix(int32_t lat_e7, int32_t lon_e7,
+                                   float accuracy_m, float bearing_deg,
+                                   float speed_kph, uint32_t now_ms);
+
 /** Run the judgement at its own cadence. Call every loop(); it rate-limits
  *  itself and does nothing at all until a fix, authority and a read-back all
  *  line up. */

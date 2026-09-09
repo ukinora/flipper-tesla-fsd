@@ -119,16 +119,11 @@ static void still_restart(FsdGps* g, int32_t lat_e7, int32_t lon_e7, uint32_t no
     g->still_samples = 1u;
 }
 
-bool fsd_gps_observe_position(FsdGps* g, const uint8_t* data, uint8_t dlc, uint32_t now_ms) {
-    if (!g) return false;
-
-    int32_t lat = 0, lon = 0;
-    float acc = 0.0f;
-    if (!fsd_gps_decode_position(data, dlc, &lat, &lon, &acc)) {
-        g->rejects++;
-        return false; // no stamp: a receiver emitting rubbish must go stale
-    }
-
+/* The freeze window's bookkeeping, shared by every position source. Split out
+ * when the phone became one: two copies of this would be two places to get the
+ * "moved more than a metre" comparison right, and this repo has paid for
+ * divergent copies more than once. */
+static void note_position(FsdGps* g, int32_t lat, int32_t lon, uint32_t now_ms) {
     if (!g->pos_seen) {
         still_restart(g, lat, lon, now_ms);
     } else {
@@ -142,11 +137,69 @@ bool fsd_gps_observe_position(FsdGps* g, const uint8_t* data, uint8_t dlc, uint3
 
     g->lat_e7 = lat;
     g->lon_e7 = lon;
-    g->accuracy_m = acc;
     g->pos_seen = true;
     g->pos_ms = now_ms;
     g->pos_frames++;
+}
+
+bool fsd_gps_observe_position(FsdGps* g, const uint8_t* data, uint8_t dlc, uint32_t now_ms) {
+    if (!g) return false;
+
+    int32_t lat = 0, lon = 0;
+    float acc = 0.0f;
+    if (!fsd_gps_decode_position(data, dlc, &lat, &lon, &acc)) {
+        g->rejects++;
+        return false; // no stamp: a receiver emitting rubbish must go stale
+    }
+
+    note_position(g, lat, lon, now_ms);
+    g->accuracy_m = acc;
     return true;
+}
+
+uint32_t fsd_gps_stamp_for_age(uint32_t now_ms, uint32_t age_ms) {
+    return (age_ms >= now_ms) ? 0u : (uint32_t)(now_ms - age_ms);
+}
+
+bool fsd_gps_observe_phone(FsdGps* g, int32_t lat_e7, int32_t lon_e7,
+                           float accuracy_m, float bearing_deg, float speed_kph,
+                           uint32_t now_ms) {
+    if (!g) return false;
+
+    /* The same bounds the frame decoder applies, for the same reason. A phone
+     * is a different source, not a more trusted one. */
+    if (lat_e7 > LAT_E7_MAX || lat_e7 < -LAT_E7_MAX) goto reject;
+    if (lon_e7 > LON_E7_MAX || lon_e7 < -LON_E7_MAX) goto reject;
+    if (lat_e7 == 0 && lon_e7 == 0) goto reject; // Null Island; see the decoder
+
+    /* 🔴 REFUSED, NOT FOLDED. The car's 0x2F8 heading field holds up to 511.99,
+     * and folding an over-range value with modulo turns a saturated field into
+     * a plausible wrong bearing — fsd_gps_decode_velocity() says so. Android
+     * documents getBearing() as 0..360, but documented is not measured, and the
+     * cost of being wrong is a camera judged as behind us. */
+    if (!(bearing_deg >= 0.0f) || bearing_deg > 360.0f) goto reject;
+    if (!(speed_kph >= 0.0f)) goto reject;
+
+    note_position(g, lat_e7, lon_e7, now_ms);
+
+    /* <= 0 means unknown, the same convention FsdCamFix documents. A phone that
+     * reports zero error is describing itself, not the world. */
+    g->accuracy_m = accuracy_m;
+
+    /* The phone reports one Location, so heading arrives with position. The
+     * car needs two frames for this and can have one without the other. */
+    g->bearing_deg = bearing_deg;
+    g->gps_speed_kph = speed_kph;
+    g->hdop = 0.0f;
+    g->nmea_mia = false; // a phone with no fix does not send; silence goes stale
+    g->vel_seen = true;
+    g->vel_ms = now_ms;
+    g->vel_frames++;
+    return true;
+
+reject:
+    g->rejects++;
+    return false; // no stamp, exactly as on the bus
 }
 
 bool fsd_gps_observe_velocity(FsdGps* g, const uint8_t* data, uint8_t dlc, uint32_t now_ms) {

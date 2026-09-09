@@ -142,6 +142,13 @@ bool camera_task_observe(uint32_t id, const uint8_t* data, uint8_t dlc, uint32_t
     }
 }
 
+bool camera_task_observe_phone_fix(int32_t lat_e7, int32_t lon_e7,
+                                   float accuracy_m, float bearing_deg,
+                                   float speed_kph, uint32_t now_ms) {
+    return fsd_gps_observe_phone(&g_gps, lat_e7, lon_e7, accuracy_m,
+                                 bearing_deg, speed_kph, now_ms);
+}
+
 void camera_task_observe_profile(bool hw4, const uint8_t* data, uint8_t dlc, uint32_t now_ms) {
     uint8_t raw = 0;
     if(!fsd_sp_decode_profile(data, dlc, hw4, &raw)) return;

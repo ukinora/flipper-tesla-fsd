@@ -199,6 +199,54 @@ bool fsd_gps_observe_velocity(FsdGps* g, const uint8_t* data, uint8_t dlc, uint3
  *  Without this the freeze detector cannot run and every fix is refused. */
 void fsd_gps_observe_motion_ref(FsdGps* g, float kph, uint32_t now_ms);
 
+/** A position from OUTSIDE the bus — the phone over BLE, or a GPS module.
+ *
+ * 🔴 WHY THIS EXISTS. This file's opening comment rests on a claim that turned
+ * out to be false for this car: "the car broadcasts its position on CAN". On
+ * 2026-09-05 a full sweep of Vehicle CAN found no latitude/longitude pair at
+ * all — 0x3D8 is four bytes of constant here and 0x2F8 never arrives. The
+ * owner's decision (2026-09-09) is to let the PHONE supply the position rather
+ * than tap a second bus or add a GPS module.
+ *
+ * 🔴 WHAT THAT COSTS, SAID PLAINLY. "Camera handling works with the phone left
+ * at home" is no longer true for this path. It was already not true — the
+ * feature could not run at all without a position — so this is 0 → works while
+ * the phone is present, not a step back. A GPS module later feeds this same
+ * function and self-sufficiency returns without another redesign.
+ *
+ * 🟢 WHAT IT DOES NOT COST, WHICH IS THE POINT. This writes the SAME fields the
+ * 0x3D8/0x2F8 observers write, so every gate below keeps working unchanged:
+ *
+ *   · the bounds check and Null Island   — the phone is not trusted with those
+ *   · FSD_GPS_NO_MOTION_REF (0x257)      — the phone CANNOT satisfy this
+ *   · the freeze detector                — a phone frozen in a tunnel is caught
+ *                                          by the DRIVETRAIN, not by itself
+ *   · fix->speed_kph                     — still the car's, never the phone's
+ *
+ * In other words the phone supplies a position and the CAR decides whether to
+ * believe it. That is the same arrangement a GPS module would get.
+ *
+ * Position and heading arrive TOGETHER here — the phone reports one Location
+ * object — so this fills both halves in one call, unlike the car's two frames.
+ *
+ * Returns false, leaving no timestamp, when the fix is not a place on Earth, or
+ * the bearing is outside one full circle, or the speed is negative. No stamp on
+ * purpose: a source emitting rubbish has to go stale rather than linger. */
+bool fsd_gps_observe_phone(FsdGps* g, int32_t lat_e7, int32_t lon_e7,
+                           float accuracy_m, float bearing_deg, float speed_kph,
+                           uint32_t now_ms);
+
+/** The timestamp to stamp a fix that was ALREADY `age_ms` old when it arrived.
+ *
+ * 🔴 Android hands out a Location that may be minutes old — getLastLocation()
+ * returns a cached one, and a live update still carries an elapsed-time stamp.
+ * The module stamps arrival, so without backdating, the freshness gate would be
+ * measuring the BLE link rather than the position.
+ *
+ * Clamped at zero: millis() starts there, and a wrap would put the fix 49 days
+ * in the future where nothing could ever make it stale. */
+uint32_t fsd_gps_stamp_for_age(uint32_t now_ms, uint32_t age_ms);
+
 /** Read DI_vehicleSpeed out of a 0x257 DI_speed frame and feed it in one step.
  *
  *  Exists for the same reason fsd_drive_observe_gear() does: the ESP32 build
