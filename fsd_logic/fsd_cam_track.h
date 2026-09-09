@@ -216,6 +216,22 @@ void fsd_trk_reset_active(FsdTracker* t);
 
 /** The nearest camera currently being followed, or false when there is none.
  *  This is what the policy layer reads: it wants a level, not an edge. */
+/** 어떤 카메라를 셈에 넣을지 고르는 잣대. true 면 후보로 둔다. */
+typedef bool (*FsdTrkKeepFn)(void* ctx, const FsdCamRecord* cam);
+
+/**
+ * `fsd_trk_nearest()` 인데, 잣대가 아니라고 한 것은 건너뛴다.
+ *
+ * 🔴 **왜 여기여야 하나.** 추적기는 가장 가까운 **하나**를 돌려준다. 부르는
+ * 쪽에서 그것을 받아 보고 버리면, 그 뒤에 있는 진짜 카메라를 영영 못 본다 —
+ * 버릴 것을 아는 사람이 고르는 자리에 있어야 한다.
+ *
+ * `keep` 이 NULL 이면 `fsd_trk_nearest()` 와 정확히 같다.
+ */
+bool fsd_trk_nearest_where(const FsdTracker* t, FsdTrkKeepFn keep, void* ctx,
+                           FsdCamRecord* cam_out, uint64_t* key_out,
+                           float* distance_out);
+
 bool fsd_trk_nearest(const FsdTracker* t, FsdCamRecord* cam_out, uint64_t* key_out,
                      float* distance_out);
 

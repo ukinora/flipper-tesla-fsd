@@ -79,6 +79,14 @@ bool camera_task_observe_phone_fix(int32_t lat_e7, int32_t lon_e7,
                                    float accuracy_m, float bearing_deg,
                                    float speed_kph, uint32_t now_ms);
 
+/** 앱이 준 경로 한 조각. 판단 근거는 fsd_route.h 머리말에 있다. */
+bool camera_task_route_feed(uint16_t seq, uint16_t total, const uint8_t* pts,
+                            size_t n, uint32_t now_ms);
+void camera_task_route_clear(void);
+/** 지금까지 받은 점 수. 화면이 "정말 들어갔나" 를 눈으로 보게 한다. */
+uint16_t camera_task_route_points(void);
+bool camera_task_route_complete(void);
+
 /** Run the judgement at its own cadence. Call every loop(); it rate-limits
  *  itself and does nothing at all until a fix, authority and a read-back all
  *  line up. */

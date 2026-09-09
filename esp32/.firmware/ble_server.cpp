@@ -1050,6 +1050,31 @@ class CommandCB : public NimBLECharacteristicCallbacks {
          * the 0x257 motion witness sits below all of it — which the phone cannot
          * satisfy. A refused fix is answered so the app can say so rather than
          * appear to be working. */
+        /* 경로 한 조각. GPS_FIX 와 같은 이유로 그 자리에서 답한다 — 목적지를
+         * 고른 직후에 다섯 번쯤 연달아 오고, 앱이 다음 조각을 보내기 전에
+         * 앞 조각이 들어갔는지 알아야 한다. */
+        case BLE_CMD_ROUTE_SET: {
+            if (v.size() <= 1u + BLE_ROUTE_HDR) {
+                ble_send_result(cmd, BLE_RES_REJECTED, (uint16_t)v.size());
+                break;
+            }
+            const uint8_t *b = (const uint8_t *)v.data() + 1;
+            const uint16_t seq   = (uint16_t)((uint16_t)b[0] | ((uint16_t)b[1] << 8));
+            const uint16_t total = (uint16_t)((uint16_t)b[2] | ((uint16_t)b[3] << 8));
+            const bool ok = camera_task_route_feed(
+                seq, total, b + BLE_ROUTE_HDR, v.size() - 1u - BLE_ROUTE_HDR, millis());
+            /* extra 는 **지금까지 받은 점 수**다. 앱이 그것으로 다음 seq 를
+             * 정하므로, 조각 하나가 떨어져도 다시 맞출 수 있다. */
+            ble_send_result(cmd, ok ? BLE_RES_OK : BLE_RES_REJECTED,
+                            camera_task_route_points());
+            break;
+        }
+
+        case BLE_CMD_ROUTE_CLEAR:
+            camera_task_route_clear();
+            ble_send_result(cmd, BLE_RES_OK, 0);
+            break;
+
         case BLE_CMD_GPS_FIX: {
             if (v.size() < 1u + FSD_GPS_BLE_FIX_LEN) {
                 ble_send_result(cmd, BLE_RES_REJECTED, (uint16_t)v.size());

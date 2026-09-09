@@ -30,6 +30,7 @@
 // the warning was the only thing that had been comparing them.
 #include "config.h"
 #include "../../fsd_logic/fsd_speed_profile.h"
+#include "../../fsd_logic/fsd_route.h"
 #include "camera_store.h"
 
 #include <Arduino.h>
@@ -140,6 +141,30 @@ bool camera_task_observe(uint32_t id, const uint8_t* data, uint8_t dlc, uint32_t
     default:
         return false;
     }
+}
+
+static FsdRoute g_route;
+
+bool camera_task_route_feed(uint16_t seq, uint16_t total, const uint8_t* pts,
+                            size_t n, uint32_t now_ms) {
+    return fsd_route_feed(&g_route, seq, total, pts, n, now_ms);
+}
+
+void camera_task_route_clear(void) { fsd_route_init(&g_route); }
+
+uint16_t camera_task_route_points(void) { return fsd_route_count(&g_route); }
+
+bool camera_task_route_complete(void) { return fsd_route_complete(&g_route); }
+
+/* 잣대 하나 때문에 구조체를 만든다 — 콜백에 우리 위치까지 실어야 해서다. */
+typedef struct {
+    int32_t lat_e7;
+    int32_t lon_e7;
+} RouteHere;
+
+static bool keep_if_on_route(void* ctx, const FsdCamRecord* cam) {
+    const RouteHere* h = (const RouteHere*)ctx;
+    return !fsd_route_rejects(&g_route, h->lat_e7, h->lon_e7, cam->lat_e7, cam->lon_e7);
 }
 
 bool camera_task_observe_phone_fix(int32_t lat_e7, int32_t lon_e7,
@@ -263,7 +288,15 @@ static void camera_judge(const FsdCamFix* fix, float dt_s) {
     FsdCamRecord cam;
     uint64_t key = 0;
     float dist = 0.0f;
-    if(fsd_trk_nearest(&g_trk, &cam, &key, &dist)) {
+    /* 🔴 고르는 자리에서 거른다. 받아 놓고 버리면 그 뒤의 진짜 카메라를
+     * 영영 못 본다 — 추적기는 가장 가까운 하나만 돌려준다.
+     *
+     * 🟢 경로가 없거나 우리가 그 경로를 벗어났으면 잣대가 아무것도 안 버리고,
+     * 그때 동작은 경로가 생기기 전과 정확히 같다. fsd_route.h 참조. */
+    RouteHere here;
+    here.lat_e7 = fix->lat_e7;
+    here.lon_e7 = fix->lon_e7;
+    if(fsd_trk_nearest_where(&g_trk, keep_if_on_route, &here, &cam, &key, &dist)) {
         ahead.valid = true;
         ahead.key = key;
         ahead.limit_kph = cam.limit_kph;
