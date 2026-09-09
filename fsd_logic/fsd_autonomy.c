@@ -133,6 +133,16 @@ void fsd_drive_observe_gear(FSDState* state, const CANFRAME* frame, uint32_t now
     state->di_gear_seen = true;
 }
 
+void fsd_ui_observe_range(FSDState* state, const CANFRAME* frame) {
+    if(!state || !frame) return;
+    if(frame->id != CAN_ID_UI_SOC) return;
+
+    uint16_t miles = 0;
+    if(!fsd_decode_ui_range(frame->buffer, frame->data_lenght, &miles)) return;
+    state->ui_range = miles;
+    state->ui_range_seen = true;
+}
+
 void fsd_drive_observe_cruise(FSDState* state, const CANFRAME* frame) {
     if(!state || !frame) return;
     if(frame->id != CAN_ID_DI_STATE) return;

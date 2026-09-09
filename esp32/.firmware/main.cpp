@@ -1829,7 +1829,20 @@ static void process_frame(CanBusId bus, const CanFrame &frame) {
     // ── BMS sniff (read-only, always) ─────────────────────────────────────────
     if (frame.id == CAN_ID_BMS_HV_BUS)  { state_enter(); fsd_handle_bms_hv(&g_state, &frame);      state_exit(); return; }
     if (frame.id == CAN_ID_BMS_SOC)     { state_enter(); fsd_handle_bms_soc(&g_state, &frame);     state_exit(); return; }
-    if (frame.id == CAN_ID_UI_SOC)      { state_enter(); fsd_handle_ui_soc(&g_state, &frame);      state_exit(); return; }
+    /* One frame, two numbers the driver is looking at: the percentage and the
+     * range. Two observers on purpose -- separate decode, separate success, so
+     * a frame too short for one still delivers the other.
+     *
+     * 🔴 fsd_ui_observe_range() lives in fsd_autonomy.c, not beside
+     * fsd_handle_ui_soc(). That one exists TWICE -- here and in
+     * fsd_logic/fsd_handler.c -- and only this copy is compiled, which is how
+     * the two came to disagree about the pack SOC's bit position. The new
+     * reader has one implementation, in a file every board compiles and the
+     * host tests reach. */
+    if (frame.id == CAN_ID_UI_SOC)      { state_enter();
+                                          fsd_handle_ui_soc(&g_state, &frame);
+                                          fsd_ui_observe_range(&g_state, &frame);
+                                          state_exit(); return; }
     if (frame.id == CAN_ID_BMS_THERMAL) { state_enter(); fsd_handle_bms_thermal(&g_state, &frame); state_exit(); return; }
 
     // ── DAS status (read-only, always) — gating for NAG killer ───────────────

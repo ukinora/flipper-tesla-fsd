@@ -106,6 +106,25 @@ void fsd_drive_observe_gear(FSDState* state, const CANFRAME* frame, uint32_t now
  *  over BLE as a structural zero. No timestamp: nothing gates on it. */
 void fsd_drive_observe_cruise(FSDState* state, const CANFRAME* frame);
 
+/** Read the RANGE out of a 0x33A frame — the number on the car's own screen.
+ *
+ *  🔴 IT LIVES HERE FOR THE REASON THE GEAR OBSERVER DOES, AND THE REASON IS
+ *  A BUG THIS REPO HAS ALREADY PAID FOR TWICE. The percentage in this same
+ *  frame is handled by fsd_handle_ui_soc(), which exists TWICE -- in
+ *  fsd_logic/fsd_handler.c and again in esp32/.firmware/fsd_handler.cpp -- and
+ *  the ESP32 build compiles only the second. Those two copies disagreed about
+ *  where the pack's SOC sat (0|10 versus 10|10) until 2026-09-07, and about
+ *  the OTA verdict before that. fsd_autonomy.c is in platformio.ini's BASE
+ *  source filter, so this one function is compiled into every board AND
+ *  reached by the host tests. One implementation, no pair to keep in step.
+ *
+ *  ⚠️ This does not fix the soc pair; it declines to add to it.
+ *
+ *  REFUSES ANY OTHER CAN ID, same as the gear observer, and for the same
+ *  reason: a safety-adjacent reading must not come from a frame handed over by
+ *  mistake. Frames too short are ignored and nothing is marked seen. */
+void fsd_ui_observe_range(FSDState* state, const CANFRAME* frame);
+
 /** Read buckleStatus out of a 0x311 UI_warning frame and stamp it.
  *  Writes the same ui_buckle_status the Flipper parser writes; on that build
  *  both run and agree, on the ESP32 this is the only writer.

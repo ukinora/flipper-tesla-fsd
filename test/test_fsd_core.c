@@ -4124,14 +4124,76 @@ static const struct {
     uint8_t data[8];
     uint8_t ui;   /* 20|7 -- the number on the car's screen */
     uint8_t wide; /* 20|8 -- what one bit too many would report */
+    uint16_t range; /* 0|12 -- the range on the same screen, MILES */
     const char* where;
 } UISOC[] = {
-    {{0xF8, 0x70, 0x43, 0xA5, 0xFE, 0xFF, 0xCF, 0x64}, 84, 84, "2026-09-03 유휴"},
-    {{0xCC, 0x70, 0x53, 0x2C, 0xFE, 0xFF, 0xCF, 0x64}, 69, 197, "2026-09-05 4th"},
-    {{0xAD, 0x70, 0xB3, 0xDB, 0xFD, 0xFF, 0xCF, 0x64}, 59, 187, "2026-09-05 drive"},
-    {{0x9D, 0x70, 0x53, 0xAB, 0xFD, 0xFF, 0xCF, 0x64}, 53, 181, "2026-09-06 5th"},
-    {{0x41, 0x70, 0x63, 0xB1, 0xFC, 0xFF, 0xCF, 0x64}, 22, 22, "2026-09-08 배터리"},
+    {{0xF8, 0x70, 0x43, 0xA5, 0xFE, 0xFF, 0xCF, 0x64}, 84, 84, 248, "2026-09-03 유휴"},
+    {{0xCC, 0x70, 0x53, 0x2C, 0xFE, 0xFF, 0xCF, 0x64}, 69, 197, 204, "2026-09-05 4th"},
+    {{0xAD, 0x70, 0xB3, 0xDB, 0xFD, 0xFF, 0xCF, 0x64}, 59, 187, 173, "2026-09-05 drive"},
+    {{0x9D, 0x70, 0x53, 0xAB, 0xFD, 0xFF, 0xCF, 0x64}, 53, 181, 157, "2026-09-06 5th"},
+    {{0x41, 0x70, 0x63, 0xB1, 0xFC, 0xFF, 0xCF, 0x64}, 22, 22, 65, "2026-09-08 배터리"},
 };
+
+/* 🔴 THE SAME FIVE FRAMES, A SECOND FIELD. Not a new table: the range and the
+ * percentage ride in one 0x33A, and giving each its own fixture is how the two
+ * would come to disagree about what the car said. */
+static void test_range_rides_in_the_same_frame_as_the_percentage(void) {
+    for(size_t i = 0; i < sizeof(UISOC) / sizeof(UISOC[0]); i++) {
+        uint16_t mi = 0xFFFFu;
+        CHECK(fsd_decode_ui_range(UISOC[i].data, 8, &mi), "%s decodes", UISOC[i].where);
+        CHECK(mi == UISOC[i].range, "%s: expected %u miles, got %u", UISOC[i].where,
+              (unsigned)UISOC[i].range, (unsigned)mi);
+    }
+
+    /* 🟢 THE RATIO IS THE EVIDENCE THE UNIT RESTS ON, so it is asserted rather
+     * than described. Across the five it runs 2.93 to 2.99 miles per percent;
+     * anything outside 2.8..3.1 means either the field moved or the
+     * percentage did, and the two are decoded from one frame so a test that
+     * checks them together catches what two separate tests would not. */
+    for(size_t i = 0; i < sizeof(UISOC) / sizeof(UISOC[0]); i++) {
+        const double r = (double)UISOC[i].range / (double)UISOC[i].ui;
+        CHECK(r > 2.8 && r < 3.1, "%s: %.3f miles per percent is off the line",
+              UISOC[i].where, r);
+    }
+
+    /* 🔴 CONSTRUCTED, NOT MEASURED -- and it has to be, which is the point.
+     * All 15 distinct payloads we hold have byte1 == 0x70, so no real frame we
+     * own exercises the upper nibble. This one does: byte1 0x71 puts a 1 in
+     * bit 8 and the answer must be 0x141, not 0x41. An eight-bit read passes
+     * every line above and fails only here.
+     *
+     * The car will produce such a frame the day the charge limit goes past
+     * 86 % (249 at 84 % => ~296 at 100 %), and on that day this line is the
+     * difference between 321 miles and 65. */
+    {
+        uint8_t made[8] = {0x41, 0x71, 0x63, 0xB1, 0xFC, 0xFF, 0xCF, 0x64};
+        uint16_t mi = 0;
+        CHECK(fsd_decode_ui_range(made, 8, &mi), "a ninth bit decodes");
+        CHECK(mi == 0x141u, "expected 321, got %u -- eight bits would say 65", (unsigned)mi);
+
+        uint8_t pct = 0;
+        CHECK(fsd_decode_ui_soc(made, 8, &pct) && pct == 22u,
+              "and the percentage is untouched by it, got %u", (unsigned)pct);
+    }
+
+    /* The whole field, both ends. 0 is a real reading (an empty battery) and
+     * 4095 is the widest the twelve bits go -- neither may be refused, which
+     * is why the wire's "absent" value lives OUTSIDE this range. */
+    {
+        uint8_t lo[2] = {0x00, 0x70};
+        uint8_t hi[2] = {0xFF, 0x7F};
+        uint16_t mi = 0xFFFFu;
+        CHECK(fsd_decode_ui_range(lo, 2, &mi) && mi == 0u, "0 miles is a reading");
+        CHECK(fsd_decode_ui_range(hi, 2, &mi) && mi == 0x0FFFu, "4095 fits, got %u",
+              (unsigned)mi);
+    }
+
+    uint16_t mi = 0;
+    CHECK(!fsd_decode_ui_range(NULL, 8, &mi), "NULL data refused");
+    CHECK(!fsd_decode_ui_range(UISOC[0].data, 8, NULL), "NULL out refused");
+    CHECK(!fsd_decode_ui_range(UISOC[0].data, 1, &mi), "dlc 1 refused -- field ends in byte 1");
+    CHECK(fsd_decode_ui_range(UISOC[0].data, 2, &mi), "dlc 2 is enough");
+}
 
 static void test_ui_soc_is_the_number_on_the_car_screen(void) {
     for(size_t i = 0; i < sizeof(UISOC) / sizeof(UISOC[0]); i++) {
@@ -4396,6 +4458,7 @@ int main(void) {
     test_bms_soc_has_one_decoder();
     test_bms_soc_refuses_rather_than_guesses();
     test_ui_soc_is_the_number_on_the_car_screen();
+    test_range_rides_in_the_same_frame_as_the_percentage();
     test_ui_soc_refuses_rather_than_guesses();
     test_read_mux();
     test_is_selected();

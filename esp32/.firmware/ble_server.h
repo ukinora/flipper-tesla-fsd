@@ -32,7 +32,15 @@
 //   1 — initial layout; byte 9 carried DI_cruiseState as a stand-in
 //   2 — byte 9 is the gear (PRND), which is what it was specified as; the
 //       stand-in existed only because this build had no gear parser
-#define BLE_PROTO_VERSION 8
+//   9 — bytes 29-30 carry the RANGE on the car's own screen (0x33A bits 0..11,
+//       miles, sentinel 0xFFFF), and flags bit 7 carries the transmission
+//       lock. The bit was reserved for a closed loop that emits nothing.
+//
+// 🔴 THE BOARD AND THE APP ARE A MATCHED PAIR. A phone on an older version
+// refuses the whole notification rather than misreading it, so the dashboard
+// goes blank rather than wrong -- which is the right failure and still a
+// failure. Ship both or neither.
+#define BLE_PROTO_VERSION 9
 
 // State notify cadence. With nobody subscribed the tick returns before the
 // serialisation — it stops rather than slowing down, which is worth saying
@@ -177,6 +185,37 @@
  * silently did nothing is the failure that validator exists to prevent. */
 #define BLE_CMD_RULE_SET     0x70u  // result tag for a RULES write. Never sent to us.
 #define BLE_CMD_RULE_CLEAR   0x71u  // arg: rule number, 0xFF = all
+
+/* arg: 0 = lock transmission, 1 = allow it. Dies with the power, like the
+ * serial `rulearm` it mirrors -- this is the same switch, not a second one.
+ *
+ * 🔴 WHY IT DID NOT EXIST, DECIDED BEFORE IT WAS BUILT (2026-09-10). The
+ * switch had exactly two callers, both in main.cpp's serial handler, and the
+ * app could neither set it nor see it -- RuleEditScreen.kt says only "송신
+ * 허용이 따로 필요하다. 그것은 이 화면에 없다". So the question was whether
+ * serial-only was a DESIGN -- two locks on two channels, so one stolen phone
+ * opens neither -- or simply a thing nobody had written.
+ *
+ * It was the second, and the evidence is that the phone already holds the
+ * bigger key: SET_MODE(Active) opens the CAN controllers themselves. A design
+ * that split the locks across channels on purpose would not have put the
+ * hardware transmit enable on the phone and the software one on a cable.
+ * rule_task.h's own comment argues only that the switch is SESSION-SCOPED; it
+ * never claims the channel is part of the guarantee.
+ *
+ * ⚠️ IT IS STILL AN EXPANSION AND SAYING SO IS THE POINT. Until today a phone
+ * alone could not put a body frame on the bus; now it can, given a mapping the
+ * owner made, Active, and every gate on the permission axis. That is what the
+ * owner asked for. What did NOT change: the axis, the emitter, the bit-level
+ * chokepoint, send_on_bus()'s ID refusals, and the driver's Listen-Only.
+ *
+ * 🟢 OWNER-BONDED PHONE ONLY -- and nothing here has to arrange that. Every
+ * command goes through one owner check at the top of CommandCB::onWrite, put
+ * there because "encrypted" only means nobody is listening in: this board has
+ * no display, so Just Works is the only pairing it can do and anyone beside a
+ * parked car can complete it. A second check in this case would be a copy of
+ * that one, and copies of checks are how they come to disagree. */
+#define BLE_CMD_RULE_ARM     0x72u
 
 // ── Camera / autonomy status (read + notify) ─────────────────────────────────
 // A separate characteristic rather than more bytes in State: State is a fixed

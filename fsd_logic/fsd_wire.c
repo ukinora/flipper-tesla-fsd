@@ -44,14 +44,16 @@ void fsd_wire_pack_state(const FsdWireState* in, uint8_t* out) {
     if(in->ota_in_progress) flags |= (1u << 1);
     if(in->blinker_left) flags |= (1u << 2);
     if(in->blinker_right) flags |= (1u << 3);
-    /* Bit 5 (blind spot) is deliberately never set: DAS_sideCollisionWarning
-     * is not extracted on the ESP32 path, and its bit position is confirmed
-     * only for 0x39B (HW4). Left zero rather than guessed. Bit 7 (profile
-     * change in progress) belongs to the SET_PROFILE closed loop, which emits
-     * nothing while both of its gates are shut. */
+    /* ⚠️ This comment used to say bit 5 was the blind spot and deliberately
+     * never set. That stopped being true on 2026-09-05, when ui_speed_seen
+     * took the bit and the header was updated and this line was not. The
+     * blind spot moved to byte 21 and has two bits a side. */
     if(in->blackbox_recording) flags |= (1u << 4);
     if(in->ui_speed_seen) flags |= (1u << 5);
     if(in->brake_applied) flags |= (1u << 6);
+    /* Bit 7 was reserved for the SET_PROFILE closed loop, which emits nothing.
+     * v9 gave it to the transmission lock -- see FsdWireState.rule_armed. */
+    if(in->rule_armed) flags |= (1u << 7);
 
     int32_t prof = in->speed_profile;
     if(prof < 0) prof = 0;
@@ -134,6 +136,9 @@ void fsd_wire_pack_state(const FsdWireState* in, uint8_t* out) {
      * on an empty car is worse than a blank. */
     out[28] = (in->ui_soc_seen && in->ui_soc <= 100u) ? in->ui_soc
                                                       : FSD_WIRE_UI_SOC_NONE;
+    /* Bytes 29-30, v9. Little-endian like every other multi-byte field here.
+     * The sentinel is 0xFFFF, which the twelve-bit CAN field cannot reach. */
+    put_le16(&out[29], in->ui_range_seen ? in->ui_range : FSD_WIRE_RANGE_NONE);
 }
 
 void fsd_wire_pack_camstat(const FsdWireCamStat* in, uint8_t* out) {

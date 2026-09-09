@@ -39,13 +39,13 @@ extern "C" {
 
 /* Both payloads are 20 bytes because that is the most a default 23-byte ATT MTU
  * carries. Not a coincidence and not adjustable without a version bump. */
-#define FSD_WIRE_STATE_LEN 29u
+#define FSD_WIRE_STATE_LEN 31u
 #define FSD_WIRE_CAMSTAT_LEN 20u
 #define FSD_WIRE_RESULT_LEN 4u
 
 /* Wire versions. Each payload carries its own — sharing one meant that bumping
  * State also announced a CamStat change that had not happened. */
-#define FSD_WIRE_STATE_VERSION 8u
+#define FSD_WIRE_STATE_VERSION 9u
 #define FSD_WIRE_CAMSTAT_VERSION 2u
 
 /* FSD v14 Lite exposes four speed profiles. */
@@ -56,6 +56,20 @@ extern "C" {
  * Above every legal percentage and inside the seven bits the CAN field is
  * wide, so it can collide with neither a reading nor a widened mask. */
 #define FSD_WIRE_UI_SOC_NONE 0x7Fu
+
+/* Bytes 29-30 sentinel: the module has not decoded the car's own range yet.
+ *
+ * 🔴 OUTSIDE THE CAN FIELD BY CONSTRUCTION, which is why no "max" check is
+ * needed anywhere and none exists. The CAN field is twelve bits, so a reading
+ * cannot exceed 4095; this wire field is sixteen. 0 miles is a real reading
+ * (an empty battery) and so is 4095, so a sentinel INSIDE the field would have
+ * had to be defended by a range check -- and a range check on a field whose
+ * real maximum has never been measured is a guess that clips readings. This
+ * one needs no defending.
+ *
+ * (Byte 28's percentage went the other way, and could: seven bits hold 0..127
+ * while a percentage uses 0..100, leaving 27 values spare.) */
+#define FSD_WIRE_RANGE_NONE 0xFFFFu
 
 /* Everything State is built from. Filled by the caller from FSDState.
  *
@@ -120,6 +134,23 @@ typedef struct {
      * unchanged. */
     bool blackbox_recording;
 
+    /* flags bit 7, v9. Whether the rule engine may actually write to the bus
+     * this session -- `rulearm on`, which dies with the power.
+     *
+     * 🔴 THE APP COULD NOT SEE THIS, AND THAT IS WHY IT IS HERE. A mapping can
+     * be switched on, the mode can be Active, every gate can be satisfied, and
+     * still nothing goes out; the only way to know was a serial console, which
+     * means carrying a laptop to the car. Exactly the argument that put
+     * blackbox_recording on bit 4: the phone had no way to know, and the
+     * moment it matters is the moment before something you cannot retake.
+     *
+     * ⚠️ BIT 7 WAS RESERVED FOR THE SET_PROFILE CLOSED LOOP, and taking it is
+     * a decision rather than an oversight. That loop emits nothing -- both of
+     * its gates are shut and one waits on a measurement -- so the bit was
+     * holding a place for something that does not exist. If the loop ever
+     * ships it takes a new byte, and by then it will be a real need. */
+    bool rule_armed;
+
     uint8_t op_mode;   // 0=ListenOnly 1=Active 2=Service 3=Autonomous
     uint8_t hw_version; // 0=Unknown 1=Legacy 2=HW3 3=HW4
     int32_t speed_profile; // clamped into 0..3 by the packer
@@ -176,6 +207,19 @@ typedef struct {
      * 27's field fills its byte and had no such room. */
     bool ui_soc_seen;
     uint8_t ui_soc;
+
+    /* Bytes 29-30, v9. 0x33A bits 0..11: the RANGE on the car's own screen,
+     * in the car's own display unit -- MILES here. Sent RAW.
+     *
+     * 🔴 NOT CONVERTED TO KILOMETRES ON THIS SIDE, on purpose. The unit is an
+     * inference (see fsd_decode_ui_range): strong, cross-checked two ways, and
+     * still an inference. Converting here would bake it into the protocol and
+     * into every capture of the protocol; converting on the phone leaves the
+     * wire carrying what the car said and puts the interpretation in the one
+     * layer that can be changed without reflashing a board. Same reasoning as
+     * ui_speed, which is also carried in the car's display unit. */
+    bool ui_range_seen;
+    uint16_t ui_range;
 
     uint8_t gear; // 0=INVALID 1=P 2=R 3=N 4=D 7=SNA
 
