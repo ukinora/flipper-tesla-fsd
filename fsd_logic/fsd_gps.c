@@ -294,6 +294,11 @@ FsdGpsVerdict fsd_gps_fix_why(const FsdGps* g, uint32_t now_ms, FsdCamFix* out) 
     }
     if (frozen(g, now_ms)) return FSD_GPS_FROZEN;
 
+    /* Checked last, and only when the source said something: 0 means unknown,
+     * and the car's own frame reports 0 more often than not. Refusing unknown
+     * would close the CAN path entirely for a reason it never claimed. */
+    if (g->accuracy_m > FSD_GPS_ACCURACY_MAX_M) return FSD_GPS_INACCURATE;
+
     if (out) {
         out->lat_e7 = g->lat_e7;
         out->lon_e7 = g->lon_e7;
@@ -318,6 +323,7 @@ const char* fsd_gps_verdict_str(FsdGpsVerdict v) {
     case FSD_GPS_NO_FIX: return "receiver reports no fix";
     case FSD_GPS_NO_MOTION_REF: return "no 0x257 speed";
     case FSD_GPS_FROZEN: return "position frozen";
+    case FSD_GPS_INACCURATE: return "fix too vague";
     }
     return "?";
 }
