@@ -183,34 +183,69 @@ uint8_t fsd_pipe_observe(FsdPipeFrames* f, uint8_t bus, uint32_t can_id,
 void fsd_pipe_release(FsdBodyAction action, int32_t arg, uint8_t rule_index,
                       const FsdPipeFrames* f, uint32_t now_ms, FsdPipeResult* out);
 
-/** Push one trigger event through all four layers.
+/** ONE DECISION THROUGH ALL FOUR GATES, WITH A FRAME AT THE END. THE SEND.
  *
- *  Writes at most `max_out` results and returns how many. A result with
- *  stage == FSD_PIPE_OK carries a frame the caller may transmit; every other
- *  stage carries the reason it may not.
+ * Called on the car's own arrival of this action's id, which is where TSL puts
+ * its frames and the only instant at which the template is not old. Every
+ * frame the board sends comes from here -- the first one of a burst and the
+ * repeats alike, since 2026-09-09.
  *
- *  🔴 TRANSMITS NOTHING. See the header comment.
+ * 🔴 IT IS NOT A SHORTCUT PAST ANYTHING. The axis is asked again, in full, at
+ * every arrival: close the transmission switch in the middle of a burst and
+ * the remaining frames are refused with a name. The press's permission is not
+ * a licence that outlives the conditions it was granted under.
  *
- *  Safe with any NULL: returns 0. */
-/** One decision through the same four gates, without matching a rule.
- *
- * fsd_pipe_run() is this in a loop. It exists separately because a BURST needs
- * to re-run a decision the rules already made: the turn signal is not one frame
- * but three or four consecutive ones, and the second through fourth arrive on
- * the car's clock rather than on a trigger.
- *
- * 🔴 IT IS NOT A SHORTCUT PAST ANYTHING. Same axis, same emitter, same
- * chokepoint, same order. Take the belt off in the middle of a burst and the
- * remaining frames are refused with a name, exactly as the first would have
- * been.
- */
+ * 🔴 TRANSMITS NOTHING. See the header comment. */
 void fsd_pipe_one(FsdBodyAction action, int32_t arg, uint8_t rule_index,
                   const FsdBodyInputs* in, const FsdPipeFrames* f,
                   uint32_t now_ms, FsdPipeResult* out);
 
-uint8_t fsd_pipe_run(const FsdRules* rules, const FsdTriggerEvent* ev, const FsdBodyInputs* in,
-                     const FsdPipeFrames* f, uint32_t now_ms, FsdPipeResult* out,
-                     uint8_t max_out);
+/**
+ * WHICH RULES MATCHED, AND MAY EACH OF THEM ACT -- WITHOUT BUILDING A FRAME.
+ *
+ * This is the PRESS half. fsd_pipe_one() is the SEND half, and the split is
+ * not a refactor: it is a measurement.
+ *
+ * 🔴 THE CAR, 2026-09-09. The mirror worked "sometimes" -- 19 presses, 7
+ * frames, 37 %. The press used to run all four layers, and the chokepoint's
+ * question is "did the car's own frame land within
+ * FSD_BODY_WIRE_REF_FRESH_MS (200)". 0x273 arrives every 500. A finger lands
+ * where it lands, so 200/500 = 40 % of presses found a fresh template and the
+ * rest were refused before anything was even armed. The 3 points between
+ * predicted and measured are 19 presses' worth of rounding.
+ *
+ * 🟢 THE FRAMES THAT DID GO OUT WERE CORRECT and the mirror moved every time.
+ * The send was never the problem and cannot be: a send IS an arrival, and at
+ * an arrival the template is 0 ms old.
+ *
+ * So the freshness question belongs to the send, and asking it at the press is
+ * asking a question whose answer is about a moment that has not happened yet.
+ *
+ * WHAT IS STILL ASKED HERE
+ *   the rule    the owner has to have written it and switched it on
+ *   the axis    fsd_body_allows in full: mode, bus, OTA, RX freshness, gear,
+ *               speed, min interval, and the per-action session enable
+ *   the row     the chokepoint has to have a row for this action at all
+ *
+ * WHAT IS NOT, AND WHY IT CANNOT BE
+ *   the emitter and the byte-level chokepoint both need the car's template.
+ *   There is no way to ask their STRUCTURAL questions (right mux, inside the
+ *   mask) while skipping their TIMING one, because without a fresh template
+ *   there is no frame to ask them about. So this function does not try.
+ *
+ * 🔴 THE SHAPE IS THE PROOF: there is no FsdPipeFrames parameter, so this
+ * cannot consult a template even by mistake -- the same argument
+ * fsd_pipe_release() makes by not taking FsdBodyInputs.
+ *
+ * 🔴 A RESULT WITH stage == FSD_PIPE_OK IS PERMISSION, NOT A FRAME. bus stays
+ * FSD_PIPE_BUS_NONE and frame stays zeroed, so a caller that ships one anyway
+ * is refused by name rather than putting id 0 on the bus.
+ *
+ * Safe with any NULL: returns 0.
+ */
+uint8_t fsd_pipe_decide(const FsdRules* rules, const FsdTriggerEvent* ev,
+                        const FsdBodyInputs* in, uint32_t now_ms, FsdPipeResult* out,
+                        uint8_t max_out);
 
 /** Human-readable stage, for logs and the app. */
 const char* fsd_pipe_stage_str(FsdPipeStage s);

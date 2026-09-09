@@ -135,10 +135,92 @@ static void emit_and_check(FsdBodyAction action, int32_t arg, const FsdPipeFrame
     r->frame = frame;
 }
 
-uint8_t fsd_pipe_run(const FsdRules* rules, const FsdTriggerEvent* ev, const FsdBodyInputs* in,
-                     const FsdPipeFrames* f, uint32_t now_ms, FsdPipeResult* out,
-                     uint8_t max_out) {
-    if(!rules || !ev || !in || !f || !out || max_out == 0u) return 0;
+
+/* The half of a decision that needs nothing from the car but its permission
+ * inputs: the axis allows this action, and the chokepoint has a row for it.
+ * Returns true when the decision is still alive; `r` carries the refusal
+ * otherwise, already named.
+ *
+ * Split out on 2026-09-09 so the press can stop where the answers stop being
+ * knowable -- see fsd_pipe_decide() in the header for the measurement. */
+static bool decide_one(FsdBodyAction action, int32_t arg, uint8_t rule_index,
+                       const FsdBodyInputs* in, uint32_t now_ms, FsdPipeResult* r) {
+    memset(r, 0, sizeof(*r));
+    /* 0 is can0. A refusal must not hand back a plausible channel, for the
+     * same reason the frame is zeroed rather than left stale -- and a PRESS
+     * keeps this value even when it succeeds, because a press has no channel:
+     * the template it will eventually copy has not arrived yet. */
+    r->bus = FSD_PIPE_BUS_NONE;
+    r->rule_index = rule_index;
+    r->action = action;
+    r->arg = arg;
+
+    /* 1. The permission axis. Asked FIRST, before a frame is built, so a
+     * refusal never depends on whether the bytes happened to work out. */
+    const FsdBodyVerdict bv = fsd_body_allows(in, action, now_ms);
+    if(bv != FSD_BODY_OK) {
+        r->stage = FSD_PIPE_BLOCKED_BODY;
+        r->reason = (uint8_t)bv;
+        return false;
+    }
+
+    /* An action out of range cannot index the template array. The axis above
+     * already refuses it (FSD_BODY_UNKNOWN_ACTION), so this is a second check
+     * on the same fact -- kept because the one thing it guards is a read past
+     * the end of a stack array. */
+    if((uint8_t)action >= (uint8_t)FSD_ACT_COUNT) {
+        r->stage = FSD_PIPE_BLOCKED_BODY;
+        r->reason = (uint8_t)FSD_BODY_UNKNOWN_ACTION;
+        return false;
+    }
+
+    /* 2. Does the chokepoint have a row for this action?
+     *
+     * 🔴 ASKED HERE, BEFORE THE EMITTER, AND THE ORDER IS THE POINT.
+     * An action with no row never gets a template stored either -- the store
+     * is keyed off the same table -- so leaving this until the emitter means
+     * the refusal reads NO_TEMPLATE, i.e. "the car has not sent that frame".
+     * For the map light, the door and the hazards that is exactly wrong: the
+     * car sends those frames constantly and the emitter can build all three.
+     * What is missing is a row, i.e. a deliberate decision to open them, which
+     * is a thing a person does and not a thing a bus does. Sending someone to
+     * look at their wiring over it would be this file's fault.
+     *
+     * 🟢 It also belongs on the PRESS side for its own reason: it is a fact
+     * about the firmware, knowable at any instant, and worth saying under the
+     * finger rather than 500 ms later.
+     *
+     * ⚠️ UNREACHABLE TODAY, AND SAID OUT LOUD BECAUSE A MUTATION PROVED IT
+     * (2026-09-09): deleting this check breaks no test. fsd_body_wire() only
+     * returns NULL for an out-of-range action or an absent row, all eleven
+     * actions have rows, and the axis refuses out-of-range first with
+     * UNKNOWN_ACTION. So this is the same shape as the range check above it --
+     * a guard for a state the code cannot currently be in.
+     *
+     * 🔴 It stays, and the reason is what it costs to be without it. Add a
+     * twelfth action and forget its row, and the emitter answers NO_TEMPLATE:
+     * "the car has not sent that frame". That sends the next person to look at
+     * their wiring for a fault that is one line of a table. This check makes
+     * the same mistake say NO_ROW.
+     *
+     * 🟢 It becomes reachable the moment a row is missing, which is exactly
+     * when it is needed. That is not a hole -- but it does mean no test is
+     * holding it, so do not read a green suite as evidence it works. */
+    if(!fsd_body_wire(action)) {
+        r->stage = FSD_PIPE_BLOCKED_WIRE;
+        r->reason = (uint8_t)FSD_WIRE_NO_ROW;
+        return false;
+    }
+
+    r->stage = FSD_PIPE_OK;
+    r->reason = 0u;
+    return true;
+}
+
+uint8_t fsd_pipe_decide(const FsdRules* rules, const FsdTriggerEvent* ev,
+                        const FsdBodyInputs* in, uint32_t now_ms, FsdPipeResult* out,
+                        uint8_t max_out) {
+    if(!rules || !ev || !in || !out || max_out == 0u) return 0;
 
     FsdRuleDecision dec[FSD_PIPE_MAX_OUT];
     uint8_t want = max_out;
@@ -147,79 +229,33 @@ uint8_t fsd_pipe_run(const FsdRules* rules, const FsdTriggerEvent* ev, const Fsd
     const uint8_t n = fsd_rules_match(rules, ev, dec, want);
 
     for(uint8_t i = 0; i < n; i++)
-        fsd_pipe_one(dec[i].action, dec[i].arg, dec[i].rule_index, in, f,
-                     now_ms, &out[i]);
+        (void)decide_one(dec[i].action, dec[i].arg, dec[i].rule_index, in, now_ms, &out[i]);
 
     return n;
 }
 
-/* One decision, four gates. Split out of fsd_pipe_run() on 2026-09-07 so a
- * BURST can reuse it.
+/* One decision, four gates, run at the car's own arrival of this id.
  *
- * The first frame of a burst comes from a rule match; the rest come from the
- * car's next 0x249 arrivals. Every one of them faces the same four refusals.
- * A burst that skipped the axis would be a rule that keeps acting after the
- * belt comes off -- which is precisely the gate the car proved this morning. */
+ * 🔴 THIS IS THE ONLY FUNCTION IN THE CODEBASE THAT PRODUCES A FRAME TO SEND.
+ * The press decides (fsd_pipe_decide) and arms; every frame that leaves the
+ * board -- the first of a burst and its repeats alike -- is built here, on an
+ * arrival, 0-1 ms behind the frame it copied.
+ *
+ * The axis is asked AGAIN here rather than trusted from the press, and that is
+ * deliberate: a burst that skipped it would be a rule that keeps acting after
+ * the conditions it was granted under have gone. */
 void fsd_pipe_one(FsdBodyAction action, int32_t arg, uint8_t rule_index,
                   const FsdBodyInputs* in, const FsdPipeFrames* f,
                   uint32_t now_ms, FsdPipeResult* out) {
     if(!in || !f || !out) return;
-    {
-        FsdRuleDecision dec[1];
-        FsdPipeResult* r = out;
-        const uint8_t i = 0;
-        dec[0].action = action;
-        dec[0].arg = arg;
-        dec[0].rule_index = rule_index;
-        memset(r, 0, sizeof(*r));
-        /* 0 is can0. A refusal must not hand back a plausible channel,
-         * for the same reason the frame is zeroed rather than left stale. */
-        r->bus = FSD_PIPE_BUS_NONE;
-        r->rule_index = dec[i].rule_index;
-        r->action = dec[i].action;
-        r->arg = dec[i].arg;
 
-        /* 1. The permission axis. Asked FIRST, before a frame is built, so a
-         * refusal never depends on whether the bytes happened to work out. */
-        const FsdBodyVerdict bv = fsd_body_allows(in, dec[i].action, now_ms);
-        if(bv != FSD_BODY_OK) {
-            r->stage = FSD_PIPE_BLOCKED_BODY;
-            r->reason = (uint8_t)bv;
-            return;
-        }
+    /* 1 and 2. The axis and the row -- the questions a press can also answer. */
+    if(!decide_one(action, arg, rule_index, in, now_ms, out)) return;
 
-        /* An action out of range cannot index the template array. The axis
-         * above already refuses it (FSD_BODY_UNKNOWN_ACTION), so this is a
-         * second check on the same fact -- kept because the one thing it
-         * guards is a read past the end of a stack array. */
-        if((uint8_t)dec[i].action >= (uint8_t)FSD_ACT_COUNT) {
-            r->stage = FSD_PIPE_BLOCKED_BODY;
-            r->reason = (uint8_t)FSD_BODY_UNKNOWN_ACTION;
-            return;
-        }
-
-        /* 2. Does the chokepoint have a row for this action?
-         *
-         * 🔴 ASKED HERE, BEFORE THE EMITTER, AND THE ORDER IS THE POINT.
-         * An action with no row never gets a template stored either -- the
-         * store is keyed off the same table -- so leaving this until step 4
-         * means the emitter refuses first, with NO_TEMPLATE, which reads as
-         * "the car has not sent that frame". For the map light, the door and
-         * the hazards that is exactly wrong: the car sends those frames
-         * constantly and the emitter can build all three. What is missing is a
-         * row, i.e. a deliberate decision to open them, which is a thing a
-         * person does and not a thing a bus does. Sending someone to look at
-         * their wiring over it would be this file's fault. */
-        if(!fsd_body_wire(dec[i].action)) {
-            r->stage = FSD_PIPE_BLOCKED_WIRE;
-            r->reason = (uint8_t)FSD_WIRE_NO_ROW;
-            return;
-        }
-
-        /* 3 and 4. The emitter, then the chokepoint -- the same two steps a
-         * release takes, in the same order, from the same function. */
-        emit_and_check(dec[i].action, dec[i].arg, f, now_ms, false, r);
-    }
+    /* 3 and 4. The emitter, then the chokepoint -- the same two steps a
+     * release takes, in the same order, from the same function. Both need the
+     * car's template, which is why neither is asked at the press. */
+    emit_and_check(action, arg, f, now_ms, false, out);
 }
 
 void fsd_pipe_release(FsdBodyAction action, int32_t arg, uint8_t rule_index,
