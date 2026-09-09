@@ -188,7 +188,24 @@ static bool decide_one(FsdBodyAction action, int32_t arg, uint8_t rule_index,
      *
      * 🟢 It also belongs on the PRESS side for its own reason: it is a fact
      * about the firmware, knowable at any instant, and worth saying under the
-     * finger rather than 500 ms later. */
+     * finger rather than 500 ms later.
+     *
+     * ⚠️ UNREACHABLE TODAY, AND SAID OUT LOUD BECAUSE A MUTATION PROVED IT
+     * (2026-09-09): deleting this check breaks no test. fsd_body_wire() only
+     * returns NULL for an out-of-range action or an absent row, all eleven
+     * actions have rows, and the axis refuses out-of-range first with
+     * UNKNOWN_ACTION. So this is the same shape as the range check above it --
+     * a guard for a state the code cannot currently be in.
+     *
+     * 🔴 It stays, and the reason is what it costs to be without it. Add a
+     * twelfth action and forget its row, and the emitter answers NO_TEMPLATE:
+     * "the car has not sent that frame". That sends the next person to look at
+     * their wiring for a fault that is one line of a table. This check makes
+     * the same mistake say NO_ROW.
+     *
+     * 🟢 It becomes reachable the moment a row is missing, which is exactly
+     * when it is needed. That is not a hole -- but it does mean no test is
+     * holding it, so do not read a green suite as evidence it works. */
     if(!fsd_body_wire(action)) {
         r->stage = FSD_PIPE_BLOCKED_WIRE;
         r->reason = (uint8_t)FSD_WIRE_NO_ROW;
