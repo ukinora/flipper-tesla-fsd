@@ -1051,28 +1051,24 @@ class CommandCB : public NimBLECharacteristicCallbacks {
          * satisfy. A refused fix is answered so the app can say so rather than
          * appear to be working. */
         case BLE_CMD_GPS_FIX: {
-            if (v.size() < 1u + BLE_GPS_FIX_LEN) {
+            if (v.size() < 1u + FSD_GPS_BLE_FIX_LEN) {
                 ble_send_result(cmd, BLE_RES_REJECTED, (uint16_t)v.size());
                 break;
             }
-            const uint8_t* b = (const uint8_t*)v.data() + 1;
-            const int32_t lat = (int32_t)((uint32_t)b[0] | ((uint32_t)b[1] << 8) |
-                                          ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24));
-            const int32_t lon = (int32_t)((uint32_t)b[4] | ((uint32_t)b[5] << 8) |
-                                          ((uint32_t)b[6] << 16) | ((uint32_t)b[7] << 24));
-            const uint16_t acc_cm  = (uint16_t)((uint16_t)b[8]  | ((uint16_t)b[9] << 8));
-            const uint16_t brg_cd  = (uint16_t)((uint16_t)b[10] | ((uint16_t)b[11] << 8));
-            const uint16_t spd_ckh = (uint16_t)((uint16_t)b[12] | ((uint16_t)b[13] << 8));
-            const uint32_t age_ms  = (uint32_t)b[14] | ((uint32_t)b[15] << 8) |
-                                     ((uint32_t)b[16] << 16);
-
-            /* 0 means unknown, the convention FsdCamFix documents. Sending it as
-             * 0.0f rather than as a tiny number keeps that distinction. */
-            const float acc_m = (acc_cm == 0u) ? 0.0f : (float)acc_cm * 0.01f;
+            /* 🔴 UNPACKED IN fsd_logic, NOT HERE. A byte layout written in this
+             * file is one no host test can reach, and this repo has paid for
+             * that twice (the OTA verdict and the battery field each lived in
+             * two copies and only one was tested). */
+            FsdGpsBleFix f;
+            if (!fsd_gps_unpack_ble_fix((const uint8_t*)v.data() + 1,
+                                        v.size() - 1u, &f)) {
+                ble_send_result(cmd, BLE_RES_REJECTED, (uint16_t)v.size());
+                break;
+            }
 
             const bool ok = camera_task_observe_phone_fix(
-                lat, lon, acc_m, (float)brg_cd * 0.01f, (float)spd_ckh * 0.01f,
-                fsd_gps_stamp_for_age(millis(), age_ms));
+                f.lat_e7, f.lon_e7, f.accuracy_m, f.bearing_deg, f.speed_kph,
+                fsd_gps_stamp_for_age(millis(), f.age_ms));
             ble_send_result(cmd, ok ? BLE_RES_OK : BLE_RES_REJECTED,
                             (uint16_t)camera_task_gps_verdict());
             break;

@@ -157,6 +157,25 @@ bool fsd_gps_observe_position(FsdGps* g, const uint8_t* data, uint8_t dlc, uint3
     return true;
 }
 
+bool fsd_gps_unpack_ble_fix(const uint8_t* b, size_t n, FsdGpsBleFix* out) {
+    if (!b || !out || n < FSD_GPS_BLE_FIX_LEN) return false;
+
+    out->lat_e7 = (int32_t)((uint32_t)b[0] | ((uint32_t)b[1] << 8) |
+                            ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24));
+    out->lon_e7 = (int32_t)((uint32_t)b[4] | ((uint32_t)b[5] << 8) |
+                            ((uint32_t)b[6] << 16) | ((uint32_t)b[7] << 24));
+
+    const uint16_t acc_cm = (uint16_t)((uint16_t)b[8] | ((uint16_t)b[9] << 8));
+    /* Zero stays zero rather than becoming 0.00 m: FsdCamFix documents <= 0 as
+     * "unknown", and a source claiming zero error is describing itself. */
+    out->accuracy_m = (acc_cm == 0u) ? 0.0f : (float)acc_cm * 0.01f;
+
+    out->bearing_deg = (float)((uint16_t)b[10] | ((uint16_t)b[11] << 8)) * 0.01f;
+    out->speed_kph = (float)((uint16_t)b[12] | ((uint16_t)b[13] << 8)) * 0.01f;
+    out->age_ms = (uint32_t)b[14] | ((uint32_t)b[15] << 8) | ((uint32_t)b[16] << 16);
+    return true;
+}
+
 uint32_t fsd_gps_stamp_for_age(uint32_t now_ms, uint32_t age_ms) {
     return (age_ms >= now_ms) ? 0u : (uint32_t)(now_ms - age_ms);
 }

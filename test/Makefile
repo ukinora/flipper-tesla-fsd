@@ -128,7 +128,7 @@ test_btn_j6: $(J6_SRC) $(ROOT)/fsd_logic/fsd_btn_j6.h $(ROOT)/fsd_logic/fsd_butt
 # dependencies (trigger -> button, signal, body). The app hand-writes the same
 # 12-byte layout in Rules.kt; without vectors the two copies only ever agreed
 # because someone read the same paragraph twice.
-WIRE_SRC := test_wire.c $(ROOT)/fsd_logic/fsd_wire.c $(ROOT)/fsd_logic/fsd_rules.c             $(ROOT)/fsd_logic/fsd_trigger.c $(ROOT)/fsd_logic/fsd_signal.c             $(ROOT)/fsd_logic/fsd_button.c $(ROOT)/fsd_logic/fsd_body.c
+WIRE_SRC := test_wire.c $(ROOT)/fsd_logic/fsd_wire.c $(ROOT)/fsd_logic/fsd_rules.c             $(ROOT)/fsd_logic/fsd_trigger.c $(ROOT)/fsd_logic/fsd_signal.c             $(ROOT)/fsd_logic/fsd_button.c $(ROOT)/fsd_logic/fsd_body.c $(ROOT)/fsd_logic/fsd_gps.c $(ROOT)/fsd_logic/fsd_camera.c
 
 test_wire: $(WIRE_SRC) $(ROOT)/fsd_logic/fsd_wire.h $(ROOT)/fsd_logic/fsd_rules.h
 	$(CC) $(CFLAGS) -I$(ROOT)/fsd_logic $(WIRE_SRC) -o $@

@@ -104,7 +104,7 @@
  * the module stamps arrival, not measurement. Subtracting the age is what keeps
  * a cached fix from looking fresh. */
 #define BLE_CMD_GPS_FIX      0x42u
-#define BLE_GPS_FIX_LEN      17u
+/* 길이는 FSD_GPS_BLE_FIX_LEN 하나뿐이다 — 여기 사본을 두면 갈라진다 */
 
 #define BLE_CMD_PING         0x50u
 
