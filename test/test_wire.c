@@ -806,7 +806,7 @@ static void emit_fixture(FILE* f) {
                 "\"hw\": %u, \"speed_profile\": %u, \"ap_state\": %u, "
                 "\"speed_kph_x10\": %u, \"soc\": %u, \"gear\": %u, "
                 "\"speed_limit\": %u, \"rx_fps\": %u, \"crc_err\": %u, "
-                "\"uptime_s\": %u, \"blink_l\": %u, \"blink_r\": %u, \"limit_src\": %u, \"bs_l\": %u, \"bs_r\": %u, \"tyre0\": %u, \"tyre1\": %u, \"tyre2\": %u, \"tyre3\": %u, \"ui_soc\": %u, \"ui_range\": %u, \"rule_armed\": %s } }%s\n",
+                "\"uptime_s\": %u, \"blink_l\": %u, \"blink_r\": %u, \"limit_src\": %u, \"bs_l\": %u, \"bs_r\": %u, \"tyre0\": %u, \"tyre1\": %u, \"tyre2\": %u, \"tyre3\": %u, \"ui_soc\": %u, \"ui_range\": %u, \"rule_armed\": %u } }%s\n",
                 (unsigned)b[0], (unsigned)b[1], (unsigned)w->op_mode,
                 (unsigned)w->hw_version, (unsigned)b[4], (unsigned)w->ap_state,
                 (unsigned)le16(&b[6]), (unsigned)b[8], (unsigned)w->gear,
@@ -817,7 +817,11 @@ static void emit_fixture(FILE* f) {
                 (unsigned)(b[21] & 0x03u), (unsigned)((b[21] >> 2) & 0x03u),
                 (unsigned)b[22], (unsigned)b[23], (unsigned)b[24], (unsigned)b[25],
                 (unsigned)b[28], (unsigned)le16(&b[29]),
-                (b[1] & 0x80u) ? "true" : "false",
+                /* 0/1, not true/false. Every other value in this fixture is a
+                 * number and the Kotlin loader reads them ALL as integers -- a
+                 * JSON boolean here does not make one field awkward, it makes
+                 * the whole file refuse to load. */
+                (unsigned)((b[1] >> 7) & 1u),
                 (i + 1 < ns) ? "," : "");
     }
     fprintf(f, "  ],\n  \"camstat\": [\n");
