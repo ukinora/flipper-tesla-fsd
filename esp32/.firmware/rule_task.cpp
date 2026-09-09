@@ -323,7 +323,17 @@ static void run_event(const FsdTriggerEvent* ev, uint32_t now_ms) {
 
     FsdPipeResult out[FSD_PIPE_MAX_OUT];
     memset(out, 0, sizeof(out));
-    const uint8_t n = fsd_pipe_run(rules, ev, &in, &g_frames, now_ms, out, FSD_PIPE_MAX_OUT);
+    /* 🔴 THE PRESS DECIDES; IT DOES NOT BUILD. Until 2026-09-09 this was
+     * fsd_pipe_run(), which ran all four layers here -- and the chokepoint's
+     * freshness question made every press on a 500 ms frame a 40 % coin flip.
+     * The car measured it: the mirror moved on 7 of 19 presses. Nothing was
+     * wrong with the frames that went out; they were simply the ones whose
+     * finger happened to land inside the window.
+     *
+     * fsd_pipe_decide() takes no template store, so the question cannot be
+     * asked here even by accident. It is asked below, in burst_on_frame(),
+     * where the answer is always yes because that IS the arrival. */
+    const uint8_t n = fsd_pipe_decide(rules, ev, &in, now_ms, out, FSD_PIPE_MAX_OUT);
 
     for (uint8_t i = 0; i < n; i++) {
         /* 🔴 NOTHING IS SENT HERE. This used to ship frame one immediately and
