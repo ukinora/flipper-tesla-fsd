@@ -130,8 +130,13 @@ test_btn_j6: $(J6_SRC) $(ROOT)/fsd_logic/fsd_btn_j6.h $(ROOT)/fsd_logic/fsd_butt
 # because someone read the same paragraph twice.
 WIRE_SRC := test_wire.c $(ROOT)/fsd_logic/fsd_wire.c $(ROOT)/fsd_logic/fsd_rules.c             $(ROOT)/fsd_logic/fsd_trigger.c $(ROOT)/fsd_logic/fsd_signal.c             $(ROOT)/fsd_logic/fsd_button.c $(ROOT)/fsd_logic/fsd_body.c $(ROOT)/fsd_logic/fsd_gps.c $(ROOT)/fsd_logic/fsd_camera.c
 
+# 🔴 `-lm` 이 필요하다. fsd_camera.c 가 sqrtf/cosf/sinf 를 쓰는데, **MinGW 는
+# libm 을 자동으로 링크하고 glibc 는 안 한다** — 그래서 이 줄이 없어도 내
+# 로컬은 통과하고 CI 만 터진다. CLAUDE.md 가 "Docker 로 갈아타는 조건" 넷 중
+# 넷째로 *"로컬은 통과했는데 CI 가 실패한다"* 를 적어 두고 그 축으로 libm 을
+# 이름까지 들어 놓았는데, 실제로 물린 것은 2026-09-09 이 처음이다.
 test_wire: $(WIRE_SRC) $(ROOT)/fsd_logic/fsd_wire.h $(ROOT)/fsd_logic/fsd_rules.h
-	$(CC) $(CFLAGS) -I$(ROOT)/fsd_logic $(WIRE_SRC) -o $@
+	$(CC) $(CFLAGS) -I$(ROOT)/fsd_logic $(WIRE_SRC) -o $@ -lm
 
 # The Capability document's renderer. Pure C on purpose: this document has
 # outgrown the 512-byte ATT limit three times, and every time the overflow was
