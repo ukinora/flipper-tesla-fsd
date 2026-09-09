@@ -130,6 +130,13 @@ test_btn_j6: $(J6_SRC) $(ROOT)/fsd_logic/fsd_btn_j6.h $(ROOT)/fsd_logic/fsd_butt
 # because someone read the same paragraph twice.
 WIRE_SRC := test_wire.c $(ROOT)/fsd_logic/fsd_wire.c $(ROOT)/fsd_logic/fsd_rules.c             $(ROOT)/fsd_logic/fsd_trigger.c $(ROOT)/fsd_logic/fsd_signal.c             $(ROOT)/fsd_logic/fsd_button.c $(ROOT)/fsd_logic/fsd_body.c $(ROOT)/fsd_logic/fsd_gps.c $(ROOT)/fsd_logic/fsd_camera.c
 
+# 앱이 준 경로. fsd_camera.c 는 선분 거리 하나 때문에 들어오고, 그것이
+# sqrtf 를 쓰므로 -lm 이 필요하다 (같은 이유로 test_wire 도 붙였다).
+ROUTE_SRC := test_route.c $(ROOT)/fsd_logic/fsd_route.c $(ROOT)/fsd_logic/fsd_camera.c
+
+test_route: $(ROUTE_SRC) $(ROOT)/fsd_logic/fsd_route.h $(ROOT)/fsd_logic/fsd_camera.h
+	$(CC) $(CFLAGS) -I$(ROOT)/fsd_logic $(ROUTE_SRC) -o $@ -lm
+
 # 🔴 `-lm` 이 필요하다. fsd_camera.c 가 sqrtf/cosf/sinf 를 쓰는데, **MinGW 는
 # libm 을 자동으로 링크하고 glibc 는 안 한다** — 그래서 이 줄이 없어도 내
 # 로컬은 통과하고 CI 만 터진다. CLAUDE.md 가 "Docker 로 갈아타는 조건" 넷 중
@@ -147,7 +154,7 @@ CAPJSON_SRC := test_cap_json.c $(ROOT)/fsd_logic/fsd_cap_json.c
 test_cap_json: $(CAPJSON_SRC) $(ROOT)/fsd_logic/fsd_cap_json.h
 	$(CC) $(CFLAGS) -I$(ROOT)/fsd_logic $(CAPJSON_SRC) -o $@
 
-check: test_pipeline test_fsd_core test_speed_profile test_camera test_gps test_body test_body_emit test_body_wire test_signal test_trigger test_rules test_button test_btn_j6 test_wire test_cap_json
+check: test_pipeline test_fsd_core test_speed_profile test_camera test_gps test_body test_body_emit test_body_wire test_signal test_trigger test_rules test_button test_btn_j6 test_wire test_cap_json test_route
 	./test_pipeline
 	./test_fsd_core
 	./test_speed_profile
@@ -163,6 +170,7 @@ check: test_pipeline test_fsd_core test_speed_profile test_camera test_gps test_
 	./test_btn_j6
 	./test_wire
 	./test_cap_json
+	./test_route
 
 clean:
 	rm -rf test_pipeline test_fsd_core test_speed_profile test_camera test_gps test_body test_body_emit test_body_wire test_signal test_trigger test_rules test_button test_btn_j6 test_wire test_cap_json *.dSYM

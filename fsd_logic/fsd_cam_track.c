@@ -544,13 +544,15 @@ bool fsd_trk_load(FsdTracker* t, FsdTrkReadFn read, void* ctx) {
     return true;
 }
 
-bool fsd_trk_nearest(const FsdTracker* t, FsdCamRecord* cam_out, uint64_t* key_out,
-                     float* distance_out) {
+bool fsd_trk_nearest_where(const FsdTracker* t, FsdTrkKeepFn keep, void* ctx,
+                           FsdCamRecord* cam_out, uint64_t* key_out,
+                           float* distance_out) {
     if(!t) return false;
     const FsdTrkActive* best = NULL;
     for(int i = 0; i < FSD_TRK_ACTIVE_MAX; i++) {
         const FsdTrkActive* st = &t->active[i];
         if(!st->used) continue;
+        if(keep && !keep(ctx, &st->cam)) continue;
         if(!best || st->last_dist_m < best->last_dist_m) best = st;
     }
     if(!best) return false;
@@ -558,4 +560,9 @@ bool fsd_trk_nearest(const FsdTracker* t, FsdCamRecord* cam_out, uint64_t* key_o
     if(key_out) *key_out = best->key;
     if(distance_out) *distance_out = best->last_dist_m;
     return true;
+}
+
+bool fsd_trk_nearest(const FsdTracker* t, FsdCamRecord* cam_out, uint64_t* key_out,
+                     float* distance_out) {
+    return fsd_trk_nearest_where(t, NULL, NULL, cam_out, key_out, distance_out);
 }

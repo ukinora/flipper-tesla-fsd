@@ -106,6 +106,23 @@
 #define BLE_CMD_GPS_FIX      0x42u
 /* 길이는 FSD_GPS_BLE_FIX_LEN 하나뿐이다 — 여기 사본을 두면 갈라진다 */
 
+/* 앱이 준 경로 한 조각. 명령 바이트 뒤로:
+ *
+ *   [0..1]  uint16 seq    — 이 조각의 **첫 점 번호** (청크 번호가 아니다)
+ *   [2..3]  uint16 total  — 경로 전체의 점 수
+ *   [4.. ]  점들, 한 점이 8 B — int32 lat_e7 · int32 lon_e7, 리틀엔디언
+ *
+ * 🔴 seq 가 청크 번호가 아니라 **점 번호**인 이유: MTU 에 따라 조각 크기가
+ * 달라져도 붙는 자리가 흔들리지 않는다. seq 0 은 언제나 새 경로다.
+ *
+ * 🔴 이것은 게이트가 아니라 덤이다. 경로가 없거나 우리가 그 경로를 벗어나면
+ * 모듈은 경로가 생기기 전과 정확히 같이 동작한다 — fsd_route.h 참조. */
+#define BLE_CMD_ROUTE_SET    0x43u
+#define BLE_ROUTE_HDR        4u
+
+/** 경로를 버린다. 목적지를 지웠을 때. */
+#define BLE_CMD_ROUTE_CLEAR  0x44u
+
 #define BLE_CMD_PING         0x50u
 
 /* ── Bluetooth button (BLE Central) ───────────────────────────────────────────
