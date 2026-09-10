@@ -106,7 +106,6 @@ typedef struct {
     uint32_t window_start_ms;
     uint16_t window_count;
     uint16_t total_actions;
-    FsdBodyVerdict last_verdict;
 } FsdT1;
 
 /** Reset. Leaves both sides unseen, so every aggregate fails closed. */
@@ -119,18 +118,25 @@ void fsd_t1_init(FsdT1* t);
 void fsd_t1_observe_door(FsdT1* t, FsdBodySide side, uint32_t can_id, const uint8_t* data,
                          uint8_t dlc, uint32_t now_ms);
 
-/** Advance. Returns an action ONLY on an aggregate edge, only once per edge,
- *  and only when fsd_body_allows() says yes — the verdict is stored either way
- *  so the app can show which gate refused. */
-FsdT1Action fsd_t1_tick(FsdT1* t, const FsdBodyInputs* in, uint32_t now_ms);
+/* How recently a side must have spoken to count. NOT a gate -- it is "can I
+ * see this door right now", and a side that has gone quiet makes every
+ * aggregate needing it fail closed. Was FSD_BODY_FRESH_MS until the axis that
+ * owned that constant was removed (2026-09-10). */
+#define FSD_T1_FRESH_MS 1000u
+
+/** Advance. Returns an action ONLY on an aggregate edge and only once per edge.
+ *
+ *  🔴 IT USED TO ASK fsd_body_allows() TOO, and store the refusal so the app
+ *  could show which gate stopped it. The axis is gone (owner's instruction,
+ *  2026-09-10) and so is the question -- T1 measures, it does not transmit. */
+FsdT1Action fsd_t1_tick(FsdT1* t, uint32_t now_ms);
 
 /** Last raw latch nibble for a side, whatever it was. For bring-up: a build
  *  that only ever emits three of the nine enum values is worth knowing about. */
 uint8_t fsd_t1_latch_raw(const FsdT1* t, FsdBodySide side);
 
-/** Actions taken in the current window, and the verdict at the last edge. */
+/** Actions taken in the current window. */
 uint16_t fsd_t1_window_count(const FsdT1* t);
-FsdBodyVerdict fsd_t1_last_verdict(const FsdT1* t);
 
 #ifdef __cplusplus
 }

@@ -40,7 +40,7 @@
 // refuses the whole notification rather than misreading it, so the dashboard
 // goes blank rather than wrong -- which is the right failure and still a
 // failure. Ship both or neither.
-#define BLE_PROTO_VERSION 9
+#define BLE_PROTO_VERSION 10
 
 // State notify cadence. With nobody subscribed the tick returns before the
 // serialisation — it stops rather than slowing down, which is worth saying
@@ -186,36 +186,23 @@
 #define BLE_CMD_RULE_SET     0x70u  // result tag for a RULES write. Never sent to us.
 #define BLE_CMD_RULE_CLEAR   0x71u  // arg: rule number, 0xFF = all
 
-/* arg: 0 = lock transmission, 1 = allow it. Dies with the power, like the
- * serial `rulearm` it mirrors -- this is the same switch, not a second one.
+/* 🔴🔴 `BLE_CMD_RULE_ARM 0x72u` STOOD HERE FOR ONE DAY (2026-09-10). It let
+ * the phone open and close the transmit unlock, which until that morning
+ * existed only on the serial cable -- the single reason a laptop went to the
+ * car. The owner then deleted every safety gate ("차의 모든 안전게이트관련
+ * 사항을 삭제해라"), the unlock among them, and a command that locks nothing
+ * is a command with nothing to say.
  *
- * 🔴 WHY IT DID NOT EXIST, DECIDED BEFORE IT WAS BUILT (2026-09-10). The
- * switch had exactly two callers, both in main.cpp's serial handler, and the
- * app could neither set it nor see it -- RuleEditScreen.kt says only "송신
- * 허용이 따로 필요하다. 그것은 이 화면에 없다". So the question was whether
- * serial-only was a DESIGN -- two locks on two channels, so one stolen phone
- * opens neither -- or simply a thing nobody had written.
+ * 🔴 **0x72 STAYS EMPTY.** An older phone can still be paired and can still
+ * send it; if a future command took that number, that phone would fire it
+ * while drawing "송신 허용" on its own screen. The next rule-side command
+ * starts at 0x73.
  *
- * It was the second, and the evidence is that the phone already holds the
- * bigger key: SET_MODE(Active) opens the CAN controllers themselves. A design
- * that split the locks across channels on purpose would not have put the
- * hardware transmit enable on the phone and the software one on a cable.
- * rule_task.h's own comment argues only that the switch is SESSION-SCOPED; it
- * never claims the channel is part of the guarantee.
- *
- * ⚠️ IT IS STILL AN EXPANSION AND SAYING SO IS THE POINT. Until today a phone
- * alone could not put a body frame on the bus; now it can, given a mapping the
- * owner made, Active, and every gate on the permission axis. That is what the
- * owner asked for. What did NOT change: the axis, the emitter, the bit-level
- * chokepoint, send_on_bus()'s ID refusals, and the driver's Listen-Only.
- *
- * 🟢 OWNER-BONDED PHONE ONLY -- and nothing here has to arrange that. Every
- * command goes through one owner check at the top of CommandCB::onWrite, put
- * there because "encrypted" only means nobody is listening in: this board has
- * no display, so Just Works is the only pairing it can do and anyone beside a
- * parked car can complete it. A second check in this case would be a copy of
- * that one, and copies of checks are how they come to disagree. */
-#define BLE_CMD_RULE_ARM     0x72u
+ * 🟢 The owner check it relied on is unchanged and belongs to every command,
+ * once, at the top of CommandCB::onWrite -- "encrypted" only means nobody is
+ * listening in, and this board has no display, so Just Works is the only
+ * pairing it can do and anyone beside a parked car can complete it. A
+ * per-command copy of that check is how checks come to disagree. */
 
 /* ── OTA — 폰이 보낸 펌웨어를 다음 칸에 굽는다 ────────────────────────────────
  *

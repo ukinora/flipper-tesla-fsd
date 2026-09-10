@@ -7,6 +7,14 @@
  * and — for the one action that can get all the way through today — that the
  * bytes it produces are the bytes TSL sent.
  *
+ * 🔴🔴 THERE WERE FOUR LAYERS UNTIL 2026-09-10 AND NOW THERE ARE THREE. The
+ * permission axis was deleted on the owner's instruction — "차의 모든
+ * 안전게이트관련사항을 삭제해라" — and the six hundred-odd assertions that
+ * tested it went with the code they were about, not because testing was given
+ * up. What guards the bus now is the row, the template and the bit-level
+ * chokepoint, and test_no_gate_stands_in_front_of_a_press() at the bottom of
+ * this file is what turns red if an axis grows back.
+ *
  * Every frame below is copied out of a capture. A table written to match the
  * implementation would only prove the table matches the implementation.
  *
@@ -16,7 +24,6 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "fsd_autonomy.h"
 #include "fsd_burst.h"
 #include "fsd_pipeline.h"
 
@@ -53,36 +60,6 @@ static const uint8_t BODY273[8] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0
  * whose release has to face the same denial the press does. */
 static const uint8_t HORN_MUX0[8] = {0x00, 0x55, 0x55, 0x55, 0x00, 0x00, 0x69, 0x85};
 
-/* Inputs with every gate satisfied. Individual tests spoil one at a time. */
-static FsdBodyInputs good_inputs(uint32_t now_ms) {
-    FsdBodyInputs in;
-    memset(&in, 0, sizeof(in));
-    in.op_mode = OpMode_Active;
-    in.bus_tx_open = true;
-    in.ota_in_progress = false;
-    in.rx_stale = false;
-
-
-    in.gear_seen = true;
-    in.gear = FSD_GEAR_D;
-    in.gear_ms = now_ms;
-
-    in.speed_seen = true;
-    in.speed_kph = 0;
-    in.speed_ms = now_ms;
-
-    in.belt_seen = true;
-    in.belt_latched = true;
-    in.belt_ms = now_ms;
-
-    in.passenger_seen = true;
-    in.passenger_present = false;
-    in.passenger_ms = now_ms;
-
-    for (unsigned a = 0; a < FSD_ACT_COUNT; a++) in.action_enabled[a] = true;
-    return in;
-}
-
 /* One enabled rule at index 0: this signal + kind fires this action. */
 static void one_rule(FsdRules *r, FsdSignal sig, FsdTriggerKind kind, int32_t value,
                      FsdBodyAction act, int32_t arg) {
@@ -115,9 +92,9 @@ static void dirty(FsdPipeResult *out) {
 /* THE PRODUCTION SEQUENCE, IN ONE CALL.
  *
  * The board does this in two moments: fsd_pipe_decide() under the finger, then
- * fsd_pipe_one() on the car's next frame of that id. Tests whose subject lives
- * below the axis -- the emitter, the chokepoint, the bytes -- want both halves
- * and do not care that they happen 0-500 ms apart, so they call this.
+ * fsd_pipe_one() on the car's next frame of that id. Tests whose subject is
+ * the emitter, the chokepoint or the bytes want both halves and do not care
+ * that they happen 0-500 ms apart, so they call this.
  *
  * 🔴 It is not a shortcut the firmware has. Nothing in esp32/ calls anything
  * shaped like this, and the reason is the whole point of the split: at the
@@ -125,13 +102,13 @@ static void dirty(FsdPipeResult *out) {
  * is zero. A test that wants to see that difference must use the two functions
  * directly -- test_a_press_is_not_the_moment_to_ask_about_freshness() does. */
 static uint8_t press_then_send(const FsdRules *rules, const FsdTriggerEvent *ev,
-                               const FsdBodyInputs *in, const FsdPipeFrames *f,
+                               const FsdPipeFrames *f,
                                uint32_t now, FsdPipeResult *out, uint8_t max_out) {
     if (!f) return 0; /* the send half has no template store to read */
-    const uint8_t n = fsd_pipe_decide(rules, ev, in, now, out, max_out);
+    const uint8_t n = fsd_pipe_decide(rules, ev, out, max_out);
     for (uint8_t i = 0; i < n; i++)
         if (out[i].stage == FSD_PIPE_OK)
-            fsd_pipe_one(out[i].action, out[i].arg, out[i].rule_index, in, f, now, &out[i]);
+            fsd_pipe_one(out[i].action, out[i].arg, out[i].rule_index, f, now, &out[i]);
     return n;
 }
 
@@ -218,12 +195,11 @@ static void test_turn_signal_end_to_end(void) {
     fsd_pipe_init(&f);
     (void)fsd_pipe_observe(&f, 1u, 0x249u, LSTALK, 4u, now);
 
-    const FsdBodyInputs in = good_inputs(now);
     const FsdTriggerEvent ev = ev_of(FSD_SIG_MAP_SW_FR, FSD_TRIG_PRESS, 0, now);
 
     FsdPipeResult out[FSD_PIPE_MAX_OUT];
     dirty(out);
-    const uint8_t n = press_then_send(&rules, &ev, &in, &f, now, out, FSD_PIPE_MAX_OUT);
+    const uint8_t n = press_then_send(&rules, &ev, &f, now, out, FSD_PIPE_MAX_OUT);
 
     CHECK(n == 1u, "one decision, got %u", (unsigned)n);
     if (n != 1u) return;
@@ -248,16 +224,6 @@ static void test_turn_signal_end_to_end(void) {
 
 /* ── the press asks the axis; the send asks the clock ──────────────────── */
 
-/* Inputs the mirror's row accepts: stopped, in park. good_inputs() puts the
- * car in D because most actions here allow it; the mirror does not, and that
- * refusal is a different assertion's subject. */
-static FsdBodyInputs parked_inputs(uint32_t now_ms) {
-    FsdBodyInputs in = good_inputs(now_ms);
-    in.gear = FSD_GEAR_P;
-    in.speed_kph = 0;
-    return in;
-}
-
 /* 🔴 THE CAR MEASURED THIS ON 2026-09-09. The mirror moved "sometimes" --
  * 19 presses, 7 frames on the bus, 37 %. That is not luck, it is arithmetic:
  * the press ran the whole pipeline, the chokepoint asks whether the car's own
@@ -273,8 +239,7 @@ static FsdBodyInputs parked_inputs(uint32_t now_ms) {
  * The freshness question therefore belongs to the send and to nothing else.
  * fsd_pipe_decide() is fsd_pipe_one() with that question -- and the frame it
  * guards -- left out. THE SHAPE IS THE PROOF: it takes no FsdPipeFrames, so it
- * cannot consult a template even by mistake. Same argument fsd_pipe_release()
- * makes by not taking FsdBodyInputs.
+ * cannot consult a template even by mistake.
  *
  * ⚠️ This is not "the chokepoint got weaker". Both halves are asserted below
  * at the same instant: the press says yes, the send says REF_STALE. Each is
@@ -295,13 +260,12 @@ static void test_a_press_is_not_the_moment_to_ask_about_freshness(void) {
     fsd_pipe_init(&f);
     (void)fsd_pipe_observe(&f, 1u, 0x273u, BODY273, 8u, seen);
 
-    const FsdBodyInputs in = parked_inputs(press);
     const FsdTriggerEvent ev = ev_of(FSD_SIG_MAP_SW_RL, FSD_TRIG_PRESS, 0, press);
 
     /* The send path, unchanged and still strict. */
     FsdPipeResult send;
     memset(&send, 0xAB, sizeof(send));
-    fsd_pipe_one(FSD_ACT_MIRROR, 1, 0u, &in, &f, press, &send);
+    fsd_pipe_one(FSD_ACT_MIRROR, 1, 0u, &f, press, &send);
     CHECK(send.stage == FSD_PIPE_BLOCKED_WIRE && send.reason == (uint8_t)FSD_WIRE_REF_STALE,
           "the send still refuses a 300 ms old template, got %s (%s)",
           fsd_pipe_stage_str(send.stage), fsd_pipe_reason_str(send.stage, send.reason));
@@ -309,7 +273,7 @@ static void test_a_press_is_not_the_moment_to_ask_about_freshness(void) {
     /* The press path, at the same instant, on the same store. */
     FsdPipeResult out[FSD_PIPE_MAX_OUT];
     dirty(out);
-    const uint8_t n = fsd_pipe_decide(&rules, &ev, &in, press, out, FSD_PIPE_MAX_OUT);
+    const uint8_t n = fsd_pipe_decide(&rules, &ev, out, FSD_PIPE_MAX_OUT);
 
     CHECK(n == 1u, "one decision, got %u", (unsigned)n);
     if (n != 1u) return;
@@ -324,100 +288,6 @@ static void test_a_press_is_not_the_moment_to_ask_about_freshness(void) {
      * mistake is caught rather than transmitted -- but only while this holds. */
     CHECK(out[0].bus == FSD_PIPE_BUS_NONE, "no channel, got %u", (unsigned)out[0].bus);
     CHECK(out[0].frame.id == 0u && out[0].frame.dlc == 0u, "no frame");
-}
-
-/* The axis is NOT skipped -- only the two layers that need a template are.
- * A press the axis refuses must still be refused, with its own name, at the
- * press, under the finger that caused it. */
-static void test_the_press_still_faces_the_axis(void) {
-    printf("\n-- the press keeps every gate that does not need a template --\n");
-
-    const uint32_t now = 4000u;
-
-    FsdRules rules;
-    one_rule(&rules, FSD_SIG_MAP_SW_RL, FSD_TRIG_PRESS, 0, FSD_ACT_MIRROR, 1);
-    const FsdTriggerEvent ev = ev_of(FSD_SIG_MAP_SW_RL, FSD_TRIG_PRESS, 0, now);
-
-    FsdPipeResult out[FSD_PIPE_MAX_OUT];
-    FsdBodyInputs in;
-
-    in = parked_inputs(now);
-    in.op_mode = OpMode_ListenOnly;
-    dirty(out);
-    CHECK(fsd_pipe_decide(&rules, &ev, &in, now, out, FSD_PIPE_MAX_OUT) == 1u, "one decision");
-    CHECK(out[0].stage == FSD_PIPE_BLOCKED_BODY && out[0].reason == (uint8_t)FSD_BODY_NO_MODE,
-          "listen-only refused at the press, got %s (%s)", fsd_pipe_stage_str(out[0].stage),
-          fsd_pipe_reason_str(out[0].stage, out[0].reason));
-
-    in = parked_inputs(now);
-    in.speed_kph = 30;
-    dirty(out);
-    (void)fsd_pipe_decide(&rules, &ev, &in, now, out, FSD_PIPE_MAX_OUT);
-    CHECK(out[0].stage == FSD_PIPE_BLOCKED_BODY && out[0].reason == (uint8_t)FSD_BODY_MOVING,
-          "a moving car cannot fold a mirror, got %s (%s)", fsd_pipe_stage_str(out[0].stage),
-          fsd_pipe_reason_str(out[0].stage, out[0].reason));
-
-    in = parked_inputs(now);
-    in.gear = FSD_GEAR_D;
-    dirty(out);
-    (void)fsd_pipe_decide(&rules, &ev, &in, now, out, FSD_PIPE_MAX_OUT);
-    CHECK(out[0].stage == FSD_PIPE_BLOCKED_BODY && out[0].reason == (uint8_t)FSD_BODY_NOT_PARK,
-          "out of park refused, got %s (%s)", fsd_pipe_stage_str(out[0].stage),
-          fsd_pipe_reason_str(out[0].stage, out[0].reason));
-
-    /* 🔴🔴 THIS ASSERTION USED TO BE THE OPPOSITE, AND IT PINNED A DEFECT.
-     *
-     * The observation in the old comment was right and is kept: the drive
-     * inverter sleeps when the car settles and 0x118 stops entirely, so the
-     * verdict is "no gear signal" and not "not park". What was wrong was the
-     * conclusion -- it asserted that refusal "must survive at the press".
-     *
-     * Measured in the car on 2026-09-10: that refusal is what makes the mirror
-     * unusable. Three presses were refused with `axis: no gear signal` on a
-     * settled car, and it took a brake press to wake the drivetrain. A parked
-     * car is exactly when you fold a mirror, so the gate was closed at the only
-     * time the feature is wanted.
-     *
-     * 🔴 THE SECOND PATTERN, EXACTLY: a test that writes the observation down
-     * correctly and then locks the wrong behaviour in as correct. Anyone who
-     * fixed fsd_body.c would have been sent back by this red line. It is not
-     * deleted -- it now asserts the measured truth, and the two silences that
-     * MUST still refuse are asserted right after it. */
-    in = parked_inputs(now);
-    in.gear_seen = false;
-    in.speed_seen = false;
-    dirty(out);
-    (void)fsd_pipe_decide(&rules, &ev, &in, now, out, FSD_PIPE_MAX_OUT);
-    CHECK(out[0].stage == FSD_PIPE_OK,
-          "a settled car folds its mirror, stopped at %s (%s)",
-          fsd_pipe_stage_str(out[0].stage), fsd_pipe_reason_str(out[0].stage, out[0].reason));
-
-    /* Silence AFTER the car said it was driving is not proof that it stopped. */
-    in = parked_inputs(now);
-    in.gear = FSD_GEAR_D;
-    in.gear_ms = now - 60000u;
-    dirty(out);
-    (void)fsd_pipe_decide(&rules, &ev, &in, now, out, FSD_PIPE_MAX_OUT);
-    CHECK(out[0].stage == FSD_PIPE_BLOCKED_BODY && out[0].reason == (uint8_t)FSD_BODY_GEAR_STALE,
-          "went quiet in D still refuses, got %s (%s)",
-          fsd_pipe_stage_str(out[0].stage), fsd_pipe_reason_str(out[0].stage, out[0].reason));
-
-    in = parked_inputs(now);
-    in.speed_kph = 40.0f;
-    in.speed_ms = now - 60000u;
-    dirty(out);
-    (void)fsd_pipe_decide(&rules, &ev, &in, now, out, FSD_PIPE_MAX_OUT);
-    CHECK(out[0].stage == FSD_PIPE_BLOCKED_BODY && out[0].reason == (uint8_t)FSD_BODY_SPEED_STALE,
-          "went quiet at 40 kph still refuses, got %s (%s)",
-          fsd_pipe_stage_str(out[0].stage), fsd_pipe_reason_str(out[0].stage, out[0].reason));
-
-    in = parked_inputs(now);
-    in.action_enabled[FSD_ACT_MIRROR] = false;
-    dirty(out);
-    (void)fsd_pipe_decide(&rules, &ev, &in, now, out, FSD_PIPE_MAX_OUT);
-    CHECK(out[0].stage == FSD_PIPE_BLOCKED_BODY && out[0].reason == (uint8_t)FSD_BODY_NOT_ENABLED,
-          "transmission still locked refuses at the press, got %s (%s)",
-          fsd_pipe_stage_str(out[0].stage), fsd_pipe_reason_str(out[0].stage, out[0].reason));
 }
 
 /* The 37 % itself, as a number this file can check.
@@ -442,17 +312,16 @@ static void test_the_press_no_longer_depends_on_where_the_finger_lands(void) {
     unsigned old_ok = 0, new_ok = 0, tries = 0;
     for (uint32_t d = 0; d < period; d += 10u) {
         const uint32_t at = seen + d;
-        const FsdBodyInputs in = parked_inputs(at);
         const FsdTriggerEvent ev = ev_of(FSD_SIG_MAP_SW_RL, FSD_TRIG_PRESS, 0, at);
 
         FsdPipeResult one;
         memset(&one, 0, sizeof(one));
-        fsd_pipe_one(FSD_ACT_MIRROR, 1, 0u, &in, &f, at, &one);
+        fsd_pipe_one(FSD_ACT_MIRROR, 1, 0u, &f, at, &one);
         if (one.stage == FSD_PIPE_OK) old_ok++;
 
         FsdPipeResult out[FSD_PIPE_MAX_OUT];
         dirty(out);
-        (void)fsd_pipe_decide(&rules, &ev, &in, at, out, FSD_PIPE_MAX_OUT);
+        (void)fsd_pipe_decide(&rules, &ev, out, FSD_PIPE_MAX_OUT);
         if (out[0].stage == FSD_PIPE_OK) new_ok++;
 
         tries++;
@@ -465,7 +334,7 @@ static void test_the_press_no_longer_depends_on_where_the_finger_lands(void) {
 }
 
 static void test_each_layer_refuses(void) {
-    printf("\n-- four layers, four names --\n");
+    printf("\n-- three layers, three names --\n");
 
     const uint32_t now = 5000u;
     FsdRules rules;
@@ -473,32 +342,21 @@ static void test_each_layer_refuses(void) {
     FsdPipeResult out[FSD_PIPE_MAX_OUT];
     const FsdTriggerEvent ev = ev_of(FSD_SIG_MAP_SW_FR, FSD_TRIG_PRESS, 0, now);
 
-    /* 1. The axis. Listen-Only is the state the board sits in by default, and
-     * it has to refuse before anything is built. */
-    one_rule(&rules, FSD_SIG_MAP_SW_FR, FSD_TRIG_PRESS, 0, FSD_ACT_TURN_SIGNAL,
-             FSD_EMIT_TURN_LEFT);
-    fsd_pipe_init(&f);
-    (void)fsd_pipe_observe(&f, 1u, 0x249u, LSTALK, 4u, now);
-    FsdBodyInputs in = good_inputs(now);
-    in.op_mode = OpMode_ListenOnly;
-    in.bus_tx_open = false;
-    dirty(out);
-    CHECK(press_then_send(&rules, &ev, &in, &f, now, out, FSD_PIPE_MAX_OUT) == 1u, "one result");
-    CHECK(out[0].stage == FSD_PIPE_BLOCKED_BODY, "listen-only stops at the axis, got %s",
-          fsd_pipe_stage_str(out[0].stage));
-    CHECK(out[0].frame.id == 0u, "and no frame was built");
+    /* 🔴🔴 THERE USED TO BE A FOURTH LAYER HERE AND IT CAME FIRST.
+     * The permission axis refused a press in Listen-Only, with the transmit
+     * unlock closed, out of park, moving, or with the per-action enable off.
+     * The owner deleted all of it on 2026-09-10 -- "차의 모든 안전게이트
+     * 관련사항을 삭제해라. 필요하다면 추후 내가 하나씩 추가하겠다" -- so
+     * those cases are not weakened here, they are gone from the code they
+     * were about.
+     *
+     * 🟢 THE THREE THAT REMAIN ARE NOT QUESTIONS ABOUT THE CAR'S SITUATION.
+     * They are what keeps us from putting bytes on the bus that nobody
+     * measured: a row has to exist, a template has to have arrived and still
+     * be fresh, and the frame may differ from the car's own in this action's
+     * bits and nothing else. */
 
-    /* The per-action enable is the session switch. Off means off even in
-     * Active with every other gate satisfied. */
-    in = good_inputs(now);
-    in.action_enabled[FSD_ACT_TURN_SIGNAL] = false;
-    dirty(out);
-    CHECK(press_then_send(&rules, &ev, &in, &f, now, out, FSD_PIPE_MAX_OUT) == 1u, "one result");
-    CHECK(out[0].stage == FSD_PIPE_BLOCKED_BODY, "the enable is a real gate");
-    CHECK(out[0].reason == (uint8_t)FSD_BODY_NOT_ENABLED, "named NOT_ENABLED, got %s",
-          fsd_pipe_reason_str(out[0].stage, out[0].reason));
-
-    /* 2. The map light, all the way through.
+    /* 1. The map light, all the way through.
      *
      * ⚠️ THIS WAS THE ORDERING TEST -- "a missing row must say NO_ROW, not
      * NO_TEMPLATE, or it sends a person to look at their wiring". The map
@@ -506,11 +364,11 @@ static void test_each_layer_refuses(void) {
      * its emitter works, so only the ORDER could produce the right answer.
      *
      * 🔴 THAT CLAIM IS NO LONGER TESTABLE WITH ANY ACTION. The owner opened
-     * every row on 2026-09-07, so FSD_WIRE_NO_ROW is unreachable from here: an
-     * action inside the enum has a row, and one outside it is refused by the
-     * axis first (FSD_BODY_UNKNOWN_ACTION). The branch stays as what greets
-     * the next action added to the enum, and test_body_wire.c pins the
-     * predicate at the unit level.
+     * every row on 2026-09-07, so FSD_WIRE_NO_ROW is unreachable from here:
+     * every action inside the enum has a row, and one outside it is refused by
+     * the row lookup itself -- which answers NO_ROW, the same name. The branch
+     * stays as what greets the next action added to the enum, and
+     * test_body_wire.c pins the predicate at the unit level.
      *
      * So the case is kept and turned into what it CAN prove, which is more
      * than it proved before: the whole chain produces the exact bytes TSL put
@@ -518,10 +376,9 @@ static void test_each_layer_refuses(void) {
     one_rule(&rules, FSD_SIG_MAP_SW_FL, FSD_TRIG_PRESS, 0, FSD_ACT_MAP_LIGHT, 0);
     fsd_pipe_init(&f);
     (void)fsd_pipe_observe(&f, 1u, 0x273u, BODY273, 8u, now);
-    in = good_inputs(now);
     const FsdTriggerEvent map_ev = ev_of(FSD_SIG_MAP_SW_FL, FSD_TRIG_PRESS, 0, now);
     dirty(out);
-    CHECK(press_then_send(&rules, &map_ev, &in, &f, now, out, FSD_PIPE_MAX_OUT) == 1u, "one result");
+    CHECK(press_then_send(&rules, &map_ev, &f, now, out, FSD_PIPE_MAX_OUT) == 1u, "one result");
     CHECK(out[0].stage == FSD_PIPE_OK, "map light goes through, got %s (%s)",
           fsd_pipe_stage_str(out[0].stage),
           fsd_pipe_reason_str(out[0].stage, out[0].reason));
@@ -533,14 +390,13 @@ static void test_each_layer_refuses(void) {
               out[0].frame.data[i]);
     }
 
-    /* 3. The emitter, with no template. A bus we are not hearing is a bus we
+    /* 2. The emitter, with no template. A bus we are not hearing is a bus we
      * do not write to. */
     one_rule(&rules, FSD_SIG_MAP_SW_FR, FSD_TRIG_PRESS, 0, FSD_ACT_TURN_SIGNAL,
              FSD_EMIT_TURN_LEFT);
     fsd_pipe_init(&f); /* nothing observed */
-    in = good_inputs(now);
     dirty(out);
-    CHECK(press_then_send(&rules, &ev, &in, &f, now, out, FSD_PIPE_MAX_OUT) == 1u, "one result");
+    CHECK(press_then_send(&rules, &ev, &f, now, out, FSD_PIPE_MAX_OUT) == 1u, "one result");
     CHECK(out[0].stage == FSD_PIPE_BLOCKED_EMIT, "no template stops at the emitter, got %s",
           fsd_pipe_stage_str(out[0].stage));
     CHECK(out[0].reason == (uint8_t)FSD_EMIT_NO_TEMPLATE, "named NO_TEMPLATE, got %s",
@@ -551,12 +407,12 @@ static void test_each_layer_refuses(void) {
     fsd_pipe_init(&f);
     (void)fsd_pipe_observe(&f, 1u, 0x249u, LSTALK, 4u, 0u);
     dirty(out);
-    CHECK(press_then_send(&rules, &ev, &in, &f, now, out, FSD_PIPE_MAX_OUT) == 1u, "one result");
+    CHECK(press_then_send(&rules, &ev, &f, now, out, FSD_PIPE_MAX_OUT) == 1u, "one result");
     CHECK(out[0].stage == FSD_PIPE_BLOCKED_EMIT, "a stale template is refused");
     CHECK(out[0].reason == (uint8_t)FSD_EMIT_STALE_TEMPLATE, "named STALE_TEMPLATE, got %s",
           fsd_pipe_reason_str(out[0].stage, out[0].reason));
 
-    /* 3b. THE CHOKEPOINT ACTUALLY REFUSING SOMETHING.
+    /* 3. THE CHOKEPOINT ACTUALLY REFUSING SOMETHING.
      *
      * 🔴 Without this case the chokepoint could be deleted outright and
      * every other test in this file would still pass -- found by mutation, not
@@ -575,9 +431,8 @@ static void test_each_layer_refuses(void) {
              FSD_EMIT_TURN_LEFT);
     fsd_pipe_init(&f);
     (void)fsd_pipe_observe(&f, 1u, 0x249u, LSTALK, 4u, now - 500u);
-    in = good_inputs(now);
     dirty(out);
-    CHECK(press_then_send(&rules, &ev, &in, &f, now, out, FSD_PIPE_MAX_OUT) == 1u, "one result");
+    CHECK(press_then_send(&rules, &ev, &f, now, out, FSD_PIPE_MAX_OUT) == 1u, "one result");
     CHECK(out[0].stage == FSD_PIPE_BLOCKED_WIRE,
           "500 ms old: the emitter builds, the chokepoint refuses, got %s (%s)",
           fsd_pipe_stage_str(out[0].stage),
@@ -586,32 +441,32 @@ static void test_each_layer_refuses(void) {
           fsd_pipe_reason_str(out[0].stage, out[0].reason));
     CHECK(out[0].frame.id == 0u, "and the built frame was dropped");
 
-    /* 4. A wire row is not permission.
+    /* 4. A WIRE ROW AND A TEMPLATE ARE STILL NOT A FRAME.
      *
      * The camera HAS a row -- its bit was measured on 2026-09-01 -- and its
      * frame arrives constantly, so both the store and the chokepoint are ready
-     * for it. It still does not go out, because fsd_body.c marks it
-     * armable_at_runtime = false. The two tables are independent and BOTH have
-     * to open; this is the half that is easy to forget, because the row being
-     * there looks like a yes.
+     * for it. It still does not go out, because NOBODY HAS BUILT ITS ENCODER:
+     * we have never measured what to write, so there is nothing honest to put
+     * on the bus.
      *
-     * 🔴 This assertion started life as "the camera has no encoder, so the
-     * emitter refuses". That was wrong in an instructive way: the run never
-     * reaches the emitter, because the axis is asked first. Refusing earlier
-     * than expected is the safe direction, and the test now says what actually
-     * happens rather than what I assumed. */
+     * 🔴 THIS ASSERTION HAS NOW BEEN WRITTEN THREE TIMES AND IS BACK WHERE IT
+     * STARTED. It began as "the camera has no encoder, so the emitter
+     * refuses"; that became wrong when the axis was asked first, because the
+     * run never reached the emitter and NOT_ARMABLE was the honest answer; the
+     * axis is gone, so the first reading is the true one again. Worth leaving
+     * on the page -- the same line was right, then wrong, then right, and only
+     * the structure around it moved. */
     one_rule(&rules, FSD_SIG_MAP_SW_FR, FSD_TRIG_PRESS, 0, FSD_ACT_CAMERA, 0);
     fsd_pipe_init(&f);
     const uint8_t mux29[8] = {0x29, 0x55, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40};
     (void)fsd_pipe_observe(&f, 1u, 0x3C2u, mux29, 8u, now);
     CHECK(f.tpl[FSD_ACT_CAMERA].seen, "the camera's template really is there");
     CHECK(fsd_body_wire(FSD_ACT_CAMERA) != NULL, "and so is its wire row");
-    in = good_inputs(now);
     dirty(out);
-    CHECK(press_then_send(&rules, &ev, &in, &f, now, out, FSD_PIPE_MAX_OUT) == 1u, "one result");
-    CHECK(out[0].stage == FSD_PIPE_BLOCKED_BODY, "the axis refuses it anyway, got %s",
+    CHECK(press_then_send(&rules, &ev, &f, now, out, FSD_PIPE_MAX_OUT) == 1u, "one result");
+    CHECK(out[0].stage == FSD_PIPE_BLOCKED_EMIT, "no encoder, so the emitter refuses, got %s",
           fsd_pipe_stage_str(out[0].stage));
-    CHECK(out[0].reason == (uint8_t)FSD_BODY_NOT_ARMABLE, "named NOT_ARMABLE, got %s",
+    CHECK(out[0].reason == (uint8_t)FSD_EMIT_NO_ENCODING, "named NO_ENCODING, got %s",
           fsd_pipe_reason_str(out[0].stage, out[0].reason));
     CHECK(out[0].frame.id == 0u, "and built nothing");
 }
@@ -630,24 +485,22 @@ static void test_quiet_cases(void) {
              FSD_EMIT_TURN_LEFT);
     fsd_pipe_init(&f);
     (void)fsd_pipe_observe(&f, 1u, 0x249u, LSTALK, 4u, now);
-    const FsdBodyInputs in = good_inputs(now);
 
     /* An event no rule wants produces nothing at all — not a refusal. */
     const FsdTriggerEvent other = ev_of(FSD_SIG_MAP_SW_RR, FSD_TRIG_PRESS, 0, now);
-    CHECK(press_then_send(&rules, &other, &in, &f, now, out, FSD_PIPE_MAX_OUT) == 0u,
+    CHECK(press_then_send(&rules, &other, &f, now, out, FSD_PIPE_MAX_OUT) == 0u,
           "an unmatched event yields no results");
 
     /* A disabled rule is not a rule. */
     FsdRules off;
     fsd_rules_init(&off);
     const FsdTriggerEvent ev = ev_of(FSD_SIG_MAP_SW_FR, FSD_TRIG_PRESS, 0, now);
-    CHECK(press_then_send(&off, &ev, &in, &f, now, out, FSD_PIPE_MAX_OUT) == 0u,
+    CHECK(press_then_send(&off, &ev, &f, now, out, FSD_PIPE_MAX_OUT) == 0u,
           "an empty table yields no results");
 
     /* Every NULL. This is called from the RX path. */
-    CHECK(press_then_send(NULL, &ev, &in, &f, now, out, FSD_PIPE_MAX_OUT) == 0u, "NULL rules");
-    CHECK(press_then_send(&rules, NULL, &in, &f, now, out, FSD_PIPE_MAX_OUT) == 0u, "NULL event");
-    CHECK(press_then_send(&rules, &ev, NULL, &f, now, out, FSD_PIPE_MAX_OUT) == 0u, "NULL inputs");
+    CHECK(press_then_send(NULL, &ev, &f, now, out, FSD_PIPE_MAX_OUT) == 0u, "NULL rules");
+    CHECK(press_then_send(&rules, NULL, &f, now, out, FSD_PIPE_MAX_OUT) == 0u, "NULL event");
     /* 🔴 NULL frames is now a question for the SEND half only -- the press
      * does not take a template store at all, which is exactly the property
      * that fixed the mirror. Asserted directly rather than through the helper,
@@ -660,19 +513,18 @@ static void test_quiet_cases(void) {
     FsdPipeResult one, untouched;
     memset(&one, 0xAB, sizeof(one));
     memset(&untouched, 0xAB, sizeof(untouched));
-    fsd_pipe_one(FSD_ACT_TURN_SIGNAL, FSD_EMIT_TURN_LEFT, 0u, &in, NULL, now, &one);
+    fsd_pipe_one(FSD_ACT_TURN_SIGNAL, FSD_EMIT_TURN_LEFT, 0u, NULL, now, &one);
     CHECK(memcmp(&one, &untouched, sizeof(one)) == 0,
           "NULL frames leaves the caller's result untouched");
 
     /* And the same for the press half's own NULLs, which no longer include a
      * frame store. */
-    CHECK(fsd_pipe_decide(NULL, &ev, &in, now, out, FSD_PIPE_MAX_OUT) == 0u, "decide: NULL rules");
-    CHECK(fsd_pipe_decide(&rules, NULL, &in, now, out, FSD_PIPE_MAX_OUT) == 0u, "decide: NULL event");
-    CHECK(fsd_pipe_decide(&rules, &ev, NULL, now, out, FSD_PIPE_MAX_OUT) == 0u, "decide: NULL inputs");
-    CHECK(fsd_pipe_decide(&rules, &ev, &in, now, NULL, FSD_PIPE_MAX_OUT) == 0u, "decide: NULL out");
-    CHECK(fsd_pipe_decide(&rules, &ev, &in, now, out, 0u) == 0u, "decide: no room");
-    CHECK(press_then_send(&rules, &ev, &in, &f, now, NULL, FSD_PIPE_MAX_OUT) == 0u, "NULL out");
-    CHECK(press_then_send(&rules, &ev, &in, &f, now, out, 0u) == 0u, "no room");
+    CHECK(fsd_pipe_decide(NULL, &ev, out, FSD_PIPE_MAX_OUT) == 0u, "decide: NULL rules");
+    CHECK(fsd_pipe_decide(&rules, NULL, out, FSD_PIPE_MAX_OUT) == 0u, "decide: NULL event");
+    CHECK(fsd_pipe_decide(&rules, &ev, NULL, FSD_PIPE_MAX_OUT) == 0u, "decide: NULL out");
+    CHECK(fsd_pipe_decide(&rules, &ev, out, 0u) == 0u, "decide: no room");
+    CHECK(press_then_send(&rules, &ev, &f, now, NULL, FSD_PIPE_MAX_OUT) == 0u, "NULL out");
+    CHECK(press_then_send(&rules, &ev, &f, now, out, 0u) == 0u, "no room");
 }
 
 /* ── the names ─────────────────────────────────────────────────────────── */
@@ -681,16 +533,12 @@ static void test_names(void) {
     printf("\n-- every stage and reason has a name --\n");
 
     CHECK(strcmp(fsd_pipe_stage_str(FSD_PIPE_OK), "ok") == 0, "ok");
-    CHECK(strcmp(fsd_pipe_stage_str(FSD_PIPE_BLOCKED_BODY), "axis") == 0, "axis");
     CHECK(strcmp(fsd_pipe_stage_str(FSD_PIPE_BLOCKED_EMIT), "emitter") == 0, "emitter");
     CHECK(strcmp(fsd_pipe_stage_str(FSD_PIPE_BLOCKED_WIRE), "chokepoint") == 0, "chokepoint");
 
     /* Each stage routes to the layer that produced the number. A reason of 1
-     * means three different things depending on the stage, and reading it
+     * means two different things depending on the stage, and reading it
      * against the wrong table is how a log sends someone the wrong way. */
-    CHECK(strcmp(fsd_pipe_reason_str(FSD_PIPE_BLOCKED_BODY, (uint8_t)FSD_BODY_NOT_ENABLED),
-                 fsd_body_verdict_str(FSD_BODY_NOT_ENABLED)) == 0,
-          "axis reasons come from the axis");
     CHECK(strcmp(fsd_pipe_reason_str(FSD_PIPE_BLOCKED_EMIT, (uint8_t)FSD_EMIT_NO_TEMPLATE),
                  fsd_emit_result_str(FSD_EMIT_NO_TEMPLATE)) == 0,
           "emitter reasons come from the emitter");
@@ -699,7 +547,6 @@ static void test_names(void) {
           "chokepoint reasons come from the chokepoint");
 
     /* An out-of-range number must not walk off the end of a table. */
-    CHECK(fsd_pipe_reason_str(FSD_PIPE_BLOCKED_BODY, 250u) != NULL, "axis, absurd value");
     CHECK(fsd_pipe_reason_str(FSD_PIPE_BLOCKED_EMIT, 250u) != NULL, "emitter, absurd value");
     CHECK(fsd_pipe_reason_str(FSD_PIPE_BLOCKED_WIRE, 250u) != NULL, "chokepoint, absurd value");
     CHECK(fsd_pipe_stage_str((FsdPipeStage)99) != NULL, "absurd stage");
@@ -729,52 +576,51 @@ static void test_turn_signal_needs_a_burst(void) {
     }
 }
 
-static void test_a_repeat_faces_every_gate(void) {
+/* 🔴🔴 THIS WAS test_a_repeat_faces_every_gate(), AND THE GATE IT WATCHED IS
+ * GONE. It closed the transmit unlock between frame two and frame three of a
+ * burst and asserted that the rest stopped with a name; before that it
+ * unlatched the belt, and the belt went on 2026-09-08 for the same reason the
+ * rest went on 2026-09-10.
+ *
+ * 🟢 WHAT IS LEFT IS NOT NOTHING, and it is the half that holds the bus. A
+ * repeat is a full trip through the emitter and the chokepoint at the car's
+ * own arrival, carrying the rule that started it -- and it is refused by name
+ * the moment the reference it would copy goes stale. */
+static void test_a_repeat_builds_the_same_frame(void) {
     const uint32_t now = 500000;
 
     FsdPipeFrames f;
     fsd_pipe_init(&f);
     fsd_pipe_observe(&f, 1u, 0x249u, LSTALK, sizeof(LSTALK), now);
 
-    FsdBodyInputs in = good_inputs(now);
-    in.action_enabled[FSD_ACT_TURN_SIGNAL] = true;
-
-    /* dirty() poisons FSD_PIPE_MAX_OUT results, so the array has to be
-     * that long. A single struct here overruns it and smashes `in` --
-     * which is exactly what happened the first time this was written,
-     * and the axis answered NOT_ENABLED because the enable array had
-     * been overwritten with 0xAB. */
+    /* dirty() poisons FSD_PIPE_MAX_OUT results, so the array has to be that
+     * long. A single struct here overruns it and smashes the caller's locals,
+     * which is exactly what happened the first time this was written. */
     FsdPipeResult res[FSD_PIPE_MAX_OUT];
     dirty(res);
-    fsd_pipe_one(FSD_ACT_TURN_SIGNAL, 0, 3, &in, &f, now, &res[0]);
-    CHECK(res[0].stage == FSD_PIPE_OK, "a repeat of an allowed action should build");
+    fsd_pipe_one(FSD_ACT_TURN_SIGNAL, 0, 3, &f, now, &res[0]);
+    CHECK(res[0].stage == FSD_PIPE_OK, "a repeat should build, got %s (%s)",
+          fsd_pipe_stage_str(res[0].stage),
+          fsd_pipe_reason_str(res[0].stage, res[0].reason));
     CHECK(res[0].rule_index == 3, "the repeat carries the rule that started it");
     CHECK(res[0].frame.id == 0x249u, "and it is still the stalk frame");
 
-    /* 🔴 THE HALF THAT MATTERS. Shut the bus between frame two and frame
-     * three of a burst and the rest must stop -- with a name. A burst that
-     * bypassed the axis would be a rule that keeps writing after the thing
-     * that let it write went away.
-     *
-     * ⚠️ This used to unlatch the belt instead. The occupancy gate it leaned
-     * on was removed on 2026-09-08 (owner's instruction), so the test now
-     * takes away the gate that IS still there and still session-scoped: the
-     * transmit unlock, which dies with the power. The subject is unchanged --
-     * a repeat faces the axis -- only the gate it is asked about. */
-    in.bus_tx_open = false;
+    /* 🔴 A REPEAT IS NOT EXEMPT FROM THE CHOKEPOINT. The template that was
+     * fresh at frame one is 500 ms old here, and the last denial before the
+     * wire says so by name. That is the whole reason every frame of a burst
+     * waits for the car's own arrival instead of running off a timer -- the
+     * mirror measured it, 7 of 19. */
     dirty(res);
-    fsd_pipe_one(FSD_ACT_TURN_SIGNAL, 0, 3, &in, &f, now, &res[0]);
-    CHECK(res[0].stage == FSD_PIPE_BLOCKED_BODY,
-          "a repeat must face the axis, not skip it");
-    CHECK(res[0].reason == (uint8_t)FSD_BODY_BUS_SHUT,
-          "and it must say which gate, got %s",
+    fsd_pipe_one(FSD_ACT_TURN_SIGNAL, 0, 3, &f, now + 500u, &res[0]);
+    CHECK(res[0].stage == FSD_PIPE_BLOCKED_WIRE,
+          "a repeat on a stale reference is refused, got %s",
+          fsd_pipe_stage_str(res[0].stage));
+    CHECK(res[0].reason == (uint8_t)FSD_WIRE_REF_STALE, "named REF_STALE, got %s",
           fsd_pipe_reason_str(res[0].stage, res[0].reason));
-    in.bus_tx_open = true;
 
     /* NULL in, nothing out -- same contract as fsd_pipe_decide(). */
-    fsd_pipe_one(FSD_ACT_TURN_SIGNAL, 0, 3, NULL, &f, now, &res[0]);
-    fsd_pipe_one(FSD_ACT_TURN_SIGNAL, 0, 3, &in, NULL, now, &res[0]);
-    fsd_pipe_one(FSD_ACT_TURN_SIGNAL, 0, 3, &in, &f, now, NULL);
+    fsd_pipe_one(FSD_ACT_TURN_SIGNAL, 0, 3, NULL, now, &res[0]);
+    fsd_pipe_one(FSD_ACT_TURN_SIGNAL, 0, 3, &f, now, NULL);
 }
 
 /* 🔴 THE RELEASE IS A WRITE LIKE ANY OTHER, AND IT FACES THE SAME LAST DENIAL.
@@ -794,9 +640,11 @@ static void test_a_repeat_faces_every_gate(void) {
  * test can reach it. So the release goes through fsd_pipe_release() now, and
  * these assertions are what that buys.
  *
- * ⚠️ The axis is STILL skipped, deliberately, and fsd_pipe_release() has no
- * FsdBodyInputs argument at all -- so it is not something a caller can forget
- * to pass, it is a property of the function's shape. */
+ * ⚠️ fsd_pipe_release() was written to skip the PERMISSION AXIS on purpose,
+ * and made that structural by not taking an FsdBodyInputs. The axis is gone
+ * altogether now (owner's instruction, 2026-09-10), so nothing takes one --
+ * but the argument is worth keeping on the page, because it is the same one
+ * fsd_pipe_decide() and fsd_pipe_one() now make about templates. */
 static void test_release_faces_the_chokepoint(void) {
     printf("\n-- 놓기도 초크포인트를 지난다 --\n");
 
@@ -825,17 +673,6 @@ static void test_release_faces_the_chokepoint(void) {
     CHECK(r.frame.id == 0x3C2u && r.frame.dlc == 8u, "on 0x3C2, 8 bytes");
     CHECK(memcmp(r.frame.data, HORN_MUX0, 8) == 0,
           "and it is the car's frame, byte for byte");
-
-    /* 🔴 The PRESS still faces the axis, and a zeroed input is not a car we
-     * are hearing. The release skipping the axis must not mean the gesture
-     * skips it -- the first half is where that question is asked. */
-    FsdPipeResult press;
-    memset(&press, 0, sizeof(press));
-    FsdBodyInputs in;
-    memset(&in, 0, sizeof(in));
-    fsd_pipe_one(FSD_ACT_LIGHT_HORN, 0, 3u, &in, &f, 1050u, &press);
-    CHECK(press.stage == FSD_PIPE_BLOCKED_BODY,
-          "the press is refused by the axis, got %s", fsd_pipe_stage_str(press.stage));
 
     /* 🔴 AND THE RELEASE REFUSES WHEN THE CAR SAYS SOMEBODY IS ON THE HORN.
      * This is the one case where a release must NOT go out, and now that the
@@ -1057,137 +894,6 @@ static void test_burst_arming_zero_is_not_a_burst(void) {
 
 
 /* ════════════════════════════════════════════════════════════════════════
- * min_interval_ms — how often a COMMAND may be issued.
- *
- * 🔴 IT WAS DECORATIVE UNTIL 2026-09-08. FsdBodyInputs.last_act_ms had no
- * producer anywhere in the firmware: body_task.cpp memset the struct and
- * nothing ever wrote that array, so `now - 0` was always enormous and every
- * row's interval passed. Four gates were advertised and three were enforced.
- *
- * It was found while writing the light horn's row — where the failure that
- * matters is not one beep in the wrong place but a stuck rule leaning on the
- * horn — and deliberately left alone, because switching it on naively breaks
- * the indicator: that action sends FOUR frames about 50 ms apart and its own
- * row allows 50 ms, so frames two through four would refuse themselves.
- *
- * 🔴 THE FIX IS NOT A BIGGER NUMBER. It is that the question was misread. The
- * table has always meant commands, not frames — the door's 3000 is "do not
- * open it twice in three seconds" and the horn's 1000 is "no two beeps in one
- * second". A four-frame burst is ONE command. So the stamp goes down when a
- * command is ACCEPTED, once, and the frames it owes are exempt.
- *
- * The record lives here because the burst table already is the record of
- * commands issued, and because rule_task.cpp cannot be compiled on a host —
- * which is how the previous scheduling defect reached the car.
- * ════════════════════════════════════════════════════════════════════════ */
-
-static void test_last_act_is_stamped_once_per_command(void) {
-    printf("\n-- rate limit: the stamp is the press, not the frame --\n");
-    FsdBurst b;
-    fsd_burst_reset(&b);
-    uint32_t seen[FSD_ACT_COUNT];
-
-    fsd_burst_fill_last_act(&b, seen, FSD_ACT_COUNT);
-    CHECK(seen[FSD_ACT_TURN_SIGNAL] == 0u, "never fired reads 0");
-
-    CHECK(fsd_burst_arm(&b, FSD_ACT_TURN_SIGNAL, 0, 1u, 0x249u, 4u, 5000u), "armed");
-    fsd_burst_fill_last_act(&b, seen, FSD_ACT_COUNT);
-    CHECK(seen[FSD_ACT_TURN_SIGNAL] == 5000u, "stamped at the press");
-    CHECK(seen[FSD_ACT_MIRROR] == 0u, "and only that action");
-
-    /* 🔴 THE FRAMES DO NOT RE-STAMP. If they did, a burst would push its own
-     * next command out by the whole interval every time it ran. */
-    FsdBurstDue due;
-    fsd_burst_on_frame(&b, 0x249u, 5050u, &due);
-    fsd_burst_on_frame(&b, 0x249u, 5100u, &due);
-    fsd_burst_fill_last_act(&b, seen, FSD_ACT_COUNT);
-    CHECK(seen[FSD_ACT_TURN_SIGNAL] == 5000u, "still the press, got %u",
-          (unsigned)seen[FSD_ACT_TURN_SIGNAL]);
-}
-
-static void test_the_frames_of_a_command_are_exempt(void) {
-    printf("\n-- rate limit: a burst does not refuse itself --\n");
-    FsdBurst b;
-    fsd_burst_reset(&b);
-    CHECK(fsd_burst_arm(&b, FSD_ACT_TURN_SIGNAL, 0, 1u, 0x249u, 4u, 1000u), "armed");
-
-    uint32_t seen[FSD_ACT_COUNT];
-    /* 🔴 THE CASE THAT KEPT THE LIMITER SWITCHED OFF. The indicator's row
-     * allows 50 ms and its frames arrive about 50 ms apart, so with the press
-     * stamped and no exemption the axis would answer TOO_SOON for frames two
-     * through four of the command it just accepted — every time, on jitter
-     * alone. */
-    fsd_burst_fill_last_act(&b, seen, FSD_ACT_TURN_SIGNAL);
-    CHECK(seen[FSD_ACT_TURN_SIGNAL] == 0u, "the action being emitted reads 'never'");
-
-    /* ...and nothing else is exempted along with it. A burst on 0x273 must not
-     * open a hole for the door. */
-    CHECK(fsd_burst_arm(&b, FSD_ACT_DOOR_OPEN, 0, 2u, 0x1F9u, 1u, 1000u), "door armed");
-    fsd_burst_fill_last_act(&b, seen, FSD_ACT_TURN_SIGNAL);
-    CHECK(seen[FSD_ACT_DOOR_OPEN] == 1000u, "the door keeps its stamp");
-}
-
-static void test_a_refused_command_leaves_no_stamp(void) {
-    printf("\n-- rate limit: only an accepted command counts --\n");
-    FsdBurst b;
-    fsd_burst_reset(&b);
-    /* reps 0 is refused, so nothing was issued and nothing may be recorded --
-     * a stamp for a command that never happened would lock out the next real
-     * one. (The axis refusals happen before this is reached at all.) */
-    CHECK(!fsd_burst_arm(&b, FSD_ACT_MIRROR, 1, 3u, 0x273u, 0u, 7000u), "refused");
-    uint32_t seen[FSD_ACT_COUNT];
-    fsd_burst_fill_last_act(&b, seen, FSD_ACT_COUNT);
-    CHECK(seen[FSD_ACT_MIRROR] == 0u, "no stamp");
-
-    /* A full table is the same answer for the same reason. */
-    for (unsigned i = 0; i < FSD_BURST_MAX; i++)
-        fsd_burst_arm(&b, FSD_ACT_MAP_LIGHT, 0, (uint8_t)i, 0x273u, 1u, 7000u);
-    CHECK(!fsd_burst_arm(&b, FSD_ACT_MIRROR, 1, 3u, 0x273u, 1u, 8000u), "table full");
-    fsd_burst_fill_last_act(&b, seen, FSD_ACT_COUNT);
-    CHECK(seen[FSD_ACT_MIRROR] == 0u, "still no stamp for the mirror");
-    CHECK(seen[FSD_ACT_MAP_LIGHT] == 7000u, "the map light kept its own");
-}
-
-static void test_stamps_outlive_the_burst_that_made_them(void) {
-    printf("\n-- rate limit: the interval is measured from the last command --\n");
-    FsdBurst b;
-    fsd_burst_reset(&b);
-    fsd_burst_arm(&b, FSD_ACT_MIRROR, 1, 3u, 0x273u, 1u, 2000u);
-    FsdBurstDue due;
-    CHECK(fsd_burst_on_frame(&b, 0x273u, 2400u, &due), "the frame goes");
-    CHECK(fsd_burst_pending(&b) == 0u, "burst done");
-
-    uint32_t seen[FSD_ACT_COUNT];
-    fsd_burst_fill_last_act(&b, seen, FSD_ACT_COUNT);
-    /* 🔴 A slot is reused, so the stamp cannot live in the slot. Losing it when
-     * the burst finished would mean the interval only ever gated commands that
-     * overlapped -- which is every case it does not need to cover. */
-    CHECK(seen[FSD_ACT_MIRROR] == 2000u, "the stamp survives, got %u",
-          (unsigned)seen[FSD_ACT_MIRROR]);
-
-    /* And expiring the wait does not erase it either: the command WAS issued;
-     * what failed was the car answering. */
-    fsd_burst_arm(&b, FSD_ACT_MAP_LIGHT, 0, 0u, 0x273u, 1u, 3000u);
-    fsd_burst_tick(&b, 3000u + FSD_BURST_MAX_WAIT_MS);
-    fsd_burst_fill_last_act(&b, seen, FSD_ACT_COUNT);
-    CHECK(seen[FSD_ACT_MAP_LIGHT] == 3000u, "an expired command still counts");
-}
-
-static void test_reset_forgets_the_stamps_too(void) {
-    printf("\n-- rate limit: stop clears the record --\n");
-    FsdBurst b;
-    fsd_burst_reset(&b);
-    fsd_burst_arm(&b, FSD_ACT_MIRROR, 1, 3u, 0x273u, 1u, 4000u);
-    fsd_burst_reset(&b);
-    uint32_t seen[FSD_ACT_COUNT];
-    fsd_burst_fill_last_act(&b, seen, FSD_ACT_COUNT);
-    /* Session state, like the arm flag. Locking transmission and unlocking it
-     * again should not leave a command the operator cannot re-issue. */
-    CHECK(seen[FSD_ACT_MIRROR] == 0u, "cleared");
-}
-
-
-/* ════════════════════════════════════════════════════════════════════════
  * WHICH BUS a command goes out on.
  *
  * 🔴 rule_task.h has always promised "a command goes back out the way it came
@@ -1214,9 +920,8 @@ static void test_a_command_goes_out_where_its_template_came_in(void) {
     fsd_pipe_init(&f);
 
     /* Nothing heard yet. */
-    FsdBodyInputs in = good_inputs(1000u);
     FsdPipeResult r;
-    fsd_pipe_one(FSD_ACT_MAP_LIGHT, 0, 0u, &in, &f, 1000u, &r);
+    fsd_pipe_one(FSD_ACT_MAP_LIGHT, 0, 0u, &f, 1000u, &r);
     CHECK(r.stage != FSD_PIPE_OK, "no template -> no frame");
     CHECK(r.bus == FSD_PIPE_BUS_NONE,
           "and no bus either -- a caller that skips the stage must not get a "
@@ -1224,7 +929,7 @@ static void test_a_command_goes_out_where_its_template_came_in(void) {
 
     /* The car's 0x273 arrives on can1. */
     CHECK(fsd_pipe_observe(&f, 1u, 0x273u, BODY273, 8u, 1000u) > 0, "0x273 stored");
-    fsd_pipe_one(FSD_ACT_MAP_LIGHT, 0, 0u, &in, &f, 1010u, &r);
+    fsd_pipe_one(FSD_ACT_MAP_LIGHT, 0, 0u, &f, 1010u, &r);
     CHECK(r.stage == FSD_PIPE_OK, "map light builds");
     CHECK(r.bus == 1u, "and goes out on can1, got %u", (unsigned)r.bus);
 
@@ -1233,13 +938,13 @@ static void test_a_command_goes_out_where_its_template_came_in(void) {
      * can1 template would be written to a channel nothing on it answers. */
     CHECK(fsd_pipe_observe(&f, 0u, 0x249u, LSTALK, 4u, 1015u) > 0,
           "an unrelated id arrives on can0");
-    fsd_pipe_one(FSD_ACT_MAP_LIGHT, 0, 0u, &in, &f, 1020u, &r);
+    fsd_pipe_one(FSD_ACT_MAP_LIGHT, 0, 0u, &f, 1020u, &r);
     CHECK(r.stage == FSD_PIPE_OK, "still builds");
     CHECK(r.bus == 1u, "STILL can1 -- the other channel's traffic is not ours, got %u",
           (unsigned)r.bus);
 
     /* ...and the action that DID arrive on can0 goes out there. */
-    fsd_pipe_one(FSD_ACT_TURN_SIGNAL, 0, 1u, &in, &f, 1020u, &r);
+    fsd_pipe_one(FSD_ACT_TURN_SIGNAL, 0, 1u, &f, 1020u, &r);
     CHECK(r.stage == FSD_PIPE_OK, "turn signal builds");
     CHECK(r.bus == 0u, "on can0, where its template came from, got %u", (unsigned)r.bus);
 }
@@ -1248,11 +953,10 @@ static void test_a_template_that_moves_bus_moves_with_it(void) {
     printf("\n-- bus: re-cabling is followed, not remembered --\n");
     FsdPipeFrames f;
     fsd_pipe_init(&f);
-    FsdBodyInputs in = good_inputs(2000u);
     FsdPipeResult r;
 
     CHECK(fsd_pipe_observe(&f, 0u, 0x273u, BODY273, 8u, 2000u) > 0, "heard on can0");
-    fsd_pipe_one(FSD_ACT_MAP_LIGHT, 0, 0u, &in, &f, 2005u, &r);
+    fsd_pipe_one(FSD_ACT_MAP_LIGHT, 0, 0u, &f, 2005u, &r);
     CHECK(r.bus == 0u, "can0");
 
     /* The same id now arrives on the other channel -- which is what a re-cable
@@ -1260,7 +964,7 @@ static void test_a_template_that_moves_bus_moves_with_it(void) {
      * newest frame is the template, so the newest frame's channel is the
      * answer. */
     CHECK(fsd_pipe_observe(&f, 1u, 0x273u, BODY273, 8u, 2010u) > 0, "now on can1");
-    fsd_pipe_one(FSD_ACT_MAP_LIGHT, 0, 0u, &in, &f, 2015u, &r);
+    fsd_pipe_one(FSD_ACT_MAP_LIGHT, 0, 0u, &f, 2015u, &r);
     CHECK(r.bus == 1u, "the answer follows the template, got %u", (unsigned)r.bus);
 }
 
@@ -1302,10 +1006,9 @@ static void test_init_knows_nothing(void) {
     FsdPipeFrames f;
     memset(&f, 0xAAu, sizeof(f));
     fsd_pipe_init(&f);
-    FsdBodyInputs in = good_inputs(10u);
     for (unsigned a = 0; a < FSD_ACT_COUNT; a++) {
         FsdPipeResult r;
-        fsd_pipe_one((FsdBodyAction)a, 0, 0u, &in, &f, 10u, &r);
+        fsd_pipe_one((FsdBodyAction)a, 0, 0u, &f, 10u, &r);
         CHECK(r.bus == FSD_PIPE_BUS_NONE, "action %u starts with no bus", a);
     }
     /* 🔴 0 is a real channel (can0), so it cannot mean "never heard". The same
@@ -1314,14 +1017,77 @@ static void test_init_knows_nothing(void) {
           "the sentinel is not a channel");
 }
 
+
+/* ── 안전게이트가 없다 (차주 지시 2026-09-10) ──────────────────────────── */
+
+/* 🔴 THE GUARD. The owner deleted every safety gate the car had:
+ *
+ *     "차의 모든 안전게이트관련사항을 삭제해라.
+ *      필요하다면 추후 내가 하나씩 추가하겠다."
+ *
+ * A + B + C: the situation gates (gear, speed, driver, belt, rate limit), the
+ * authority axis (armable_at_runtime and the per-action enable), and the mode
+ * / transmit unlock. D STAYS -- the bit chokepoint, the ID deny-list and the
+ * need for a fresh template from the car are not questions about the car's
+ * situation; they are what keeps us from writing bytes nobody measured.
+ *
+ * 🔴 THIS EXISTS SO A GATE CANNOT COME BACK QUIETLY. Same shape as
+ * test_the_capture_that_refused_now_passes(), written when the driver and belt
+ * gates went on 2026-09-08: assert the OPPOSITE of what the old code did, so
+ * restoring it turns the screen red instead of silently narrowing the feature.
+ *
+ * ⚠️ AND NOTE WHAT IT CANNOT DO. There is no hostile situation left to build
+ * -- FsdBodyInputs does not exist, so no test can put the car at 100 kph in D
+ * with the radio locked and watch a press survive anyway. That absence IS the
+ * removal (the shape of fsd_pipe_decide() is the proof), but it also means
+ * these two assertions are the whole of what stands between a returning gate
+ * and a green suite. */
+static void test_no_gate_stands_in_front_of_a_press(void) {
+    printf("\n-- 게이트가 없다: 누르면 결정된다 --\n");
+
+    const uint32_t now = 100000u;
+    FsdPipeResult out[FSD_PIPE_MAX_OUT];
+
+    /* 🔴 EVERY ACTION IN THE TABLE, NOT ONLY THE SIX THAT WORK TODAY.
+     * Yesterday five of the eleven were refused at this exact line with
+     * NOT_ARMABLE -- the camera, both seats, the scroll wheel and the door
+     * were closed by armable_at_runtime. If that column comes back, those five
+     * go red while the other six stay green, which names the change precisely.
+     * If a MODE or a situation gate comes back instead, all eleven go. */
+    for (unsigned a = 0; a < (unsigned)FSD_ACT_COUNT; a++) {
+        FsdRules rules;
+        one_rule(&rules, FSD_SIG_MAP_SW_RL, FSD_TRIG_PRESS, 0, (FsdBodyAction)a, 0);
+        const FsdTriggerEvent ev = ev_of(FSD_SIG_MAP_SW_RL, FSD_TRIG_PRESS, 0, now);
+        dirty(out);
+        CHECK(fsd_pipe_decide(&rules, &ev, out, FSD_PIPE_MAX_OUT) == 1u,
+              "%s: one decision", fsd_body_action_str((FsdBodyAction)a));
+        CHECK(out[0].stage == FSD_PIPE_OK,
+              "%s: no gate may stand in front of a press, stopped at %s (%s)",
+              fsd_body_action_str((FsdBodyAction)a), fsd_pipe_stage_str(out[0].stage),
+              fsd_pipe_reason_str(out[0].stage, out[0].reason));
+    }
+
+    /* 🔴 AND THE ENUM ITSELF, so a gate cannot return as a NEW refusal without
+     * this line saying so. FSD_PIPE_BLOCKED_BODY was value 1; anything
+     * inserted in front of the emitter takes that slot, and a fourth stage
+     * appended after the chokepoint takes value 3. Both are named here, which
+     * is cheaper and harder to fool than counting the enum. */
+    CHECK(strcmp(fsd_pipe_stage_str((FsdPipeStage)1), "emitter") == 0,
+          "stage 1 must still be the emitter, got \"%s\"",
+          fsd_pipe_stage_str((FsdPipeStage)1));
+    CHECK(strcmp(fsd_pipe_stage_str((FsdPipeStage)3), "?") == 0,
+          "there must be no fourth stage, got \"%s\"",
+          fsd_pipe_stage_str((FsdPipeStage)3));
+}
+
 int main(void) {
-    printf("test_pipeline: rule -> axis -> emitter -> chokepoint\n");
+    test_no_gate_stands_in_front_of_a_press();
+    printf("test_pipeline: rule -> emitter -> chokepoint\n");
     test_turn_signal_needs_a_burst();
-    test_a_repeat_faces_every_gate();
+    test_a_repeat_builds_the_same_frame();
     test_observe();
     test_turn_signal_end_to_end();
     test_a_press_is_not_the_moment_to_ask_about_freshness();
-    test_the_press_still_faces_the_axis();
     test_the_press_no_longer_depends_on_where_the_finger_lands();
     test_each_layer_refuses();
     test_quiet_cases();
@@ -1335,11 +1101,6 @@ int main(void) {
     test_burst_slots_are_finite_and_say_so();
     test_burst_reset_stops_everything();
     test_burst_arming_zero_is_not_a_burst();
-    test_last_act_is_stamped_once_per_command();
-    test_the_frames_of_a_command_are_exempt();
-    test_a_refused_command_leaves_no_stamp();
-    test_stamps_outlive_the_burst_that_made_them();
-    test_reset_forgets_the_stamps_too();
     test_a_command_goes_out_where_its_template_came_in();
     test_a_template_that_moves_bus_moves_with_it();
     test_the_release_goes_out_where_the_press_did();

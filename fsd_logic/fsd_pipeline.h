@@ -27,18 +27,34 @@
  *
  * WHAT STILL GUARDS THE BUS
  * -------------------------
- * Nothing here loosens anything. A decision has to survive, in order:
+ * Nothing here loosens anything on its own. A decision has to survive, in
+ * order:
  *
- *   the rule       the owner has to have written it (fsd_rules_match)
- *   the axis       fsd_body_allows: mode, bus, OTA, RX freshness, driver,
- *                  gear, speed, drive session, min interval, and the
- *                  per-action enable the caller sets
+ *   the rule       the owner has to have written it and switched it on
+ *                  (fsd_rules_match)
+ *   the row        fsd_body_wire: this action has to have a measured row at all
  *   the emitter    fsd_emit_build: a template from the car, fresh, right ID,
  *                  right multiplex, inside the measured region
  *   the chokepoint fsd_body_wire_check: the outgoing frame may differ from the
  *                  car's most recent one ONLY in this action's bits
  *
- * Four independent refusals, each with its own name in the result. A decision
+ * 🔴🔴 THERE WAS A PERMISSION AXIS BETWEEN THE RULE AND THE EMITTER AND IT IS
+ * GONE (owner's instruction, 2026-09-10):
+ *
+ *     "차의 모든 안전게이트관련사항을 삭제해라.
+ *      필요하다면 추후 내가 하나씩 추가하겠다."
+ *
+ * It asked about mode, bus, OTA, RX freshness, gear, speed, the drive session,
+ * the rate limit and a per-action enable. All of it went -- not defaulted to
+ * "allow", DELETED, so there is nothing left to default. What remains asks
+ * nothing about the car's situation: it asks whether we know how to build
+ * this frame and whether the bytes we built are the bytes we were allowed to
+ * change.
+ *
+ * ⚠️ SAY IT PLAINLY: A RULE THAT IS SWITCHED ON ACTS. Driving, parked, empty
+ * or occupied, the moment its trigger fires and the car's frame arrives.
+ *
+ * Three independent refusals, each with its own name in the result. A decision
  * that fails any of them yields no frame at all.
  */
 
@@ -74,7 +90,6 @@ extern "C" {
 /** Where a decision stopped. Anything but OK means NO FRAME WAS BUILT. */
 typedef enum {
     FSD_PIPE_OK = 0,
-    FSD_PIPE_BLOCKED_BODY, /* reason is FsdBodyVerdict */
     FSD_PIPE_BLOCKED_EMIT, /* reason is FsdEmitResult */
     FSD_PIPE_BLOCKED_WIRE, /* reason is FsdBodyWireVerdict */
 } FsdPipeStage;
@@ -197,8 +212,7 @@ void fsd_pipe_release(FsdBodyAction action, int32_t arg, uint8_t rule_index,
  *
  * 🔴 TRANSMITS NOTHING. See the header comment. */
 void fsd_pipe_one(FsdBodyAction action, int32_t arg, uint8_t rule_index,
-                  const FsdBodyInputs* in, const FsdPipeFrames* f,
-                  uint32_t now_ms, FsdPipeResult* out);
+                  const FsdPipeFrames* f, uint32_t now_ms, FsdPipeResult* out);
 
 /**
  * WHICH RULES MATCHED, AND MAY EACH OF THEM ACT -- WITHOUT BUILDING A FRAME.
@@ -244,8 +258,7 @@ void fsd_pipe_one(FsdBodyAction action, int32_t arg, uint8_t rule_index,
  * Safe with any NULL: returns 0.
  */
 uint8_t fsd_pipe_decide(const FsdRules* rules, const FsdTriggerEvent* ev,
-                        const FsdBodyInputs* in, uint32_t now_ms, FsdPipeResult* out,
-                        uint8_t max_out);
+                        FsdPipeResult* out, uint8_t max_out);
 
 /** Human-readable stage, for logs and the app. */
 const char* fsd_pipe_stage_str(FsdPipeStage s);

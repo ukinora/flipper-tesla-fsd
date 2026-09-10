@@ -10,11 +10,12 @@
  *
  * That is deliberate and it is not laziness:
  *
- *   - There is still NO EMITTER. fsd_body.h says so at length: no frame is
- *     constructed anywhere in this firmware, six of seven action rows have
- *     armable_at_runtime = false, and send_on_bus() refuses the body IDs
- *     outright. A matcher wired up today would produce decisions that three
- *     separate gates would then throw away.
+ *   - There was NO EMITTER. (2026-09-02, when this was written: no frame was
+ *     constructed anywhere in this firmware, six of seven action rows had
+ *     armable_at_runtime = false, and send_on_bus() refused the body IDs
+ *     outright.) 🔴 TWO OF THOSE THREE ARE NOW FALSE -- emitters exist for six
+ *     actions and the authority column was deleted on 2026-09-10. What still
+ *     holds is that THIS FILE stores and does not run; rule_task.cpp runs.
  *   - The first write to the car is scheduled to happen IN THE CAR, on purpose.
  *     Wiring the trigger layer to the rule engine here would mean the first time
  *     anybody sees the two run together is also the first time the car is

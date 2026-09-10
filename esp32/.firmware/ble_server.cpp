@@ -33,7 +33,7 @@
 #include "mode_switch.h"
 #include "prefs.h"
 #include "rules_store.h"
-#include "rule_task.h" // rule_task_armed/set_armed — the transmission lock
+#include "rule_task.h" // the rule engine's tick and counters
 #include <NimBLEDevice.h>
 #include <string.h>
 
@@ -218,10 +218,6 @@ static volatile bool     g_btn_req_pending  = false;
 static volatile uint8_t  g_dbl_req          = 0;
 static volatile bool     g_dbl_req_pending  = false;
 static volatile uint8_t  g_bb_req           = 0;
-/* v9: the transmission lock, parked by the BLE task for loop(). Volatile and
- * beside the recorder's pair for the same reason -- two tasks touch them. */
-static volatile bool     g_rulearm_req_pending = false;
-
 /* OTA. 머리말은 파킹만 하고 loop() 가 실제로 칸을 연다 — 지우기가 1~3 초
  * 블로킹이라 BLE 호스트 태스크에서 할 수 없다. BB_ENABLE 과 같은 모양. */
 static volatile uint32_t g_ota_begin_req      = 0;
@@ -230,7 +226,6 @@ static volatile bool     g_ota_begin_pending  = false;
 /* 연결이 끊겼다. onDisconnect 는 BLE 태스크라 거기서 접지 않고 여기 맡긴다 —
  * loop() 가 3 초짜리 지우기 중이면 그 뮤텍스를 기다리다 스택이 멈춘다. */
 static volatile bool     g_ota_abandon_pending = false;
-static volatile uint8_t  g_rulearm_req         = 0;
 static volatile bool     g_bb_mark_pending  = false;
 /* Delete every capture, parked for loop(). blackbox_delete_all() walks the
  * filesystem removing files one at a time, which is not something the BLE host
@@ -320,7 +315,6 @@ static void ble_pack_state(uint8_t *out, uint16_t rx_fps) {
     /* v9, flags bit 7. Not from FSDState: the transmission lock lives in
      * rule_task and dies with the power, so it is asked rather than mirrored.
      * Without this the phone could not tell "locked" from "no rule matched". */
-    w.rule_armed       = rule_task_armed();
     w.gear             = s.di_gear;
     /* 🔴 낡은 제한속도는 아예 안 보낸다. 세 프레임이 같은 칸을 덮어쓰는데
      * 아무도 지우지 않아서, 30분 전 값이 지금 도로의 값처럼 앉아 있었다.
@@ -713,24 +707,6 @@ static void ble_apply_blackbox_request(void) {
         ble_send_result(BLE_CMD_BB_ALL,
                         now_all == want ? BLE_RES_OK : BLE_RES_REJECTED,
                         now_all ? 1u : 0u);
-    }
-
-    if (g_rulearm_req_pending) {
-        g_rulearm_req_pending = false;
-        const bool want = (g_rulearm_req != 0);
-
-        rule_task_set_armed(want);
-
-        /* What IS, not what was asked -- the same rule BB_ENABLE follows. On a
-         * build without the rule engine the setter is a no-op stub and the
-         * getter answers false, so a phone told "OK" would wait for frames
-         * that cannot come. */
-        const bool now_on = rule_task_armed();
-        ble_send_result(BLE_CMD_RULE_ARM,
-                        now_on == want ? BLE_RES_OK : BLE_RES_REJECTED,
-                        now_on ? 1u : 0u);
-        /* 🔴 NOT persisted, and that is the whole design of this switch: it
-         * dies with the power. g_prefs_dirty is deliberately not touched. */
     }
 
     if (g_bb_req_pending) {
@@ -1342,17 +1318,6 @@ class CommandCB : public NimBLECharacteristicCallbacks {
             ble_send_result(cmd, BLE_RES_OK, 0);
             break;
 
-        /* Parked for loop() like the recorder's switch, and for the same two
-         * reasons: rule_task's tick runs there, and the answer has to report
-         * what the switch IS rather than what was asked.
-         *
-         * The owner check is above, once, for every command -- see
-         * CommandCB::onWrite. */
-        case BLE_CMD_RULE_ARM:
-            if (g_rulearm_req_pending) { ble_send_result(cmd, BLE_RES_BUSY, 0); break; }
-            g_rulearm_req         = arg ? 1u : 0u;
-            g_rulearm_req_pending = true;
-            break;
 
         /* 받던 펌웨어를 접는다. loop() 로 미루는 이유는 나머지와 같다 —
          * 그쪽이 뮤텍스를 3 초 쥐고 있을 수 있고, 여기서 기다리면 BLE

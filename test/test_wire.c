@@ -117,8 +117,18 @@ static void test_profile_sentinel(void) {
     CHECK(FSD_WIRE_PROFILE_NONE > FSD_PROFILE_MASK,
           "sentinel 0x%02X must not be a real profile (mask 0x%02X)",
           FSD_WIRE_PROFILE_NONE, FSD_PROFILE_MASK);
-    CHECK(FSD_WIRE_STATE_LEN == 31u, "State is 31 bytes in v9");
-    CHECK(FSD_WIRE_STATE_VERSION == 9u, "version bumped with the length");
+    /* ⚠️ v10 IS THE SAME 31 BYTES AS v9 — the version moved and the length did
+     * not, which is exactly the case that would slip through unnoticed if only
+     * the length were pinned. flags bit 7 stopped carrying the transmission
+     * lock when the owner removed every safety gate (2026-09-10), and a phone
+     * reading v9 bytes as v10 would find a flag that is now always zero.
+     *
+     * 🔴🔴 SO THE BOARD AND THE APP MUST BE FLASHED TOGETHER. The app checks
+     * the version exactly and refuses a mismatch rather than guessing, which
+     * is why a half-upgrade shows as "못 푼 프레임" and an empty dashboard
+     * instead of quietly wrong numbers. */
+    CHECK(FSD_WIRE_STATE_LEN == 31u, "State is still 31 bytes in v10");
+    CHECK(FSD_WIRE_STATE_VERSION == 10u, "version moved even though the length did not");
 
     /* 🔴 Byte 28 carries the car's OWN percentage (0x33A) and needs a way to
      * say "never decoded". 0 cannot do it -- a flat battery reads 0 -- so the
@@ -483,18 +493,18 @@ static void test_state_structural_zeros(void) {
      * away -- it becomes the assertion that the bit TRACKS ITS FIELD, which is
      * strictly more than "it is zero". */
     CHECK((b[1] & (1u << 5)) != 0, "ui_speed_seen set when the field is true");
-    /* 🔴 Bit 7 asserted "never set" until v9, on the grounds that it belonged
-     * to the SET_PROFILE closed loop -- which emits nothing, both of its gates
-     * being shut. A bit reserved for something that does not exist is a bit
-     * nobody can see, and the transmission lock was exactly the thing the
-     * phone could not see. Same move bit 5 made, and the assertion becomes the
-     * same stronger one: it TRACKS ITS FIELD, in both directions. */
-    CHECK((b[1] & (1u << 7)) != 0, "rule_armed set when the field is true");
-    w.rule_armed = false;
-    fsd_wire_pack_state(&w, b);
-    CHECK((b[1] & (1u << 7)) == 0, "and clear when it is false");
-    w.rule_armed = true;
-    fsd_wire_pack_state(&w, b);
+    /* 🔴 BIT 7 IS UNASSIGNED AGAIN AS OF v10, and its history is the reason
+     * this line is worth keeping. It was "never set" for a long time, reserved
+     * for the SET_PROFILE loop that emits nothing; v9 gave it to the
+     * transmission lock, and the assertion became the stronger "it tracks its
+     * field in both directions"; then the owner removed every safety gate on
+     * 2026-09-10 and the lock went with them.
+     *
+     * ⚠️ SO THIS IS THE WEAK KIND OF ASSERTION AGAIN, and knowingly. A bit
+     * that is always zero cannot tell a phone anything -- what it does is
+     * notice the day somebody quietly lands a new field on it without saying
+     * so here. Whoever assigns bit 7 next turns this line red first. */
+    CHECK((b[1] & (1u << 7)) == 0, "bit 7 is unassigned again -- v9's lock is gone");
 
     w.ui_speed_seen = false;
     fsd_wire_pack_state(&w, b);
@@ -786,12 +796,11 @@ static void emit_fixture(FILE* f) {
          * Both numbers are the car's own, from captures/2026-09-03: 84 % on
          * the screen and 249 in 0x33A's low twelve bits. 249 miles is 401 km,
          * which is what that day's screen showed. */
-        {"car_screen_range_and_armed",
+        {"car_screen_range",
          {.rx_seen = true, .op_mode = 1, .hw_version = 2, .gear = 1,
           .rx_fps = 1000, .uptime_s = 700,
           .ui_soc_seen = true, .ui_soc = 84,
-          .ui_range_seen = true, .ui_range = 249u,
-          .rule_armed = true}},
+          .ui_range_seen = true, .ui_range = 249u}},
     };
 
     const size_t ns = sizeof(states) / sizeof(states[0]);
@@ -806,7 +815,7 @@ static void emit_fixture(FILE* f) {
                 "\"hw\": %u, \"speed_profile\": %u, \"ap_state\": %u, "
                 "\"speed_kph_x10\": %u, \"soc\": %u, \"gear\": %u, "
                 "\"speed_limit\": %u, \"rx_fps\": %u, \"crc_err\": %u, "
-                "\"uptime_s\": %u, \"blink_l\": %u, \"blink_r\": %u, \"limit_src\": %u, \"bs_l\": %u, \"bs_r\": %u, \"tyre0\": %u, \"tyre1\": %u, \"tyre2\": %u, \"tyre3\": %u, \"ui_soc\": %u, \"ui_range\": %u, \"rule_armed\": %u } }%s\n",
+                "\"uptime_s\": %u, \"blink_l\": %u, \"blink_r\": %u, \"limit_src\": %u, \"bs_l\": %u, \"bs_r\": %u, \"tyre0\": %u, \"tyre1\": %u, \"tyre2\": %u, \"tyre3\": %u, \"ui_soc\": %u, \"ui_range\": %u } }%s\n",
                 (unsigned)b[0], (unsigned)b[1], (unsigned)w->op_mode,
                 (unsigned)w->hw_version, (unsigned)b[4], (unsigned)w->ap_state,
                 (unsigned)le16(&b[6]), (unsigned)b[8], (unsigned)w->gear,
@@ -817,11 +826,11 @@ static void emit_fixture(FILE* f) {
                 (unsigned)(b[21] & 0x03u), (unsigned)((b[21] >> 2) & 0x03u),
                 (unsigned)b[22], (unsigned)b[23], (unsigned)b[24], (unsigned)b[25],
                 (unsigned)b[28], (unsigned)le16(&b[29]),
-                /* 0/1, not true/false. Every other value in this fixture is a
-                 * number and the Kotlin loader reads them ALL as integers -- a
-                 * JSON boolean here does not make one field awkward, it makes
-                 * the whole file refuse to load. */
-                (unsigned)((b[1] >> 7) & 1u),
+                /* 🔴 rule_armed WAS HERE UNTIL v10, printed as 0/1 rather than
+                 * true/false because the Kotlin loader reads every value in
+                 * this file as an integer. It is gone with the flag, and the
+                 * note stays: if a boolean-looking field is ever added here it
+                 * has to be a number, or the whole file refuses to load. */
                 (i + 1 < ns) ? "," : "");
     }
     fprintf(f, "  ],\n  \"camstat\": [\n");

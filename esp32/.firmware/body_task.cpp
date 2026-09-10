@@ -83,64 +83,27 @@ bool body_task_observe(uint32_t id, const uint8_t* data, uint8_t dlc, uint32_t n
     }
 }
 
-/* Snapshot everything the permission predicate needs. Written out rather than
- * hidden in a helper so the full set of inputs is visible in one place — the
- * same reason FsdSpInputs and FsdBodyInputs exist at all. */
-FsdBodyInputs body_task_permission_inputs(uint32_t now_ms) {
-    FsdBodyInputs in;
-    memset(&in, 0, sizeof(in));
-
-    /* 🔴 Every FSDState-derived field comes from fsd_body_inputs_from_state(),
-     * never from lines written out here. This function used to copy them by
-     * hand and MISSED THE BELT -- the gate learned to accept it, the host tests
-     * went green, and the bench still refused with "no driver" because these
-     * two fields stayed at the memset's false. A field with no producer is this
-     * repo's oldest failure; keeping the assembly in fsd_logic/ is what lets a
-     * host test stand where body_task.cpp cannot be reached. */
-    portENTER_CRITICAL(g_mux);
-    fsd_body_inputs_from_state(&in, g_state);
-    portEXIT_CRITICAL(g_mux);
-
-    in.bus_tx_open = g_bus_tx_open;
-
-    /* 🔴 THE DRIVE-SESSION LATCH WAS HERE AND IT IS GONE (owner's instruction,
-     * 2026-09-08). It set a flag the moment a P->D/R happened with the belt
-     * latched, and the axis refused everything until then — see fsd_body.c for
-     * what that cost and what still stands. */
-
-    /* Drivetrain, never GPS. See camera_task.h. */
-    in.speed_seen = camera_task_ref_speed_seen();
-    in.speed_kph = camera_task_ref_speed_kph();
-    in.speed_ms = camera_task_ref_speed_ms();
-
-    /* No action is enabled, and the memset above is what guarantees it for all
-     * of them -- these two lines are documentation, not the mechanism. The
-     * detectors measure either way, and the verdict they record (NOT_ENABLED)
-     * is the honest one.
-     *
-     * 🔴 The second line used to say "T2 could not be armed even if this were
-     * true: its capability row forbids it." That stopped being true on
-     * 2026-09-05 when the door's command frame was measured and its row opened,
-     * and the same now goes for the hazards and the turn signal. Four rows are
-     * armable today; NOTHING here arms them, and nothing anywhere transmits.
-     * The claim that has to keep being true is this one, not the old one. */
-    in.action_enabled[FSD_ACT_MAP_LIGHT] = false;
-    in.action_enabled[FSD_ACT_DOOR_OPEN] = false;
-
-    (void)now_ms;
-    return in;
-}
+/* 🔴🔴 body_task_permission_inputs() IS GONE (owner's instruction,
+ * 2026-09-10): "차의 모든 안전게이트관련사항을 삭제해라."
+ *
+ * It snapshotted everything the permission predicate needed -- mode, bus, OTA,
+ * RX freshness, gear, speed, belt, occupancy, per-action enable. There is no
+ * predicate any more, so there is nothing to snapshot.
+ *
+ * 🟢 THE LESSON IT CARRIED IS STILL TRUE AND IS WORTH KEEPING HERE: this
+ * function used to copy the FSDState fields by hand and MISSED THE BELT -- the
+ * gate learned to read it, 4,437 host tests went green, six mutations bit,
+ * eight boards built, and the bench still refused, because the two new fields
+ * sat at the memset's false with no producer. A field with no producer is this
+ * repository's oldest failure shape. */
 
 void body_task_tick(uint32_t now_ms) {
     if(!g_state || !g_mux) return;
     if((uint32_t)(now_ms - g_last_tick_ms) < BODY_TICK_MS) return;
     g_last_tick_ms = now_ms;
 
-    const FsdBodyInputs in = body_task_permission_inputs(now_ms);
-
-    /* The action is COUNTED, not performed. fsd_t1_tick() has already put the
-     * refusal reason where the log can read it. */
-    if(fsd_t1_tick(&g_t1, &in, now_ms) != FSD_T1_ACT_NONE) g_t1_actions++;
+    /* The action is COUNTED, not performed. */
+    if(fsd_t1_tick(&g_t1, now_ms) != FSD_T1_ACT_NONE) g_t1_actions++;
 
     if((uint32_t)(now_ms - g_last_log_ms) < BODY_LOG_MS) return;
 
@@ -166,9 +129,9 @@ void body_task_tick(uint32_t now_ms) {
          *   b5   the raw 0x3C2 byte the T2 detector last saw — the byte a
          *        person compares against the capture by eye
          *   last when the last T2 gesture landed, so it can be found in a dump */
-        "[BODY] t1:%u(%s) win:%u latch L:%X R:%X | t2:%u press:%ums gap:%ums "
+        "[BODY] t1:%u win:%u latch L:%X R:%X | t2:%u press:%ums gap:%ums "
         "rej:%u b5:%02X last:%ums | mux0:%ums drv:%u/%u\n",
-        (unsigned)g_t1_actions, fsd_body_verdict_str(fsd_t1_last_verdict(&g_t1)),
+        (unsigned)g_t1_actions,
         (unsigned)fsd_t1_window_count(&g_t1),
         (unsigned)fsd_t1_latch_raw(&g_t1, FSD_BODY_SIDE_LEFT),
         (unsigned)fsd_t1_latch_raw(&g_t1, FSD_BODY_SIDE_RIGHT), (unsigned)gestures,
@@ -188,7 +151,6 @@ void body_task_tick(uint32_t now_ms) {
         (unsigned)fsd_t2_driver_present(&g_t2));
 }
 
-uint8_t body_task_t1_verdict(void) { return (uint8_t)fsd_t1_last_verdict(&g_t1); }
 uint16_t body_task_t1_actions(void) { return g_t1_actions; }
 uint16_t body_task_t2_gestures(void) { return fsd_t2_gesture_count(&g_t2); }
 uint16_t body_task_t2_last_press_ms(void) { return fsd_t2_last_press_ms(&g_t2); }

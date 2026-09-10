@@ -45,23 +45,18 @@
  * bus. The first real write is a decision to be made in the car, with something
  * reversible, and it is not made in code.
  *
- * Every OTHER row has armable_at_runtime = false. Each one says in its comment
- * what evidence flips its bool — and each of the ones that opened did so
- * because the condition it wrote for itself was met, not because somebody
- * wanted it open.
+ * 🔴🔴 THE ARMING FLAG IS GONE (owner's instruction, 2026-09-10). This
+ * section used to explain armable_at_runtime -- which rows may be switched on
+ * at all, and what evidence flipped each bool. There is no such flag any more,
+ * and no fsd_body_allows() to read it: see the box on FsdBodyCaps below.
  *
- * ⚠️ THAT SENTENCE USED TO COUNT ("the other four rows"), AND THE COUNT WAS
- * WRONG THE DAY IT WAS WRITTEN — nine actions minus four armable is five, not
- * four. The heading above counts too, and it will go stale the same way. A
- * hand-written number in a comment has no test behind it; the two things that
- * do are the _Static_assert on the table's length and the host test that makes
- * armable_at_runtime and fsd_emit_supported() agree for EVERY action. Prefer
- * saying "every other" to saying a number.
+ * ⚠️ WHAT THE OLD TEXT GOT RIGHT AND IS WORTH KEEPING: a hand-written number
+ * in a comment has no test behind it. That sentence used to count rows and the
+ * count was wrong the day it was written. Say "every other", never a number.
  *
- * 🔴 The two statements must move together. armable_at_runtime and "has an
- * emitter" describe the same fact from two sides, and test_body_emit.c asserts
- * they agree for every action — so opening a row without an encoding, or
- * writing an encoding without opening the row, turns a test red.
+ * 🟢 One pairing survived the removal and still matters: an action that can be
+ * chosen in a rule must have an emitter, or the press produces nothing and the
+ * screen has no way to say why. test_body_emit.c still asserts that.
  *
  * See 권한축-재설계.md and 페일세이프-정책.md.
  */
@@ -128,41 +123,38 @@ typedef enum {
     FSD_ACT_COUNT,
 } FsdBodyAction;
 
-/* Every field is PERMISSIVE WHEN TRUE (or, for the numbers, PERMISSIVE WHEN
- * NON-ZERO), so C's zero-fill is the tightest possible row. A capability
- * someone forgets to write is a capability that is not granted -- the opposite
- * of the deny-list mistake that shipped once already and had to be inverted in
- * PR #10. */
+/* 🔴🔴 THIS ROW USED TO CARRY THE GATES, AND THE OWNER REMOVED THEM
+ * (2026-09-10): "차의 모든 안전게이트관련사항을 삭제해라. 필요하다면 추후
+ * 내가 하나씩 추가하겠다."
+ *
+ * Gone: may_act_while_moving, may_act_out_of_park, armable_at_runtime,
+ * requires_park, requires_passenger_empty, requires_belt, min_interval_ms --
+ * together with the whole predicate that read them, the inputs it read, and
+ * every named refusal it could return.
+ *
+ * 🔴 DELETED RATHER THAN DEFAULTED OPEN. A check that always passes still
+ * looks like a gate, and this repository has been bitten by that shape more
+ * than once; the 2026-09-08 removal of the driver and belt gates set the same
+ * rule. If one comes back it comes back as a decision, not as a flag someone
+ * flipped.
+ *
+ * WHAT STILL STANDS IN FRONT OF A FRAME -- and none of it is about the car's
+ * situation, all of it is about not writing bytes nobody measured:
+ *   - the rule has to exist and be switched on (fsd_rules, the owner's own list)
+ *   - the emitter has to know how to build the frame at all
+ *   - the bit-granularity chokepoint (fsd_body_wire) -- only measured bits
+ *   - the deny-list below -- 0x3F5/0x102/0x103 here, 0x229 at send_on_bus()
+ *   - the emitter needs a FRESH template from the car to copy */
 typedef struct {
     FsdBodyAction action; // must equal its own index; checked at runtime
-    bool may_act_while_moving;
-    bool may_act_out_of_park;
-    bool armable_at_runtime; // false = nothing may set action_enabled for it
-
-    /* Gear selection is the one action where the CURRENT gear is part of the
-     * permission: P -> D is the only transition this firmware will ever ask
-     * for, so anything else refuses. Distinct from may_act_out_of_park, which
-     * asks whether the action may happen at all outside P. */
-    bool requires_park;
-
-    /* The passenger seat must not move onto someone. frontOccupancySwitch
-     * (0x3C2 mux 0, 50|2) is already on the bus -- reading it costs nothing and
-     * not reading it would be laziness, not a trade-off. */
-    bool requires_passenger_empty;
-
-    /* Gear selection additionally wants the belt latched. The trigger the owner
-     * has in mind IS the belt, but a gate that trusts its trigger is not a
-     * gate. */
-    bool requires_belt;
-
-    /* 0 = this action may never fire. Rate limiting is not politeness: two
-     * rules that both fire on the same state produce a burst, and a seat motor
-     * driven by a burst goes to the end of its rail. */
-    uint16_t min_interval_ms;
 
     /* 0 = this action may not be held at all (single-shot only). An action that
      * must be re-sent to stay in effect needs an upper bound, or one stuck
-     * flag transmits forever. */
+     * flag transmits forever.
+     *
+     * 🔴 KEPT ON PURPOSE while the gates went. This is not a question about
+     * the car's state -- it is what stops a single stuck flag from writing to
+     * the bus forever, which is the same family as the chokepoint. */
     uint16_t max_hold_ms;
 } FsdBodyCaps;
 
@@ -171,144 +163,14 @@ typedef struct {
  *  of the table -- two copies is how the deny-lists diverged before. */
 const FsdBodyCaps* fsd_body_caps(FsdBodyAction a);
 
-/* Freshness for every supervision input here. Same window and same reasoning as
- * FSD_DRIVE_CTX_FRESH_MS in fsd_autonomy.h. */
-#define FSD_BODY_FRESH_MS 1000u
 
-/* Above this the car is moving, for any action whose row says it may not act
- * while moving. Deliberately low: the question is "is it standing still", not
- * "is it slow". */
-#define FSD_BODY_STANDSTILL_KPH 0.5f
+/* (FsdBodyInputs 는 게이트와 함께 사라졌다 — 위 상자 참조.) */
 
-/* Everything the predicate needs, snapshotted by the caller -- the same shape as
- * FsdSpInputs, and for the same reason: it makes the gate testable on the host
- * with no firmware, and it makes every input visible at the call site instead of
- * reached for through a global. */
-typedef struct {
-    OpMode op_mode;
-
-    /* The CAN controller's hardware listen-only bit is per-controller, not
-     * per-frame, and CanDriver::send() refuses outright while it is set. Only
-     * OpMode_Active clears it. Carried as an input rather than assumed, and
-     * DEFAULTS FALSE when the caller cannot tell -- the same fail-closed
-     * convention as FsdSpInputs.tx_armed. No body action may clear that bit as
-     * a side effect of being enabled. */
-    bool bus_tx_open;
-
-    /* Read raw. The ESP32 copy of fsd_can_transmit() honours an `ignore_ota`
-     * override that is NVS-persisted; a body write must not inherit that escape
-     * hatch, so this gate never consults it and is therefore strictly narrower
-     * in every state. */
-    bool ota_in_progress;
-    bool rx_stale;
-
-    /* SESSION-SCOPED. Never persisted to NVS -- that is operator intent for the
-     * camera axis only, where the flag grants nothing on its own. Here it is
-     * closer to authority, so it dies with the power. */
-    bool action_enabled[FSD_ACT_COUNT];
-
-    /* When each action last fired, for min_interval_ms. The CALLER owns this
-     * array: the predicate stays stateless, which is what lets the host tests
-     * drive it to any instant without a fixture. 0 means "never fired", and the
-     * unsigned wrap below treats that as long ago -- correct, because it is. */
-    uint32_t last_act_ms[FSD_ACT_COUNT];
-
-    /* A drive has actually happened since arming: a P -> D/R transition with the
-     * belt latched. Asks whether a drive HAPPENED, not whether one is happening
-     * now -- which is what lets a light act on a parked car whose driver just
-     * got out, without granting anything to a car that has sat untouched all
-     * night. */
+/* (FsdBodyVerdict 도 마찬가지다 — 거부할 것이 없으면 거부 이름도 없다.) */
 
 
-    bool gear_seen;
-    uint8_t gear; // FSD_GEAR_* from fsd_autonomy.h
-    uint32_t gear_ms;
 
-    bool speed_seen;
-    float speed_kph; // drivetrain, never GPS -- see camera_task.h
-    uint32_t speed_ms;
 
-    bool belt_seen;
-    bool belt_latched; // 0x3C2 mux 0, frontBuckleSwitch (48|2) == 2
-    uint32_t belt_ms;
-
-    bool passenger_seen;
-    bool passenger_present; // 0x3C2 mux 0, frontOccupancySwitch (50|2)
-    uint32_t passenger_ms;
-} FsdBodyInputs;
-
-/* One named value per refusal, so "the light did not come on" can be answered
- * over BLE instead of guessed at. Same shape and purpose as FsdSupVerdict. */
-typedef enum {
-    FSD_BODY_OK = 0,
-    FSD_BODY_UNKNOWN_ACTION, // out of range, or a capability row that drifted
-    FSD_BODY_NOT_ARMABLE,    // the row forbids arming this at all
-    FSD_BODY_NOT_ENABLED,
-    FSD_BODY_NO_MODE,   // op_mode outside {Active, Service}
-    FSD_BODY_BUS_SHUT,  // hardware listen-only: send() would refuse anyway
-    FSD_BODY_OTA,
-    FSD_BODY_RX_STALE,
-    FSD_BODY_TOO_SOON, // min_interval_ms, or a row that may never fire
-    FSD_BODY_NO_GEAR,
-    FSD_BODY_GEAR_STALE,
-    FSD_BODY_NOT_PARK,
-    FSD_BODY_NO_SPEED,
-    FSD_BODY_SPEED_STALE,
-    FSD_BODY_MOVING,
-    FSD_BODY_NO_BELT,
-    FSD_BODY_BELT_STALE,
-    FSD_BODY_NO_PASSENGER_SIGNAL,
-    FSD_BODY_PASSENGER_PRESENT,
-} FsdBodyVerdict;
-
-/** May this action happen right now? Holds no state, latches nothing, and
- *  grants no grace period. Checked in a fixed order so a missing input can
- *  never hide the gates behind it. */
-FsdBodyVerdict fsd_body_allows(const FsdBodyInputs* in, FsdBodyAction a, uint32_t now_ms);
-
-/** 🔴 NOT THE GATE. fsd_body_allows() is the gate; this is the half of it that
- *  reads vehicle state, split out so a caller can pass a row directly.
- *
- *  It deliberately does NOT check armable_at_runtime or action_enabled, so
- *  calling it from firmware would bypass arming. Nothing in the firmware calls
- *  it and nothing should.
- *
- *  It exists because half the rows are not armable yet, which would
- *  otherwise ship the park / belt / occupancy / rate gates with no test at all
- *  — and this repository's own history is that an untested gate is a wrong
- *  gate. The tests build rows the table does not contain yet and drive every
- *  branch through here. */
-FsdBodyVerdict fsd_body_caps_verdict(const FsdBodyCaps* c, const FsdBodyInputs* in,
-                                     FsdBodyAction a, uint32_t now_ms);
-
-/** Human-readable verdict, for logs and the BLE surface. */
-/** Copy every FsdBodyInputs field that comes out of FSDState.
- *
- * 🔴 THIS EXISTS BECAUSE THE FIELDS WERE ADDED AND NOBODY FILLED THEM. On
- * 2026-09-07 the driver gate learned to accept the belt, 4,437 host tests went
- * green, six mutations bit, eight boards built -- and the bench still refused
- * with "no driver", because esp32/.firmware/body_task.cpp assembled
- * FsdBodyInputs by hand and simply had no line for belt_seen / belt_latched.
- * The memset at the top of that function left them false, so the new branch of
- * the gate could never be true on real hardware. The host tests could not see
- * it: they build the struct themselves, and body_task.cpp is not in the host
- * build at all.
- *
- * So the assembly moved here, where a host test can watch it. Add a field to
- * FsdBodyInputs that comes from FSDState and it gets filled in ONE place, and
- * the test below this comment's twin in test_body.c fails if it does not.
- *
- * What stays with the caller: everything that is NOT in FSDState -- the T2
- * observer's driverPresent, the camera task's reference speed, the drive
- * session latch, bus_tx_open, and the enable/last-fired arrays the caller owns
- * by design. Those have their own producers; these nine had none.
- *
- * Forward-declared rather than #include "fsd_state.h": four other headers pull
- * fsd_body.h in, and none of them wants the whole state struct. */
-struct FSDState;
-void fsd_body_inputs_from_state(FsdBodyInputs* in, const struct FSDState* st);
-
-const char* fsd_body_verdict_str(FsdBodyVerdict v);
 
 /** Human-readable action name, for the same reason. */
 const char* fsd_body_action_str(FsdBodyAction a);

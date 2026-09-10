@@ -50,7 +50,6 @@ static RuleTaskSend g_send = nullptr;
 
 /* 🔴 Session-only. Not in NVS, not in prefs.cpp, nowhere that survives a
  * power cut. See rule_task.h. */
-static bool g_armed = false;
 
 /* 🔴 THE BUS MOVED INTO THE RESULT (2026-09-08). It used to live here, as a
  * global set on every received frame -- "whichever channel spoke most
@@ -97,7 +96,6 @@ void rule_task_init(FSDState* state, portMUX_TYPE* mux, RuleTaskSend send) {
     g_send = send;
     fsd_trig_init(&g_trig);
     fsd_pipe_init(&g_frames);
-    g_armed = false;
 
     g_release.pending = false;
     g_sent = 0;
@@ -107,7 +105,7 @@ void rule_task_init(FSDState* state, portMUX_TYPE* mux, RuleTaskSend send) {
 }
 
 /* 🔴 사람이 읽는 한국어는 "매핑" 이다 (차주 지시 2026-09-03). 코드 이름은
- * "rule" 그대로 — 파일명 · 함수 · [RULE] 태그 · rules/rulearm 명령 전부
+ * "rule" 그대로 — 파일명 · 함수 · [RULE] 태그 · `rules`·`ruleq` 명령 전부
  * 안 바꾼다. 한쪽만 바꾸면 화면과 소스의 대조가 끊긴다. rules_store.cpp 가
  * 같은 규칙을 따르고, 이 파일은 2026-09-07 에 새로 생기면서 그것을 놓쳐
  * 하루 동안 "규칙" 을 찍고 있었다. */
@@ -123,76 +121,21 @@ void rule_task_init(FSDState* state, portMUX_TYPE* mux, RuleTaskSend send) {
  * drive it. This file owns a bus; that one owns the clock. */
 static FsdBurst g_burst;
 
-void rule_task_set_armed(bool armed) {
-    if (g_armed == armed) return;
-    g_armed = armed;
-    /* Disarming stops a burst mid-flight. The axis would refuse the rest
-     * anyway (NOT_ENABLED), but "stop" should not depend on a gate further
-     * down agreeing with it.
-     *
-     * 🔴 AND SINCE 2026-09-08 IT DROPS THE WHOLE COMMAND, not just its tail:
-     * no frame goes out before the car's next one, so a press that has not
-     * seen an arrival yet has written nothing at all. That is the safer
-     * direction and worth saying, because it means "lock" now cancels
-     * commands that used to be half-sent. */
-    fsd_burst_reset(&g_burst);
-    /* 🔴 AND IT DROPS A RELEASE THAT WAS OWED, which is the one place where
-     * "stop" costs something: the horn stays pressed until the car's own next
-     * mux-0 frame, up to 100 ms. That is the right trade -- disarm means stop
-     * writing to the bus, and 100 ms of a bit the car will contradict by
-     * itself is a smaller thing than a rule that keeps writing after the
-     * operator said no. */
-    g_release.pending = false;
-    /* 🔴 THIS SAID "무장/해제" UNTIL 2026-09-08, when the owner asked why.
-     * It was a literal rendering of `armed`. In English that word is neutral
-     * safety-engineering vocabulary only because of long usage -- you arm an
-     * alarm -- and the usage does not travel. In Korean 무장 is military and
-     * nothing else, so the translation kept the letter and dropped the sense.
-     *
-     * 🔴 Worse, one word was carrying four different jobs: this switch, the
-     * capability table's armable_at_runtime (a property of an action, not a
-     * state), the blackbox capture window, and the camera policy's ARMED
-     * phase -- and the last two can appear on the same phone screen. The
-     * visible words now name what each one actually does.
-     *
-     * 🔴 The identifiers do not change. g_armed, rule_task_set_armed() and
-     * the `rulearm` command keep their names, for the reason OpMode keeps
-     * "Active": the command is typed, and the field procedure quotes it as
-     * an anchor. Renaming the visible half and leaving the anchor is the
-     * decision, not an oversight. */
-    Serial.printf("[RULE] %s\n", armed
-        ? "송신 허용 — 매핑이 실제로 CAN 에 씁니다 (이 세션에만, 전원과 함께 꺼집니다)"
-        : "송신 잠금 — 매핑은 판정만 하고 아무것도 보내지 않습니다");
-}
-
-bool rule_task_armed(void) {
-    return g_armed;
-}
-
-/* The permission inputs, with the session switch folded in.
+/* 🔴🔴 rule_inputs() IS GONE, AND SO IS THE TRANSMIT UNLOCK (owner's
+ * instruction, 2026-09-10): "차의 모든 안전게이트관련사항을 삭제해라. 필요하다면
+ * 추후 내가 하나씩 추가하겠다."
  *
- * body_task.cpp already assembles every field from the shared state and its
- * own detectors, and duplicating that here is how the two would drift. What
- * this adds is the one thing body_task has no opinion about: whether the
- * operator armed the engine. Disarmed, every action_enabled stays false and
- * the axis answers NOT_ENABLED — the same refusal a disabled rule would get,
- * with a name. */
-/* `emitting` is the action whose frame is going out right now, or
- * FSD_ACT_COUNT on the press path where nothing is. It exempts that one action
- * from min_interval_ms -- see fsd_burst_fill_last_act(), which owns the reason.
+ * It used to hand the pipeline an FsdBodyInputs -- mode, bus, OTA, RX
+ * freshness, gear, speed, belt, occupancy, per-action enable and the rate
+ * limiter's timestamps -- with `g_armed` folded in as the session switch.
+ * There is no such struct any more and no axis to read it.
  *
- * 🔴 body_task.cpp memsets last_act_ms and nothing else fills it, so before
- * 2026-09-08 every min_interval_ms in FSD_BODY_CAPS was decorative: four gates
- * advertised, three enforced. The record lives in the burst table because that
- * table already is the list of commands accepted. */
-static FsdBodyInputs rule_inputs(uint32_t now_ms, unsigned emitting) {
-    FsdBodyInputs in = body_task_permission_inputs(now_ms);
-    if (g_armed) {
-        for (unsigned a = 0; a < FSD_ACT_COUNT; a++) in.action_enabled[a] = true;
-    }
-    fsd_burst_fill_last_act(&g_burst, in.last_act_ms, emitting);
-    return in;
-}
+ * 🔴 BE PLAIN ABOUT WHAT THAT MEANS: `g_armed` died with the power, so every
+ * session started locked and the owner had to unlock it. Now A RULE THAT IS
+ * SWITCHED ON ACTS FROM THE MOMENT THE BOARD COMES UP.
+ *
+ * 🟢 What the owner still controls is the rule list itself -- each mapping has
+ * its own on/off. That is a choice, not a gate. */
 
 static void note_refusal(const FsdPipeResult* r) {
     g_refused++;
@@ -282,29 +225,22 @@ static void arm_release(const FsdPipeResult* r, uint32_t now_ms) {
  * review caught: it went from the emitter straight to the bus with a
  * hand-written memcmp -- skipping fsd_body_wire_check(), which every other
  * write in this firmware goes through -- and its comment justified skipping
- * the axis by claiming the rate limit would refuse the release, which was not
- * true of that build: last_act_ms had no producer and every min_interval_ms
- * was decorative. Both halves moved into fsd_logic/ where a host test can
- * stand.
+ * the axis by claiming the rate limit would refuse the release. Both halves
+ * moved into fsd_logic/ where a host test can stand.
  *
- * ⚠️ The limiter IS enforced since 2026-09-08, so the claim is now arguable --
- * and the skip is still not justified by it. The release is skipped because it
- * is the second half of one gesture, not because of what any gate would
- * answer; see fsd_pipe_release().
+ * ⚠️ THE ARGUMENT ABOUT THE RATE LIMIT IS MOOT NOW and the skip never rested
+ * on it anyway: the axis is gone entirely (owner's instruction, 2026-09-10),
+ * and the release was always skipped because it is the second half of ONE
+ * gesture. See fsd_pipe_release().
  *
- * What still stands in front of the frame after this: the arm flag and the bus
- * guard here, then send_on_bus()'s mode gate and id refusals in main.cpp. */
+ * What still stands in front of the frame after this: the bus guard here,
+ * then send_on_bus()'s mode gate and id refusals in main.cpp. */
 static void release_due(uint32_t now_ms) {
     if (!g_release.pending) return;
     /* Signed, so the millisecond counter wrapping does not make a due release
      * wait another 49 days. */
     if ((int32_t)(now_ms - g_release.due_ms) < 0) return;
     g_release.pending = false;
-
-    /* 🔴 Disarming between the press and the release stops the release. The
-     * horn then stays pressed until the car's own next mux-0 frame, up to
-     * 100 ms -- the right trade, because "stop" has to mean stop writing. */
-    if (!g_armed) return;
 
     FsdPipeResult r;
     fsd_pipe_release(g_release.action, g_release.arg, g_release.rule_index, &g_frames,
@@ -315,11 +251,6 @@ static void release_due(uint32_t now_ms) {
 static void run_event(const FsdTriggerEvent* ev, uint32_t now_ms) {
     const FsdRules* rules = rules_store_table();
     if (!rules) return;
-
-    /* Nothing is being emitted here, so nothing is exempt: this is the one
-     * place min_interval_ms is asked, and a press inside the interval is
-     * refused before a burst can be armed. */
-    const FsdBodyInputs in = rule_inputs(now_ms, FSD_ACT_COUNT);
 
     FsdPipeResult out[FSD_PIPE_MAX_OUT];
     memset(out, 0, sizeof(out));
@@ -333,7 +264,7 @@ static void run_event(const FsdTriggerEvent* ev, uint32_t now_ms) {
      * fsd_pipe_decide() takes no template store, so the question cannot be
      * asked here even by accident. It is asked below, in burst_on_frame(),
      * where the answer is always yes because that IS the arrival. */
-    const uint8_t n = fsd_pipe_decide(rules, ev, &in, now_ms, out, FSD_PIPE_MAX_OUT);
+    const uint8_t n = fsd_pipe_decide(rules, ev, out, FSD_PIPE_MAX_OUT);
 
     for (uint8_t i = 0; i < n; i++) {
         /* 🔴 NOTHING IS SENT HERE. This used to ship frame one immediately and
@@ -346,15 +277,14 @@ static void run_event(const FsdTriggerEvent* ev, uint32_t now_ms) {
          * is a question about the event. Only the writing moved. */
         /* 🔴🔴 A REFUSAL ARMS NOTHING. Dropping the ship() call that used to
          * stand here removed the only thing that separated an accepted
-         * decision from a refused one -- and arming on a refusal is worse
-         * than sending on one: fsd_burst_arm() STAMPS last_act_ms, so a
-         * command the axis just rejected would lock the next, valid press out
-         * for the whole interval. It would also hold a slot until the
-         * deadline, and report its reason 500 ms late instead of under the
-         * finger that caused it.
+         * decision from a refused one: a refused command would hold a burst
+         * slot until the deadline and report its reason 500 ms late instead of
+         * under the finger that caused it.
          *
-         * Found while wiring the rate limiter -- the same commit that made the
-         * stamp mean anything is the one that made this dangerous. */
+         * ⚠️ It used to be worse than that -- fsd_burst_arm() also STAMPED
+         * last_act_ms, so a rejected command locked the next valid press out
+         * for a whole rate-limit interval. That stamp went with the axis
+         * (2026-09-10); the slot and the late reason are reason enough. */
         if (out[i].stage != FSD_PIPE_OK) {
             note_refusal(&out[i]);
             Serial.printf("[RULE] 매핑 %u %s 거부 — %s: %s\n",
@@ -402,10 +332,9 @@ static void burst_on_frame(uint32_t can_id, uint32_t now_ms) {
     /* Exempt this action: the command it belongs to already passed the
      * interval at the press, and the indicator's own row (50 ms) would
      * otherwise refuse frames two through four of its own burst. */
-    const FsdBodyInputs in = rule_inputs(now_ms, (unsigned)due.action);
     FsdPipeResult r;
     memset(&r, 0, sizeof(r));
-    fsd_pipe_one(due.action, due.arg, due.rule_index, &in, &g_frames, now_ms, &r);
+    fsd_pipe_one(due.action, due.arg, due.rule_index, &g_frames, now_ms, &r);
     /* A refusal here stops nothing by itself -- the slot is already spent, so
      * the burst runs out on its own. What it does is name why, which is the
      * whole point of doing it through the pipeline instead of around it. */
@@ -471,8 +400,13 @@ const char* rule_task_last_refusal(void) {
 }
 
 void rule_task_print(void) {
-    Serial.printf("[RULE] %s · 보냄 %u · 거부 %u · 마지막 거부: %s\n",
-                  g_armed ? "송신 허용" : "송신 잠금", (unsigned)g_sent, (unsigned)g_refused,
+    /* ⚠️ THE FIRST FIELD WAS `송신 허용 / 송신 잠금` AND IT IS GONE WITH THE
+     * SWITCH (2026-09-10). Deleting the argument without deleting its `%s` is
+     * exactly what happened on the first pass, and ALL EIGHT BOARDS BUILT --
+     * printf format checking is off in this toolchain, so the mistake reads
+     * `g_sent` as a char pointer at the car and nowhere else. */
+    Serial.printf("[RULE] 보냄 %u · 거부 %u · 마지막 거부: %s\n",
+                  (unsigned)g_sent, (unsigned)g_refused,
                   g_last_refusal);
     /* 🔴 WITHOUT THIS LINE "보냄 0" HAS TWO MEANINGS since 2026-09-08: nothing
      * was decided, or something was decided and is still waiting for the car.
@@ -481,10 +415,6 @@ void rule_task_print(void) {
                   "대기열이 가득 차 못 받은 것 %u\n",
                   (unsigned)fsd_burst_pending(&g_burst), (unsigned)g_burst.expired,
                   (unsigned)g_burst.dropped);
-    if (!g_armed) {
-        Serial.println("[RULE] 허용하려면 'rulearm on'. 이 세션에만 유효하고 "
-                       "전원이 끊기면 꺼집니다.");
-    }
 }
 
 #endif // BLE_SERVER_ENABLED

@@ -24,6 +24,18 @@
  * Each row names the evidence that flips its bool. That is the discipline this
  * table is for: a row opens when a stated condition is met, and the condition
  * is written down BEFORE anyone wants the row open. */
+/* 🔴🔴 아래 행 주석에 `may_act_while_moving` · `may_act_out_of_park` ·
+ * `armable_at_runtime` · `requires_park` · `requires_belt` ·
+ * `requires_passenger_empty` · `min_interval_ms` 가 계속 나온다. **그 필드들은
+ * 2026-09-10 에 사라졌다** (차주 지시).
+ *
+ * 문장을 지우지 않고 남기는 이유: 그것들은 **무엇을 왜 재서 그렇게 정했는지의
+ * 기록**이고, 게이트를 하나씩 되살릴 때 그 근거가 필요하다. 차주가
+ * *"필요하다면 추후 내가 하나씩 추가하겠다"* 고 했다.
+ *
+ * 🔴 **그러나 지금 동작을 말하는 문장이 아니다.** 이 저장소는 2026-09-09
+ * 감사에서 정확히 이 모양에 물렸다 — 없는 필드(`may_act_without_driver`)를
+ * 근거로 자기를 설명하는 주석 넷이 있었고, 그것만 읽으면 정반대로 안다. */
 static const FsdBodyCaps FSD_BODY_CAPS[] = {
     [FSD_ACT_MAP_LIGHT] =
         {
@@ -34,10 +46,6 @@ static const FsdBodyCaps FSD_BODY_CAPS[] = {
              * had sat untouched since yesterday, and the occupancy gate this
              * row waived, were both removed on 2026-09-08. What holds this
              * action is the rate limit and the rule the owner switched on. */
-            .may_act_while_moving = true,
-            .may_act_out_of_park = true,
-            .armable_at_runtime = true,
-            .min_interval_ms = 500u,
             /* TSL holds the light by re-sending; whether we must too is not
              * settled (see 권한축-재설계.md 8-D), so the bound exists before the
              * emitter does rather than after it misbehaves. */
@@ -81,8 +89,6 @@ static const FsdBodyCaps FSD_BODY_CAPS[] = {
     [FSD_ACT_DOOR_OPEN] =
         {
             .action = FSD_ACT_DOOR_OPEN,
-            .armable_at_runtime = true,
-            .min_interval_ms = 3000u,
             .max_hold_ms = 1000u,
         },
 
@@ -93,10 +99,6 @@ static const FsdBodyCaps FSD_BODY_CAPS[] = {
              * not that it is hard to undo — it is that nobody notices for
              * hours. That is answered by logging and by showing the state on
              * the dashboard, not by a gate. */
-            .may_act_while_moving = true,
-            .may_act_out_of_park = true,
-            .armable_at_runtime = false, // FLIPS WHEN: step 3, first write test
-            .min_interval_ms = 500u,
         },
 
     [FSD_ACT_SEAT_DRIVER] =
@@ -107,23 +109,14 @@ static const FsdBodyCaps FSD_BODY_CAPS[] = {
              * capability for the car — but a stuck rule driving a motor is, and
              * that is what max_hold_ms bounds. No occupancy check: the person
              * in this seat is the person asking. */
-            .may_act_while_moving = true,
-            .may_act_out_of_park = true,
-            .armable_at_runtime = false, // FLIPS WHEN: step 3
-            .min_interval_ms = 500u,
             .max_hold_ms = 1000u,
         },
 
     [FSD_ACT_SEAT_PASSENGER] =
         {
             .action = FSD_ACT_SEAT_PASSENGER,
-            .may_act_while_moving = true,
-            .may_act_out_of_park = true,
-            .armable_at_runtime = false, // FLIPS WHEN: step 3
             /* The difference from the driver's seat, and the whole reason these
              * are two rows: nobody asked on behalf of the passenger. */
-            .requires_passenger_empty = true,
-            .min_interval_ms = 500u,
             .max_hold_ms = 1000u,
         },
 
@@ -133,10 +126,6 @@ static const FsdBodyCaps FSD_BODY_CAPS[] = {
             /* The detent the whole safety story was originally written around.
              * Its own path (fsd_speed_profile.c) keeps a separate double gate;
              * this row does not replace it. */
-            .may_act_while_moving = true,
-            .may_act_out_of_park = true,
-            .armable_at_runtime = false, // FLIPS WHEN: encoding measured + armed
-            .min_interval_ms = 150u,
         },
 
     [FSD_ACT_GEAR_D] =
@@ -155,10 +144,6 @@ static const FsdBodyCaps FSD_BODY_CAPS[] = {
              * safety you have not seen is safety you are only assuming.
              *
              * FLIPS WHEN: the no-brake refusal is observed on the car. */
-            .armable_at_runtime = false,
-            .requires_park = true, // P -> D and nothing else
-            .requires_belt = true,
-            .min_interval_ms = 1000u,
         },
 
     /* Hazards. Measured 2026-09-05: 0x3E9 byte 0 bit 2, with a counter and a
@@ -192,10 +177,6 @@ static const FsdBodyCaps FSD_BODY_CAPS[] = {
     [FSD_ACT_HAZARDS] =
         {
             .action = FSD_ACT_HAZARDS,
-            .may_act_while_moving = true,
-            .may_act_out_of_park = true,
-            .armable_at_runtime = true,
-            .min_interval_ms = 500u,
             .max_hold_ms = 30000u,
         },
 
@@ -257,10 +238,6 @@ static const FsdBodyCaps FSD_BODY_CAPS[] = {
     [FSD_ACT_TURN_SIGNAL] =
         {
             .action = FSD_ACT_TURN_SIGNAL,
-            .may_act_while_moving = true,
-            .may_act_out_of_park = true,
-            .armable_at_runtime = true,
-            .min_interval_ms = 50u,
             .max_hold_ms = 1000u,
         },
 
@@ -308,8 +285,6 @@ static const FsdBodyCaps FSD_BODY_CAPS[] = {
     [FSD_ACT_MIRROR] =
         {
             .action = FSD_ACT_MIRROR,
-            .armable_at_runtime = true,
-            .min_interval_ms = 3000u,
             .max_hold_ms = 1000u,
         },
 
@@ -360,10 +335,6 @@ static const FsdBodyCaps FSD_BODY_CAPS[] = {
     [FSD_ACT_LIGHT_HORN] =
         {
             .action = FSD_ACT_LIGHT_HORN,
-            .may_act_while_moving = true,
-            .may_act_out_of_park = true,
-            .armable_at_runtime = true,
-            .min_interval_ms = 1000u,
             .max_hold_ms = 1000u,
         },
 };
@@ -371,199 +342,11 @@ static const FsdBodyCaps FSD_BODY_CAPS[] = {
 _Static_assert(sizeof(FSD_BODY_CAPS) / sizeof(FSD_BODY_CAPS[0]) == FSD_ACT_COUNT,
                "every FsdBodyAction needs an explicit capability row");
 
-static bool stale(uint32_t now_ms, uint32_t stamp_ms) {
-    return (uint32_t)(now_ms - stamp_ms) >= FSD_BODY_FRESH_MS;
-}
-
 const FsdBodyCaps* fsd_body_caps(FsdBodyAction a) {
     if(a >= FSD_ACT_COUNT) return NULL;
     const FsdBodyCaps* c = &FSD_BODY_CAPS[a];
     if(c->action != a) return NULL;
     return c;
-}
-
-FsdBodyVerdict fsd_body_allows(const FsdBodyInputs* in, FsdBodyAction a, uint32_t now_ms) {
-    if(!in) return FSD_BODY_UNKNOWN_ACTION;
-
-    /* Catches row drift, which the length assertion cannot: a table where two
-     * rows were transposed is the right length and entirely wrong. */
-    const FsdBodyCaps* c = fsd_body_caps(a);
-    if(!c) return FSD_BODY_UNKNOWN_ACTION;
-
-    /* The two arming gates live HERE and not in fsd_body_caps_verdict(), so
-     * that helper can never be the thing that grants an action. */
-    if(!c->armable_at_runtime) return FSD_BODY_NOT_ARMABLE;
-    if(!in->action_enabled[a]) return FSD_BODY_NOT_ENABLED;
-
-    return fsd_body_caps_verdict(c, in, a, now_ms);
-}
-
-FsdBodyVerdict fsd_body_caps_verdict(const FsdBodyCaps* c, const FsdBodyInputs* in,
-                                     FsdBodyAction a, uint32_t now_ms) {
-    if(!c || !in || a >= FSD_ACT_COUNT) return FSD_BODY_UNKNOWN_ACTION;
-
-    /* Exactly the set fsd_can_transmit() admits. Repeated rather than called so
-     * this file depends on no FSDState, and narrower by construction: it can
-     * never say yes where that says no. */
-    if(in->op_mode != OpMode_Active && in->op_mode != OpMode_Service) return FSD_BODY_NO_MODE;
-
-    if(!in->bus_tx_open) return FSD_BODY_BUS_SHUT;
-    if(in->ota_in_progress) return FSD_BODY_OTA; // never consults ignore_ota
-    if(in->rx_stale) return FSD_BODY_RX_STALE;
-
-    /* Before any vehicle-state gate, because it needs no input that could be
-     * missing: a row with min_interval_ms == 0 may never fire at all, and that
-     * has to be answerable even on a car that is telling us nothing. */
-    if(c->min_interval_ms == 0u) return FSD_BODY_TOO_SOON;
-    /* 🔴 0 IS "NEVER", NOT "AT MILLISECOND ZERO". The field's own comment
-     * promises the unsigned wrap treats it as long ago, and that is true for
-     * every millis() except the first few thousand: at now = 300 the
-     * subtraction yields 300, below the map light's 500, so the FIRST command
-     * of a run would be refused for as long as the interval lasts.
-     *
-     * Nobody could have noticed while the limiter was decorative. Turning it
-     * on (2026-09-08) made the promise load-bearing. The cost of the explicit
-     * check is one millisecond of licence, once per boot, to an action that
-     * genuinely fired at millis() 0. */
-    if(in->last_act_ms[a] != 0u &&
-       (uint32_t)(now_ms - in->last_act_ms[a]) < c->min_interval_ms)
-        return FSD_BODY_TOO_SOON;
-
-    /* 🔴 THE OCCUPANCY GATE WAS HERE, AND IT IS GONE (owner's instruction,
-     * 2026-09-08). Removed rather than widened: the owner asked for the belt
-     * to be out of the safety gate entirely, not made easier to satisfy.
-     *
-     * WHAT IT ASKED. "Is this car being used by someone", from 0x3C2 mux 0 --
-     * driverPresent OR frontBuckleSwitch, either one counting. Three refusals
-     * lived here: NO_DRIVER (never heard the frame), DRIVER_STALE (heard, then
-     * it stopped), NO_DRIVER_PRESENT (heard, and nobody is there).
-     *
-     * WHY IT TOOK TWO SIGNALS. driverPresent is a dead gate on this car: bit 4
-     * is set in 100/100 frames while parked with the gear being worked, and
-     * 0/100 across an entire drive home. Gating on it alone made a turn signal
-     * that may act at 88 km/h unable to fire at any speed. The belt was added
-     * on 2026-09-07 to carry the drive, and it read correctly both ways.
-     *
-     * 🔴 WHAT REMOVING IT COSTS, SAID PLAINLY RATHER THAN LEFT TO BE FOUND.
-     * Nothing in this axis now ties a body write to a person being in the car.
-     * What still stands: op mode, the session-only transmit unlock, the
-     * per-row gear and speed gates, the rate limit, a FRESH template frame
-     * from the car, the bit-granularity chokepoint, and the fact that the
-     * owner built the rule and switched it on.
-     *
-     * 🔴 AND THE HONEST GAP. Today's rules fire on physical switches, which a
-     * person has to press -- so a press is still evidence of a person. But a
-     * rule may also be built on a STATE, and a state changes on a parked car
-     * with nobody in it. The door is the heaviest case: it opens outward, and
-     * NO signal on this bus says what is beside the car. Standstill, park and
-     * the interval hold it; occupancy no longer does.
-     *
-     * requires_belt survives as a PER-ROW gate and still reads in->belt_*.
-     * Only FSD_ACT_GEAR_D sets it, and that row is armable_at_runtime = false.
-     */
-
-    /* 🔴 THE DRIVE-SESSION GATE WAS HERE, AND IT IS GONE (owner's
-     * instruction, 2026-09-08).
-     *
-     * It asked "has a human driven this car since the module powered on",
-     * proved by a P->D/R transition with the belt latched, and it refused
-     * everything until that had happened.
-     *
-     * It was the single biggest field trap in this project. The module comes
-     * up, the owner presses the switch, nothing happens, and the answer is a
-     * sequence nobody performs on purpose -- belt on, brake, into D, back to
-     * P. Two visits lost time to it, and every field card in this repo had to
-     * carry a warning about it.
-     *
-     * WHAT IT UNIQUELY BLOCKED WAS NARROW. For every action but one, the
-     * driver gate above already refuses a car with nobody in it; this one only
-     * added "and they also drove at some point". The map light is the
-     * exception -- its row waives the driver -- so for that one action the
-     * remaining proof that a person is involved is that A RULE FIRED, and the
-     * rules that exist fire on physical switches.
-     *
-     * What still stands in front of every write: the mode, the transmit
-     * unlock (session-only, dies with the power), the driver/belt gate above,
-     * the gear and speed gates per row, the rate limit, the emitter's need
-     * for a fresh template, and the bit-granularity chokepoint. */
-
-    /* Two different questions about the gear, and they are not the same gate.
-     * may_act_out_of_park asks "may this happen anywhere but P"; requires_park
-     * asks "is P the starting point this action transitions FROM". Gear
-     * selection needs the second and would pass the first.
-     *
-     * 🔴🔴 SILENCE IS EVIDENCE HERE, AND THIS GATE USED TO READ IT AS ABSENCE.
-     *
-     * Measured in the car 2026-09-10: a settled car's drive inverter SLEEPS and
-     * 0x118 (gear) and 0x257 (speed) STOP ARRIVING. The bus is otherwise busy —
-     * RX passed 1.5 million frames and the turn signal went out fine — but the
-     * mirror was refused three times with `axis: no gear signal`, and it only
-     * passed after a brake press woke the drivetrain.
-     *
-     * That is exactly backwards. A car CANNOT MOVE with a sleeping inverter, so
-     * the absence of the gear frame is positive evidence of a parked car — and
-     * a parked car is when you want to fold the mirror.
-     *
-     * 🔴 THIS REPO ALREADY KNEW. The BLE OTA gate was deliberately written as
-     * "refuse only when motion is OBSERVED, never prove standstill", and its
-     * comment names this very spot as the reason. The lesson was written down
-     * and the mirror row was not fixed.
-     *
-     * What does NOT relax:
-     *   - a FRESH frame that says D/R still refuses (NOT_PARK)
-     *   - silence AFTER the car last said D/R still refuses (GEAR_STALE) —
-     *     "it went quiet while driving" is not proof that it stopped
-     *   - requires_park keeps demanding a fresh P, because "is P the state I am
-     *     leaving" is a question silence can never answer
-     *
-     * The bus being alive is already established: FSD_BODY_RX_STALE runs above.
-     * So reaching here with no gear frame means the drivetrain is asleep, not
-     * that we have lost the bus. */
-    if(c->requires_park) {
-        if(!in->gear_seen) return FSD_BODY_NO_GEAR;
-        if(stale(now_ms, in->gear_ms)) return FSD_BODY_GEAR_STALE;
-        if(in->gear != FSD_GEAR_P) return FSD_BODY_NOT_PARK;
-    } else if(!c->may_act_out_of_park) {
-        if(in->gear_seen && in->gear != FSD_GEAR_P) {
-            return stale(now_ms, in->gear_ms) ? FSD_BODY_GEAR_STALE
-                                              : FSD_BODY_NOT_PARK;
-        }
-        /* Never heard, or the last word was P: the inverter is asleep. */
-    }
-
-    if(c->requires_belt) {
-        if(!in->belt_seen) return FSD_BODY_NO_BELT;
-        if(stale(now_ms, in->belt_ms)) return FSD_BODY_BELT_STALE;
-        if(!in->belt_latched) return FSD_BODY_NO_BELT;
-    }
-
-    if(c->requires_passenger_empty) {
-        /* Fail-closed on silence: not hearing the seat is not the same as an
-         * empty seat, and this is the gate whose failure puts a motor against
-         * a person. */
-        if(!in->passenger_seen) return FSD_BODY_NO_PASSENGER_SIGNAL;
-        if(stale(now_ms, in->passenger_ms)) return FSD_BODY_NO_PASSENGER_SIGNAL;
-        if(in->passenger_present) return FSD_BODY_PASSENGER_PRESENT;
-    }
-
-    /* Same shape as the gear above, and for the same measured reason: 0x257
-     * vanishes with the inverter. See that comment.
-     *
-     * requires_park keeps the strict form — the row that moves the gearbox is
-     * the one place worth demanding the drivetrain actually SAY zero, and it is
-     * what keeps FSD_BODY_NO_SPEED a verdict something can produce. */
-    if(!c->may_act_while_moving) {
-        if(c->requires_park) {
-            if(!in->speed_seen) return FSD_BODY_NO_SPEED;
-            if(stale(now_ms, in->speed_ms)) return FSD_BODY_SPEED_STALE;
-            if(in->speed_kph > FSD_BODY_STANDSTILL_KPH) return FSD_BODY_MOVING;
-        } else if(in->speed_seen && in->speed_kph > FSD_BODY_STANDSTILL_KPH) {
-            return stale(now_ms, in->speed_ms) ? FSD_BODY_SPEED_STALE
-                                               : FSD_BODY_MOVING;
-        }
-    }
-
-    return FSD_BODY_OK;
 }
 
 bool fsd_body_tx_id_refused(uint32_t can_id) {
@@ -606,51 +389,20 @@ const char* fsd_body_action_str(FsdBodyAction a) {
     return "?";
 }
 
-/* See the header. Nine fields, one place, so the next one added cannot go
- * missing the way the belt did. Deliberately does NOT memset: the caller fills
- * the other half from producers this file knows nothing about, and clearing
- * their work here would be a far quieter bug than the one this fixes. */
-void fsd_body_inputs_from_state(FsdBodyInputs* in, const struct FSDState* st) {
-    if(!in || !st) return;
+/* 🔴🔴 fsd_body_allows() · fsd_body_caps_verdict() · fsd_body_inputs_from_state()
+ * · fsd_body_verdict_str() ARE ALL GONE (owner's instruction, 2026-09-10):
+ * "차의 모든 안전게이트관련사항을 삭제해라. 필요하다면 추후 내가 하나씩
+ * 추가하겠다."
+ *
+ * Deleted rather than defaulted open, for the reason this repository keeps
+ * re-learning: a check that always passes still LOOKS like a gate, and the
+ * next person reads it as one. The 2026-09-08 removal of the driver and belt
+ * gates set that rule and this follows it -- fields, verdict names, the inputs
+ * struct and the producers went with the predicate.
+ *
+ * WHAT IS LEFT IN THIS FILE is not a gate about the car's situation. It is the
+ * deny-list below: three ids that must never leave this module no matter what
+ * built them. That, the bit chokepoint in fsd_body_wire.c, and the emitter's
+ * need for a fresh template are the whole of what stands in front of a frame
+ * now -- plus the owner's own rule list, which is a choice and not a gate. */
 
-    in->op_mode = st->op_mode;
-    in->ota_in_progress = st->tesla_ota_in_progress;
-    in->rx_stale = st->rx_stale;
-
-    in->gear = st->di_gear;
-    in->gear_seen = st->di_gear_seen;
-    in->gear_ms = st->di_gear_ms;
-
-    /* 0x3C2 mux 0 frontBuckleSwitch on this car -- 0x311 carries it on cars
-     * that ship an eight-byte UI_warning, and fsd_drive_observe_belt_switch()
-     * decides which. Either way it lands in these three FSDState fields, and
-     * this is the only line that carries them to the permission axis. */
-    in->belt_seen = st->belt_seen;
-    in->belt_latched = st->ui_buckle_status;
-    in->belt_ms = st->belt_seen_ms;
-}
-
-const char* fsd_body_verdict_str(FsdBodyVerdict v) {
-    switch(v) {
-    case FSD_BODY_OK: return "ok";
-    case FSD_BODY_UNKNOWN_ACTION: return "unknown action";
-    case FSD_BODY_NOT_ARMABLE: return "not armable";
-    case FSD_BODY_NOT_ENABLED: return "not enabled";
-    case FSD_BODY_NO_MODE: return "mode";
-    case FSD_BODY_BUS_SHUT: return "bus listen-only";
-    case FSD_BODY_OTA: return "tesla updating";
-    case FSD_BODY_RX_STALE: return "bus quiet";
-    case FSD_BODY_TOO_SOON: return "too soon";
-    case FSD_BODY_NO_GEAR: return "no gear signal";
-    case FSD_BODY_GEAR_STALE: return "gear signal stale";
-    case FSD_BODY_NOT_PARK: return "not in park";
-    case FSD_BODY_NO_SPEED: return "no speed signal";
-    case FSD_BODY_SPEED_STALE: return "speed signal stale";
-    case FSD_BODY_MOVING: return "moving";
-    case FSD_BODY_NO_BELT: return "belt not latched";
-    case FSD_BODY_BELT_STALE: return "belt signal stale";
-    case FSD_BODY_NO_PASSENGER_SIGNAL: return "no passenger signal";
-    case FSD_BODY_PASSENGER_PRESENT: return "passenger seated";
-    }
-    return "?";
-}
