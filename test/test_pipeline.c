@@ -365,18 +365,50 @@ static void test_the_press_still_faces_the_axis(void) {
           "out of park refused, got %s (%s)", fsd_pipe_stage_str(out[0].stage),
           fsd_pipe_reason_str(out[0].stage, out[0].reason));
 
-    /* 🔴 THE GEAR REFUSAL THE CAR PRODUCED FIRST, ON THE SAME DAY. The drive
-     * inverter sleeps when the car settles and 0x118 stops entirely -- so the
-     * mirror, which needs P, cannot prove P. "no gear signal", not "not park":
-     * that difference is what sent the owner to open a door rather than to
-     * look for a bug. It must survive at the press, because it is a fact about
-     * the bus and not about any template. */
+    /* 🔴🔴 THIS ASSERTION USED TO BE THE OPPOSITE, AND IT PINNED A DEFECT.
+     *
+     * The observation in the old comment was right and is kept: the drive
+     * inverter sleeps when the car settles and 0x118 stops entirely, so the
+     * verdict is "no gear signal" and not "not park". What was wrong was the
+     * conclusion -- it asserted that refusal "must survive at the press".
+     *
+     * Measured in the car on 2026-09-10: that refusal is what makes the mirror
+     * unusable. Three presses were refused with `axis: no gear signal` on a
+     * settled car, and it took a brake press to wake the drivetrain. A parked
+     * car is exactly when you fold a mirror, so the gate was closed at the only
+     * time the feature is wanted.
+     *
+     * 🔴 THE SECOND PATTERN, EXACTLY: a test that writes the observation down
+     * correctly and then locks the wrong behaviour in as correct. Anyone who
+     * fixed fsd_body.c would have been sent back by this red line. It is not
+     * deleted -- it now asserts the measured truth, and the two silences that
+     * MUST still refuse are asserted right after it. */
     in = parked_inputs(now);
     in.gear_seen = false;
+    in.speed_seen = false;
     dirty(out);
     (void)fsd_pipe_decide(&rules, &ev, &in, now, out, FSD_PIPE_MAX_OUT);
-    CHECK(out[0].stage == FSD_PIPE_BLOCKED_BODY && out[0].reason == (uint8_t)FSD_BODY_NO_GEAR,
-          "a silent drive inverter refuses at the press, got %s (%s)",
+    CHECK(out[0].stage == FSD_PIPE_OK,
+          "a settled car folds its mirror, stopped at %s (%s)",
+          fsd_pipe_stage_str(out[0].stage), fsd_pipe_reason_str(out[0].stage, out[0].reason));
+
+    /* Silence AFTER the car said it was driving is not proof that it stopped. */
+    in = parked_inputs(now);
+    in.gear = FSD_GEAR_D;
+    in.gear_ms = now - 60000u;
+    dirty(out);
+    (void)fsd_pipe_decide(&rules, &ev, &in, now, out, FSD_PIPE_MAX_OUT);
+    CHECK(out[0].stage == FSD_PIPE_BLOCKED_BODY && out[0].reason == (uint8_t)FSD_BODY_GEAR_STALE,
+          "went quiet in D still refuses, got %s (%s)",
+          fsd_pipe_stage_str(out[0].stage), fsd_pipe_reason_str(out[0].stage, out[0].reason));
+
+    in = parked_inputs(now);
+    in.speed_kph = 40.0f;
+    in.speed_ms = now - 60000u;
+    dirty(out);
+    (void)fsd_pipe_decide(&rules, &ev, &in, now, out, FSD_PIPE_MAX_OUT);
+    CHECK(out[0].stage == FSD_PIPE_BLOCKED_BODY && out[0].reason == (uint8_t)FSD_BODY_SPEED_STALE,
+          "went quiet at 40 kph still refuses, got %s (%s)",
           fsd_pipe_stage_str(out[0].stage), fsd_pipe_reason_str(out[0].stage, out[0].reason));
 
     in = parked_inputs(now);

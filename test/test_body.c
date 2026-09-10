@@ -1090,7 +1090,110 @@ static void test_the_capture_that_refused_now_passes(void) {
           fsd_body_verdict_str(g));
 }
 
+
+/* ── 잠든 차 (2026-09-10 실차) ───────────────────────────────────────────── */
+
+/* The drive inverter sleeps on a settled car and 0x118 / 0x257 STOP. Absence
+ * of the gear frame is not "some other gear" — it is proof the drivetrain is
+ * asleep, and a car cannot move with a sleeping inverter. The bus being alive
+ * is already established before this gate (FSD_BODY_RX_STALE runs first). */
+static void test_mirror_works_on_a_settled_car(void) {
+    const uint32_t now = 100000;
+    FsdBodyInputs in = good_inputs(now);
+    in.action_enabled[FSD_ACT_MIRROR] = true;
+
+    /* The inverter is asleep: neither frame has ever arrived. */
+    in.gear_seen = false;
+    in.speed_seen = false;
+
+    CHECK(fsd_body_allows(&in, FSD_ACT_MIRROR, now) == FSD_BODY_OK,
+          "a settled car must not refuse the mirror — that is when you fold it");
+}
+
+static void test_mirror_works_when_the_frames_went_quiet_in_park(void) {
+    const uint32_t now = 100000;
+    FsdBodyInputs in = good_inputs(now);
+    in.action_enabled[FSD_ACT_MIRROR] = true;
+
+    /* Seen, then the inverter slept. The last thing it said was P and 0 kph. */
+    in.gear = FSD_GEAR_P;
+    in.gear_ms = now - 60000u;
+    in.speed_kph = 0.0f;
+    in.speed_ms = now - 60000u;
+
+    CHECK(fsd_body_allows(&in, FSD_ACT_MIRROR, now) == FSD_BODY_OK,
+          "went quiet while parked — still parked");
+}
+
+/* 🔴 The half of this that must NOT relax. */
+static void test_mirror_refuses_when_the_last_word_was_driving(void) {
+    const uint32_t now = 100000;
+    FsdBodyInputs in = good_inputs(now);
+    in.action_enabled[FSD_ACT_MIRROR] = true;
+
+    in.gear = FSD_GEAR_D;
+    in.gear_ms = now - 60000u;   /* stale, and the last word was D */
+
+    CHECK(fsd_body_allows(&in, FSD_ACT_MIRROR, now) == FSD_BODY_GEAR_STALE,
+          "last heard in D and then silence is not proof of park");
+}
+
+static void test_mirror_refuses_when_the_last_word_was_moving(void) {
+    const uint32_t now = 100000;
+    FsdBodyInputs in = good_inputs(now);
+    in.action_enabled[FSD_ACT_MIRROR] = true;
+
+    in.speed_kph = 40.0f;
+    in.speed_ms = now - 60000u;  /* stale, and the last word was 40 kph */
+
+    CHECK(fsd_body_allows(&in, FSD_ACT_MIRROR, now) == FSD_BODY_SPEED_STALE,
+          "last heard at 40 kph and then silence is not proof of standstill");
+}
+
+static void test_mirror_still_refuses_a_car_that_says_it_is_driving(void) {
+    const uint32_t now = 100000;
+    FsdBodyInputs in = good_inputs(now);
+    in.action_enabled[FSD_ACT_MIRROR] = true;
+
+    in.gear = FSD_GEAR_D;        /* fresh */
+    CHECK(fsd_body_allows(&in, FSD_ACT_MIRROR, now) == FSD_BODY_NOT_PARK,
+          "a fresh D still refuses — folding a mirror at speed removes the view");
+
+    in = good_inputs(now);
+    in.action_enabled[FSD_ACT_MIRROR] = true;
+    in.speed_kph = 40.0f;        /* fresh */
+    CHECK(fsd_body_allows(&in, FSD_ACT_MIRROR, now) == FSD_BODY_MOVING,
+          "a fresh 40 kph still refuses");
+}
+
+/* 🔴 Gear selection asks a DIFFERENT question — "is P the state I am
+ * transitioning FROM" — and silence can never answer it. This must stay
+ * strict even though the row above relaxed. */
+static void test_gear_selection_still_demands_a_real_park_frame(void) {
+    const uint32_t now = 100000;
+    FsdBodyCaps c = *fsd_body_caps(FSD_ACT_GEAR_D);
+    c.armable_at_runtime = true;
+    FsdBodyInputs in = good_inputs(now);
+    in.action_enabled[FSD_ACT_GEAR_D] = true;
+
+    in.gear_seen = false;
+    CHECK(fsd_body_caps_verdict(&c, &in, FSD_ACT_GEAR_D, now) == FSD_BODY_NO_GEAR,
+          "requires_park cannot be satisfied by silence");
+
+    in = good_inputs(now);
+    in.action_enabled[FSD_ACT_GEAR_D] = true;
+    in.gear_ms = now - 60000u;   /* P, but stale */
+    CHECK(fsd_body_caps_verdict(&c, &in, FSD_ACT_GEAR_D, now) == FSD_BODY_GEAR_STALE,
+          "requires_park needs a FRESH park frame");
+}
+
 int main(void) {
+    test_mirror_works_on_a_settled_car();
+    test_mirror_works_when_the_frames_went_quiet_in_park();
+    test_mirror_refuses_when_the_last_word_was_driving();
+    test_mirror_refuses_when_the_last_word_was_moving();
+    test_mirror_still_refuses_a_car_that_says_it_is_driving();
+    test_gear_selection_still_demands_a_real_park_frame();
     printf("test_body\n");
     test_state_fields_reach_the_inputs();
     test_belt_from_state_rescues_the_gate();

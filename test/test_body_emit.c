@@ -571,9 +571,9 @@ static const TurnCase TURN_CASES[] = {
      * two commands differ ONLY in the stalk byte -- so this pair and that one
      * together prove the check byte moves with the stalk and not just with the
      * counter. D0 vs F4 out of the same template. */
-    {{0x9B, 0x00, 0x00, 0x00}, {0xF4, 0x01, 0x02, 0x00}, FSD_EMIT_TURN_CANCEL, "끄기 6.743"},
-    {{0xE8, 0x01, 0x00, 0x00}, {0x36, 0x02, 0x02, 0x00}, FSD_EMIT_TURN_CANCEL, "끄기 6.793"},
-    {{0x2A, 0x02, 0x00, 0x00}, {0xCF, 0x03, 0x02, 0x00}, FSD_EMIT_TURN_CANCEL, "끄기 6.844"},
+    {{0x9B, 0x00, 0x00, 0x00}, {0xF4, 0x01, 0x02, 0x00}, FSD_EMIT_TURN_TAP_UP, "끄기 6.743"},
+    {{0xE8, 0x01, 0x00, 0x00}, {0x36, 0x02, 0x02, 0x00}, FSD_EMIT_TURN_TAP_UP, "끄기 6.793"},
+    {{0x2A, 0x02, 0x00, 0x00}, {0xCF, 0x03, 0x02, 0x00}, FSD_EMIT_TURN_TAP_UP, "끄기 6.844"},
 };
 
 static FsdEmitTemplate turn_template(const uint8_t car[4], uint32_t at_ms) {
@@ -635,7 +635,7 @@ static void test_turn_reproduces_the_cars_own_frames(void) {
         {{0xA3, 0x04, 0x08, 0x00}, {0xF3, 0x05, 0x08, 0x00}, FSD_EMIT_TURN_LEFT, "좌 끝"},
         /* Cancel and right out of the same capture, including one where the
          * driver moved from the cancel detent straight to the other side. */
-        {{0x0F, 0x0D, 0x02, 0x00}, {0xB3, 0x0E, 0x02, 0x00}, FSD_EMIT_TURN_CANCEL, "우 UP_1 유지"},
+        {{0x0F, 0x0D, 0x02, 0x00}, {0xB3, 0x0E, 0x02, 0x00}, FSD_EMIT_TURN_TAP_UP, "우 UP_1 유지"},
         {{0xB3, 0x0E, 0x02, 0x00}, {0xF6, 0x0F, 0x04, 0x00}, FSD_EMIT_TURN_RIGHT, "우 UP_1->UP_2"},
         {{0xA3, 0x00, 0x04, 0x00}, {0xD0, 0x01, 0x04, 0x00}, FSD_EMIT_TURN_RIGHT, "우 유지"},
         {{0xD0, 0x01, 0x04, 0x00}, {0x12, 0x02, 0x04, 0x00}, FSD_EMIT_TURN_RIGHT, "우 유지2"},
@@ -787,13 +787,13 @@ static void test_turn_writes_only_its_own_three_bits(void) {
     CHECK(FSD_EMIT_TURN_STALK_MASK == 0x0Eu, "17|3 is byte2 bits [3:1]");
     CHECK((FSD_EMIT_TURN_LEFT_BITS & ~FSD_EMIT_TURN_STALK_MASK) == 0u, "left fits");
     CHECK((FSD_EMIT_TURN_RIGHT_BITS & ~FSD_EMIT_TURN_STALK_MASK) == 0u, "right fits");
-    CHECK((FSD_EMIT_TURN_CANCEL_BITS & ~FSD_EMIT_TURN_STALK_MASK) == 0u, "cancel fits");
+    CHECK((FSD_EMIT_TURN_TAP_UP_BITS & ~FSD_EMIT_TURN_STALK_MASK) == 0u, "tap up fits");
 
     /* The three are distinct, so no two directions can encode alike -- the
      * mistake the scroll table's own header warns about. */
     CHECK(FSD_EMIT_TURN_LEFT_BITS != FSD_EMIT_TURN_RIGHT_BITS &&
-              FSD_EMIT_TURN_LEFT_BITS != FSD_EMIT_TURN_CANCEL_BITS &&
-              FSD_EMIT_TURN_RIGHT_BITS != FSD_EMIT_TURN_CANCEL_BITS,
+              FSD_EMIT_TURN_LEFT_BITS != FSD_EMIT_TURN_TAP_UP_BITS &&
+              FSD_EMIT_TURN_RIGHT_BITS != FSD_EMIT_TURN_TAP_UP_BITS,
           "three directions, three values");
 
     /* Starting from a template that already holds a direction, the new one
@@ -859,19 +859,19 @@ static void test_turn_matches_every_observed_command(void) {
     printf("\n-- 깜빡이: 세 방문에서 관측된 명령 페이로드 29개 전부 --\n");
 
     static const TurnObserved TURN_OBSERVED[] = {
-        {0x0F, 0x87, 0x02, FSD_EMIT_TURN_CANCEL},
-        {0x00, 0xF4, 0x02, FSD_EMIT_TURN_CANCEL},
-        {0x01, 0x36, 0x02, FSD_EMIT_TURN_CANCEL},
-        {0x02, 0xCF, 0x02, FSD_EMIT_TURN_CANCEL},
-        {0x03, 0xCF, 0x02, FSD_EMIT_TURN_CANCEL},
-        {0x04, 0x9F, 0x02, FSD_EMIT_TURN_CANCEL},
-        {0x07, 0x23, 0x02, FSD_EMIT_TURN_CANCEL},
-        {0x08, 0x42, 0x02, FSD_EMIT_TURN_CANCEL},
-        {0x09, 0xFE, 0x02, FSD_EMIT_TURN_CANCEL},
-        {0x0A, 0x34, 0x02, FSD_EMIT_TURN_CANCEL},
-        {0x0C, 0x0F, 0x02, FSD_EMIT_TURN_CANCEL},
-        {0x0D, 0xB3, 0x02, FSD_EMIT_TURN_CANCEL},
-        {0x0E, 0xD2, 0x02, FSD_EMIT_TURN_CANCEL},
+        {0x0F, 0x87, 0x02, FSD_EMIT_TURN_TAP_UP},
+        {0x00, 0xF4, 0x02, FSD_EMIT_TURN_TAP_UP},
+        {0x01, 0x36, 0x02, FSD_EMIT_TURN_TAP_UP},
+        {0x02, 0xCF, 0x02, FSD_EMIT_TURN_TAP_UP},
+        {0x03, 0xCF, 0x02, FSD_EMIT_TURN_TAP_UP},
+        {0x04, 0x9F, 0x02, FSD_EMIT_TURN_TAP_UP},
+        {0x07, 0x23, 0x02, FSD_EMIT_TURN_TAP_UP},
+        {0x08, 0x42, 0x02, FSD_EMIT_TURN_TAP_UP},
+        {0x09, 0xFE, 0x02, FSD_EMIT_TURN_TAP_UP},
+        {0x0A, 0x34, 0x02, FSD_EMIT_TURN_TAP_UP},
+        {0x0C, 0x0F, 0x02, FSD_EMIT_TURN_TAP_UP},
+        {0x0D, 0xB3, 0x02, FSD_EMIT_TURN_TAP_UP},
+        {0x0E, 0xD2, 0x02, FSD_EMIT_TURN_TAP_UP},
         {0x0F, 0xA3, 0x04, FSD_EMIT_TURN_RIGHT},
         {0x00, 0xD0, 0x04, FSD_EMIT_TURN_RIGHT},
         {0x01, 0x12, 0x04, FSD_EMIT_TURN_RIGHT},
@@ -939,7 +939,7 @@ static void test_turn_check_table_is_pinned_at_every_counter(void) {
     const struct { int32_t turn; uint8_t prev; uint8_t check; } SEED[] = {
         {FSD_EMIT_TURN_LEFT, 0x09, 0x92},   /* 249#920A0800 */
         {FSD_EMIT_TURN_RIGHT, 0x0F, 0xA3},  /* 249#A3000400 */
-        {FSD_EMIT_TURN_CANCEL, 0x00, 0xF4}, /* 249#F4010200 */
+        {FSD_EMIT_TURN_TAP_UP, 0x00, 0xF4}, /* 249#F4010200 */
     };
 
     for (unsigned s = 0; s < sizeof(SEED) / sizeof(SEED[0]); s++) {
