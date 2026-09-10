@@ -116,8 +116,8 @@ bool fsd_emit_turn_bits(int32_t turn, uint8_t* bits_out) {
     case FSD_EMIT_TURN_RIGHT:
         *bits_out = FSD_EMIT_TURN_RIGHT_BITS;
         return true;
-    case FSD_EMIT_TURN_CANCEL:
-        *bits_out = FSD_EMIT_TURN_CANCEL_BITS;
+    case FSD_EMIT_TURN_TAP_UP:
+        *bits_out = FSD_EMIT_TURN_TAP_UP_BITS;
         return true;
     case FSD_EMIT_TURN_COUNT:
         break;
@@ -133,7 +133,7 @@ const char* fsd_emit_turn_str(int32_t turn) {
     switch((FsdEmitTurn)turn) {
     case FSD_EMIT_TURN_LEFT: return "left";
     case FSD_EMIT_TURN_RIGHT: return "right";
-    case FSD_EMIT_TURN_CANCEL: return "cancel";
+    case FSD_EMIT_TURN_TAP_UP: return "tap up (cancels, else right)";
     case FSD_EMIT_TURN_COUNT: break;
     }
     return "?";
@@ -209,7 +209,7 @@ static const uint8_t FSD_EMIT_TURN_CHECK_BASE[16] = {
 static bool turn_check_delta(uint8_t stalk, uint8_t* delta_out) {
     switch(stalk) {
     case 0x00u: *delta_out = 0x00u; return true; /* idle */
-    case 0x02u: *delta_out = 0x1Cu; return true; /* UP_1   -- cancel */
+    case 0x02u: *delta_out = 0x1Cu; return true; /* UP_1   -- half tap up */
     case 0x04u: *delta_out = 0x38u; return true; /* UP_2   -- right */
     case 0x06u: *delta_out = 0x24u; return true; /* DOWN_1 */
     case 0x08u: *delta_out = 0x70u; return true; /* DOWN_2 -- left */

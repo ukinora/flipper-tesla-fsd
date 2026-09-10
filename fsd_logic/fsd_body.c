@@ -490,11 +490,45 @@ FsdBodyVerdict fsd_body_caps_verdict(const FsdBodyCaps* c, const FsdBodyInputs* 
     /* Two different questions about the gear, and they are not the same gate.
      * may_act_out_of_park asks "may this happen anywhere but P"; requires_park
      * asks "is P the starting point this action transitions FROM". Gear
-     * selection needs the second and would pass the first. */
-    if(!c->may_act_out_of_park || c->requires_park) {
+     * selection needs the second and would pass the first.
+     *
+     * 🔴🔴 SILENCE IS EVIDENCE HERE, AND THIS GATE USED TO READ IT AS ABSENCE.
+     *
+     * Measured in the car 2026-09-10: a settled car's drive inverter SLEEPS and
+     * 0x118 (gear) and 0x257 (speed) STOP ARRIVING. The bus is otherwise busy —
+     * RX passed 1.5 million frames and the turn signal went out fine — but the
+     * mirror was refused three times with `axis: no gear signal`, and it only
+     * passed after a brake press woke the drivetrain.
+     *
+     * That is exactly backwards. A car CANNOT MOVE with a sleeping inverter, so
+     * the absence of the gear frame is positive evidence of a parked car — and
+     * a parked car is when you want to fold the mirror.
+     *
+     * 🔴 THIS REPO ALREADY KNEW. The BLE OTA gate was deliberately written as
+     * "refuse only when motion is OBSERVED, never prove standstill", and its
+     * comment names this very spot as the reason. The lesson was written down
+     * and the mirror row was not fixed.
+     *
+     * What does NOT relax:
+     *   - a FRESH frame that says D/R still refuses (NOT_PARK)
+     *   - silence AFTER the car last said D/R still refuses (GEAR_STALE) —
+     *     "it went quiet while driving" is not proof that it stopped
+     *   - requires_park keeps demanding a fresh P, because "is P the state I am
+     *     leaving" is a question silence can never answer
+     *
+     * The bus being alive is already established: FSD_BODY_RX_STALE runs above.
+     * So reaching here with no gear frame means the drivetrain is asleep, not
+     * that we have lost the bus. */
+    if(c->requires_park) {
         if(!in->gear_seen) return FSD_BODY_NO_GEAR;
         if(stale(now_ms, in->gear_ms)) return FSD_BODY_GEAR_STALE;
         if(in->gear != FSD_GEAR_P) return FSD_BODY_NOT_PARK;
+    } else if(!c->may_act_out_of_park) {
+        if(in->gear_seen && in->gear != FSD_GEAR_P) {
+            return stale(now_ms, in->gear_ms) ? FSD_BODY_GEAR_STALE
+                                              : FSD_BODY_NOT_PARK;
+        }
+        /* Never heard, or the last word was P: the inverter is asleep. */
     }
 
     if(c->requires_belt) {
@@ -512,10 +546,21 @@ FsdBodyVerdict fsd_body_caps_verdict(const FsdBodyCaps* c, const FsdBodyInputs* 
         if(in->passenger_present) return FSD_BODY_PASSENGER_PRESENT;
     }
 
+    /* Same shape as the gear above, and for the same measured reason: 0x257
+     * vanishes with the inverter. See that comment.
+     *
+     * requires_park keeps the strict form — the row that moves the gearbox is
+     * the one place worth demanding the drivetrain actually SAY zero, and it is
+     * what keeps FSD_BODY_NO_SPEED a verdict something can produce. */
     if(!c->may_act_while_moving) {
-        if(!in->speed_seen) return FSD_BODY_NO_SPEED;
-        if(stale(now_ms, in->speed_ms)) return FSD_BODY_SPEED_STALE;
-        if(in->speed_kph > FSD_BODY_STANDSTILL_KPH) return FSD_BODY_MOVING;
+        if(c->requires_park) {
+            if(!in->speed_seen) return FSD_BODY_NO_SPEED;
+            if(stale(now_ms, in->speed_ms)) return FSD_BODY_SPEED_STALE;
+            if(in->speed_kph > FSD_BODY_STANDSTILL_KPH) return FSD_BODY_MOVING;
+        } else if(in->speed_seen && in->speed_kph > FSD_BODY_STANDSTILL_KPH) {
+            return stale(now_ms, in->speed_ms) ? FSD_BODY_SPEED_STALE
+                                               : FSD_BODY_MOVING;
+        }
     }
 
     return FSD_BODY_OK;

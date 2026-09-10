@@ -442,13 +442,31 @@ typedef enum {
      * measured. All three of these are measured; none is a fallback. */
     FSD_EMIT_TURN_LEFT = 0,
     FSD_EMIT_TURN_RIGHT = 1,
-    FSD_EMIT_TURN_CANCEL = 2,
+    /* 🔴 THIS WAS CALLED "CANCEL" AND THAT NAME OVERSTATED THE MEASUREMENT.
+     *
+     * The wire value is UP_1 -- the stalk pushed HALF WAY UP. On this car that
+     * is the lane-change tap, and what it does depends on what the car is
+     * already doing:
+     *
+     *   a signal is running  -> it cancels          (measured 2026-09-08)
+     *   nothing is running   -> RIGHT, three blinks, self-cancelling
+     *                                               (measured 2026-09-10)
+     *
+     * There is no "off" command on this bus. Cancelling is a SIDE EFFECT of the
+     * half tap. The old name promised the first half and hid the second, and an
+     * owner who mapped it as "off" got three right blinks on a quiet car.
+     *
+     * 🟢 The uncertainty was already written down two lines below -- "nobody has
+     * sent it ALONE, so whether it cancels the way UP_1 does is unknown. Seen is
+     * not measured." The owner measured it. The value stays 2 so stored rules
+     * keep pointing at the same thing. */
+    FSD_EMIT_TURN_TAP_UP = 2,
     FSD_EMIT_TURN_COUNT,
 } FsdEmitTurn;
 
 #define FSD_EMIT_TURN_LEFT_BITS   0x08u /* DOWN_2 */
 #define FSD_EMIT_TURN_RIGHT_BITS  0x04u /* UP_2 */
-#define FSD_EMIT_TURN_CANCEL_BITS 0x02u /* UP_1, the half tap */
+#define FSD_EMIT_TURN_TAP_UP_BITS 0x02u /* UP_1, the half tap up */
 
 /** byte2 stalk field for a turn-signal selector. False — *bits_out untouched —
  *  for a selector this car has never been measured to accept. */
