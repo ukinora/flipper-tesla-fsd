@@ -225,6 +225,7 @@ static volatile bool     g_rulearm_req_pending = false;
 /* OTA. 머리말은 파킹만 하고 loop() 가 실제로 칸을 연다 — 지우기가 1~3 초
  * 블로킹이라 BLE 호스트 태스크에서 할 수 없다. BB_ENABLE 과 같은 모양. */
 static volatile uint32_t g_ota_begin_req      = 0;
+static volatile uint8_t  g_ota_id_req        = 0;
 static volatile bool     g_ota_begin_pending  = false;
 /* 연결이 끊겼다. onDisconnect 는 BLE 태스크라 거기서 접지 않고 여기 맡긴다 —
  * loop() 가 3 초짜리 지우기 중이면 그 뮤텍스를 기다리다 스택이 멈춘다. */
@@ -1062,9 +1063,15 @@ class OtaCB : public NimBLECharacteristicCallbacks {
          * 계층에서 조용히 거절된 적이 있다(PR #23). 이 보드는 화면이 없어
          * Just Works 밖에 못 하므로 "암호화됐다" 는 신원이 아니고, 신원은
          * ble_owner 가 갖는다. */
-        if (!info.isEncrypted()) return;
+        if (!info.isEncrypted()) {
+            static uint32_t s_enc = 0;
+            if ((s_enc++ & 0x3Fu) == 0u) Serial.printf("[OTA] 암호화 안 된 쓰기 %u\n", (unsigned)s_enc);
+            return;
+        }
         if (!ble_owner_allows(info.getIdAddress().getType(),
                               info.getIdAddress().getVal())) {
+            static uint32_t s_own = 0;
+            if ((s_own++ & 0x3Fu) == 0u) Serial.printf("[OTA] 주인이 아닌 쓰기 %u\n", (unsigned)s_own);
             ble_send_result(BLE_CMD_OTA_BEGIN, BLE_RES_NOT_OWNER, 0);
             return;
         }
@@ -1081,6 +1088,8 @@ class OtaCB : public NimBLECharacteristicCallbacks {
             }
             g_ota_begin_req = (uint32_t)body[0] | ((uint32_t)body[1] << 8) |
                               ((uint32_t)body[2] << 16) | ((uint32_t)body[3] << 24);
+            /* 🔴 다섯째 바이트가 **이 전송의 번호**다. 없으면 0 — 옛 앱이다. */
+            g_ota_id_req = (n >= 5u) ? body[4] : 0u;
             /* 🔴 여기서 답하지 않는다. 칸을 여는 데 몇 초가 걸리고, 그 전에
              * "OK" 를 보내면 폰이 곧바로 조각을 쏘기 시작한다. */
             g_ota_begin_pending = true;
@@ -1088,11 +1097,23 @@ class OtaCB : public NimBLECharacteristicCallbacks {
         }
 
         const uint8_t res = ota_store_chunk(seq, body, n);
-        /* 🔴 성공은 답하지 않는다. 1,378 조각마다 알림을 하나씩 되쏘면 그것이
+        /* 🔴 성공은 답하지 않는다. 1,363 조각마다 알림을 하나씩 되쏘면 그것이
          * 곧 전송 속도의 상한이 된다 — 카메라 업로드가 같은 이유로 같다.
-         * 완료는 loop() 가 알아채고, 실패는 여기서 한 번만 말한다. */
-        if (res != OTA_ST_OK) {
-            ble_send_result(BLE_CMD_OTA_CHUNK, BLE_RES_REJECTED, res);
+         * 완료는 loop() 가 알아채고, 실패는 여기서 한 번만 말한다.
+         *
+         * 🔴🔴 **세션이 없을 때는 아무 말도 안 한다.** 그 답은 이미 끝난 전송의
+         * 뒤늦은 조각에 대한 것이고, 늦게 배달되면 **다음 전송이 자기 실패로
+         * 읽는다** (2026-09-10 벤치에서 실제로 그랬다). 그리고 그 답에는 실을
+         * 번호도 없다 — 조각 프레임이 번호를 안 나르기 때문이다. */
+        if (res == OTA_ST_NOT_RUNNING) {
+            static uint32_t s_nr = 0;
+            if ((s_nr++ & 0x3Fu) == 0u)
+                Serial.printf("[OTA] 세션 없는데 조각이 온다 %u (seq %u)\n", (unsigned)s_nr,
+                              (unsigned)seq);
+        }
+        if (res != OTA_ST_OK && res != OTA_ST_NOT_RUNNING) {
+            ble_send_result(BLE_CMD_OTA_CHUNK, BLE_RES_REJECTED,
+                            (uint16_t)((uint16_t)ota_store_xfer_id() << 8) | res);
         }
     }
 };
@@ -1118,25 +1139,45 @@ static void ble_apply_ota_request(uint32_t now_ms) {
             portEXIT_CRITICAL(g_mux);
         }
 
-        const uint8_t res = ota_store_begin(g_ota_begin_req, moving,
+        const uint8_t id = g_ota_id_req;
+        const uint8_t res = ota_store_begin(g_ota_begin_req, id, moving,
                                             blackbox_capture_pending());
+        /* 🔴 거절이어도 번호를 실어 보낸다 — 거절이 늦게 배달돼 다음 전송을
+         * 죽이는 것도 같은 사고다. */
         ble_send_result(BLE_CMD_OTA_BEGIN,
-                        res == OTA_ST_OK ? BLE_RES_OK : BLE_RES_REJECTED, res);
+                        res == OTA_ST_OK ? BLE_RES_OK : BLE_RES_REJECTED,
+                        (uint16_t)((uint16_t)id << 8) | res);
         return;   // 지우기가 이 loop 을 이미 오래 먹었다. 나머지는 다음 바퀴에.
     }
 
     if (ota_store_ready_to_finish()) {
+        const uint16_t id16 = (uint16_t)ota_store_xfer_id() << 8;
         const uint8_t res = ota_store_finish();
         ble_send_result(BLE_CMD_OTA_DONE,
-                        res == OTA_ST_OK ? BLE_RES_OK : BLE_RES_REJECTED, res);
+                        res == OTA_ST_OK ? BLE_RES_OK : BLE_RES_REJECTED, id16 | res);
         return;
     }
 
     /* 🔴 시한. 폰이 그냥 사라지면 칸이 영원히 잡혀 있고 다음 시도가 BUSY 로
-     * 거절된다 — 그 증상은 차 옆에서 "왜 안 되지" 로만 보인다. */
-    if (ota_store_tick(now_ms)) {
-        ble_send_result(BLE_CMD_OTA_DONE, BLE_RES_TIMEOUT, OTA_ST_STALLED);
-    }
+     * 거절된다 — 그 증상은 차 옆에서 "왜 안 되지" 로만 보인다.
+     *
+     * 🔴🔴 **접기는 하되 알리지는 않는다. 그 통지가 다음 전송을 죽였다**
+     * (2026-09-10 벤치, 여덟 번을 헤맨 자리).
+     *
+     * 무슨 일이 있었나: 시한이 물면 여기서 `OTA_DONE(TIMEOUT)` 을 인디케이션으로
+     * 보냈다. 그런데 그때 폰은 이미 그 전송을 접고 화면을 떠난 뒤라 아무도 안
+     * 듣는다. 그 인디케이션이 **다음 연결에서 늦게 배달**되고, 앱의 새 전송이
+     * 그것을 **자기 실패로 읽는다** — 시작 0.9 초 만에. 그래서 한 번 실패하면
+     * 그다음 시도가 전부 같은 자리에서 죽었다. **실패가 자기를 재생산했다.**
+     *
+     * 결과 프레임에는 **어느 전송의 것인지가 없다.** 그래서 늦게 온 것과 지금
+     * 것을 앱이 가를 수 없다. 세션 번호를 와이어에 넣는 방법도 있지만, 이
+     * 통지는 **없어도 된다**: 폰이 그 뒤에 조각을 보내면 `NOT_RUNNING` 이
+     * 돌아오고 **그것은 방금 보낸 조각에 대한 답이라 늦을 수가 없다.** 폰이
+     * 아무것도 안 보내면 알려 줄 상대가 없다.
+     *
+     * 즉 알릴 수 있을 때는 알릴 필요가 없고, 알릴 필요가 있을 때는 못 알린다. */
+    (void)ota_store_tick(now_ms);
 }
 
 // ── Command handling ─────────────────────────────────────────────────────────

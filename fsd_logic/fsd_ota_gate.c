@@ -99,3 +99,15 @@ const char* fsd_ota_chunk_verdict_str(FsdOtaChunkVerdict v) {
     }
     return "모르는 판정";
 }
+
+bool fsd_ota_stalled(uint32_t now_ms, uint32_t last_seen_ms, uint32_t stall_ms) {
+    /* 🔴 **부호 있는 차로 잰다.** `last_seen_ms` 는 다른 태스크가 쓰므로
+     * `now_ms` 보다 앞설 수 있고, 앞선 것은 "방금 왔다" 는 뜻이다. 부호 없는
+     * 뺄셈으로 재면 그 몇 ms 가 **49 일**이 되어 그 자리에서 접는다.
+     *
+     * 부호 있는 차는 49 일 넘김(millis 랩어라운드)도 그대로 견딘다 —
+     * `stall_ms` 가 2^31 보다 작기만 하면 된다. 60 초다. */
+    const int32_t elapsed = (int32_t)(now_ms - last_seen_ms);
+    if (elapsed <= 0) return false;
+    return (uint32_t)elapsed > stall_ms;
+}
