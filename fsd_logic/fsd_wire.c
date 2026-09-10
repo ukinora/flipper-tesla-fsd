@@ -51,9 +51,9 @@ void fsd_wire_pack_state(const FsdWireState* in, uint8_t* out) {
     if(in->blackbox_recording) flags |= (1u << 4);
     if(in->ui_speed_seen) flags |= (1u << 5);
     if(in->brake_applied) flags |= (1u << 6);
-    /* Bit 7 was reserved for the SET_PROFILE closed loop, which emits nothing.
-     * v9 gave it to the transmission lock -- see FsdWireState.rule_armed. */
-    if(in->rule_armed) flags |= (1u << 7);
+    /* 🔴 bit 7 held the transmission lock until v10. The lock is gone
+     * (owner's instruction, 2026-09-10) and so is the bit -- a flag that
+     * always reads one tells the phone nothing and costs a version. */
 
     int32_t prof = in->speed_profile;
     if(prof < 0) prof = 0;

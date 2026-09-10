@@ -9,7 +9,6 @@
 void fsd_t1_init(FsdT1* t) {
     if(!t) return;
     memset(t, 0, sizeof(*t));
-    t->last_verdict = FSD_BODY_NOT_ENABLED;
 }
 
 /* Only these three say anything about the door. OPENING and CLOSING are
@@ -75,10 +74,10 @@ void fsd_t1_observe_door(FsdT1* t, FsdBodySide side, uint32_t can_id, const uint
 }
 
 static bool side_fresh(const FsdT1Side* s, uint32_t now_ms) {
-    return s->seen && s->has_stable && (uint32_t)(now_ms - s->seen_ms) < FSD_BODY_FRESH_MS;
+    return s->seen && s->has_stable && (uint32_t)(now_ms - s->seen_ms) < FSD_T1_FRESH_MS;
 }
 
-FsdT1Action fsd_t1_tick(FsdT1* t, const FsdBodyInputs* in, uint32_t now_ms) {
+FsdT1Action fsd_t1_tick(FsdT1* t, uint32_t now_ms) {
     if(!t) return FSD_T1_ACT_NONE;
 
     /* ON needs only one door to be open. OFF needs BOTH to be fresh and CLOSED
@@ -116,30 +115,22 @@ FsdT1Action fsd_t1_tick(FsdT1* t, const FsdBodyInputs* in, uint32_t now_ms) {
 
     const FsdT1Action act = next ? FSD_T1_ACT_ON : FSD_T1_ACT_OFF;
 
-    /* The edge is consumed here whether or not we are allowed to act on it.
-     * Holding it pending would mean a door opened while refused could fire
-     * minutes later when permission arrived — acting on a world that has since
-     * moved on. */
+    /* The edge is consumed here whether or not this tick reports it. Holding
+     * it pending would mean a door opened now could surface minutes later —
+     * reporting a world that has since moved on. */
     t->open_state = next;
 
-    if(t->has_acted && (uint32_t)(now_ms - t->last_action_ms) < FSD_T1_MIN_GAP_MS) {
-        t->last_verdict = FSD_BODY_NOT_ENABLED;
+    if(t->has_acted && (uint32_t)(now_ms - t->last_action_ms) < FSD_T1_MIN_GAP_MS)
         return FSD_T1_ACT_NONE;
-    }
 
     if(!t->window_start_ms && !t->window_count) t->window_start_ms = now_ms;
     if((uint32_t)(now_ms - t->window_start_ms) >= FSD_T1_WINDOW_MS) {
         t->window_start_ms = now_ms;
         t->window_count = 0;
     }
-    if(t->window_count >= FSD_T1_MAX_PER_WINDOW) {
-        t->last_verdict = FSD_BODY_NOT_ENABLED;
-        return FSD_T1_ACT_NONE;
-    }
-
-    const FsdBodyVerdict v = fsd_body_allows(in, FSD_ACT_MAP_LIGHT, now_ms);
-    t->last_verdict = v;
-    if(v != FSD_BODY_OK) return FSD_T1_ACT_NONE;
+    /* T1's own burst bound, kept: it is not a question about the car, it is
+     * this detector refusing to report the same edge over and over. */
+    if(t->window_count >= FSD_T1_MAX_PER_WINDOW) return FSD_T1_ACT_NONE;
 
     t->last_action_ms = now_ms;
     t->has_acted = true;
@@ -157,6 +148,4 @@ uint16_t fsd_t1_window_count(const FsdT1* t) {
     return t ? t->window_count : 0;
 }
 
-FsdBodyVerdict fsd_t1_last_verdict(const FsdT1* t) {
-    return t ? t->last_verdict : FSD_BODY_NOT_ENABLED;
-}
+

@@ -136,15 +136,14 @@ static void emit_and_check(FsdBodyAction action, int32_t arg, const FsdPipeFrame
 }
 
 
-/* The half of a decision that needs nothing from the car but its permission
- * inputs: the axis allows this action, and the chokepoint has a row for it.
- * Returns true when the decision is still alive; `r` carries the refusal
- * otherwise, already named.
+/* The half of a decision that needs nothing from the car at all: does the
+ * chokepoint have a row for this action. Returns true when the decision is
+ * still alive; `r` carries the refusal otherwise, already named.
  *
  * Split out on 2026-09-09 so the press can stop where the answers stop being
  * knowable -- see fsd_pipe_decide() in the header for the measurement. */
 static bool decide_one(FsdBodyAction action, int32_t arg, uint8_t rule_index,
-                       const FsdBodyInputs* in, uint32_t now_ms, FsdPipeResult* r) {
+                       FsdPipeResult* r) {
     memset(r, 0, sizeof(*r));
     /* 0 is can0. A refusal must not hand back a plausible channel, for the
      * same reason the frame is zeroed rather than left stale -- and a PRESS
@@ -155,57 +154,36 @@ static bool decide_one(FsdBodyAction action, int32_t arg, uint8_t rule_index,
     r->action = action;
     r->arg = arg;
 
-    /* 1. The permission axis. Asked FIRST, before a frame is built, so a
-     * refusal never depends on whether the bytes happened to work out. */
-    const FsdBodyVerdict bv = fsd_body_allows(in, action, now_ms);
-    if(bv != FSD_BODY_OK) {
-        r->stage = FSD_PIPE_BLOCKED_BODY;
-        r->reason = (uint8_t)bv;
-        return false;
-    }
-
-    /* An action out of range cannot index the template array. The axis above
-     * already refuses it (FSD_BODY_UNKNOWN_ACTION), so this is a second check
-     * on the same fact -- kept because the one thing it guards is a read past
-     * the end of a stack array. */
-    if((uint8_t)action >= (uint8_t)FSD_ACT_COUNT) {
-        r->stage = FSD_PIPE_BLOCKED_BODY;
-        r->reason = (uint8_t)FSD_BODY_UNKNOWN_ACTION;
-        return false;
-    }
-
-    /* 2. Does the chokepoint have a row for this action?
+    /* 🔴🔴 THE PERMISSION AXIS WAS ASKED HERE AND IT IS GONE (owner's
+     * instruction, 2026-09-10): "차의 모든 안전게이트관련사항을 삭제해라."
      *
-     * 🔴 ASKED HERE, BEFORE THE EMITTER, AND THE ORDER IS THE POINT.
+     * 🔴 THE SHAPE IS THE PROOF, the same argument fsd_pipe_release() has
+     * always made: this function no longer takes an FsdBodyInputs, so it
+     * cannot consult the car's situation even by mistake. Neither does
+     * fsd_pipe_one() or fsd_pipe_decide(). Nothing was defaulted to "allow" --
+     * there is nothing left to default.
+     *
+     * The range check that lived here went too, and did not need replacing:
+     * fsd_body_wire() below returns NULL for an out-of-range action, so the
+     * array read it guarded is guarded by the row lookup itself, and the
+     * refusal it produces (NO_ROW) is the more useful of the two. */
+
+    /* Does the chokepoint have a row for this action?
+     *
+     * 🔴 ASKED BEFORE THE EMITTER, AND THE ORDER IS THE POINT.
      * An action with no row never gets a template stored either -- the store
      * is keyed off the same table -- so leaving this until the emitter means
      * the refusal reads NO_TEMPLATE, i.e. "the car has not sent that frame".
-     * For the map light, the door and the hazards that is exactly wrong: the
-     * car sends those frames constantly and the emitter can build all three.
-     * What is missing is a row, i.e. a deliberate decision to open them, which
-     * is a thing a person does and not a thing a bus does. Sending someone to
-     * look at their wiring over it would be this file's fault.
+     * That sends the next person to look at their wiring for a fault that is
+     * one line of a table. This check makes the same mistake say NO_ROW.
      *
      * 🟢 It also belongs on the PRESS side for its own reason: it is a fact
      * about the firmware, knowable at any instant, and worth saying under the
      * finger rather than 500 ms later.
      *
-     * ⚠️ UNREACHABLE TODAY, AND SAID OUT LOUD BECAUSE A MUTATION PROVED IT
-     * (2026-09-09): deleting this check breaks no test. fsd_body_wire() only
-     * returns NULL for an out-of-range action or an absent row, all eleven
-     * actions have rows, and the axis refuses out-of-range first with
-     * UNKNOWN_ACTION. So this is the same shape as the range check above it --
-     * a guard for a state the code cannot currently be in.
-     *
-     * 🔴 It stays, and the reason is what it costs to be without it. Add a
-     * twelfth action and forget its row, and the emitter answers NO_TEMPLATE:
-     * "the car has not sent that frame". That sends the next person to look at
-     * their wiring for a fault that is one line of a table. This check makes
-     * the same mistake say NO_ROW.
-     *
-     * 🟢 It becomes reachable the moment a row is missing, which is exactly
-     * when it is needed. That is not a hole -- but it does mean no test is
-     * holding it, so do not read a green suite as evidence it works. */
+     * ⚠️ Reachable only when a row is missing -- which is exactly when it is
+     * needed, and means no test is holding it. Do not read a green suite as
+     * evidence it works. */
     if(!fsd_body_wire(action)) {
         r->stage = FSD_PIPE_BLOCKED_WIRE;
         r->reason = (uint8_t)FSD_WIRE_NO_ROW;
@@ -218,9 +196,8 @@ static bool decide_one(FsdBodyAction action, int32_t arg, uint8_t rule_index,
 }
 
 uint8_t fsd_pipe_decide(const FsdRules* rules, const FsdTriggerEvent* ev,
-                        const FsdBodyInputs* in, uint32_t now_ms, FsdPipeResult* out,
-                        uint8_t max_out) {
-    if(!rules || !ev || !in || !out || max_out == 0u) return 0;
+                        FsdPipeResult* out, uint8_t max_out) {
+    if(!rules || !ev || !out || max_out == 0u) return 0;
 
     FsdRuleDecision dec[FSD_PIPE_MAX_OUT];
     uint8_t want = max_out;
@@ -229,28 +206,31 @@ uint8_t fsd_pipe_decide(const FsdRules* rules, const FsdTriggerEvent* ev,
     const uint8_t n = fsd_rules_match(rules, ev, dec, want);
 
     for(uint8_t i = 0; i < n; i++)
-        (void)decide_one(dec[i].action, dec[i].arg, dec[i].rule_index, in, now_ms, &out[i]);
+        (void)decide_one(dec[i].action, dec[i].arg, dec[i].rule_index, &out[i]);
 
     return n;
 }
 
-/* One decision, four gates, run at the car's own arrival of this id.
+/* One decision, three gates, run at the car's own arrival of this id.
  *
  * 🔴 THIS IS THE ONLY FUNCTION IN THE CODEBASE THAT PRODUCES A FRAME TO SEND.
  * The press decides (fsd_pipe_decide) and arms; every frame that leaves the
  * board -- the first of a burst and its repeats alike -- is built here, on an
  * arrival, 0-1 ms behind the frame it copied.
  *
- * The axis is asked AGAIN here rather than trusted from the press, and that is
- * deliberate: a burst that skipped it would be a rule that keeps acting after
- * the conditions it was granted under have gone. */
+ * ⚠️ THE PERMISSION AXIS USED TO BE ASKED AGAIN HERE, on purpose: a burst that
+ * skipped it would be a rule that keeps acting after the conditions it was
+ * granted under have gone. That argument was right and the axis is gone
+ * anyway (owner's instruction, 2026-09-10), so a burst now runs to its end
+ * unless the CAR stops answering -- the chokepoint still refuses a stale
+ * reference, and fsd_burst gives up when the id goes quiet. Those two are
+ * what ends a burst now. */
 void fsd_pipe_one(FsdBodyAction action, int32_t arg, uint8_t rule_index,
-                  const FsdBodyInputs* in, const FsdPipeFrames* f,
-                  uint32_t now_ms, FsdPipeResult* out) {
-    if(!in || !f || !out) return;
+                  const FsdPipeFrames* f, uint32_t now_ms, FsdPipeResult* out) {
+    if(!f || !out) return;
 
-    /* 1 and 2. The axis and the row -- the questions a press can also answer. */
-    if(!decide_one(action, arg, rule_index, in, now_ms, out)) return;
+    /* 1. The row -- the question a press can also answer. */
+    if(!decide_one(action, arg, rule_index, out)) return;
 
     /* 3 and 4. The emitter, then the chokepoint -- the same two steps a
      * release takes, in the same order, from the same function. Both need the
@@ -305,7 +285,6 @@ void fsd_pipe_release(FsdBodyAction action, int32_t arg, uint8_t rule_index,
 const char* fsd_pipe_stage_str(FsdPipeStage s) {
     switch(s) {
     case FSD_PIPE_OK: return "ok";
-    case FSD_PIPE_BLOCKED_BODY: return "axis";
     case FSD_PIPE_BLOCKED_EMIT: return "emitter";
     case FSD_PIPE_BLOCKED_WIRE: return "chokepoint";
     }
@@ -315,7 +294,6 @@ const char* fsd_pipe_stage_str(FsdPipeStage s) {
 const char* fsd_pipe_reason_str(FsdPipeStage s, uint8_t reason) {
     switch(s) {
     case FSD_PIPE_OK: return "ok";
-    case FSD_PIPE_BLOCKED_BODY: return fsd_body_verdict_str((FsdBodyVerdict)reason);
     case FSD_PIPE_BLOCKED_EMIT: return fsd_emit_result_str((FsdEmitResult)reason);
     case FSD_PIPE_BLOCKED_WIRE: return fsd_body_wire_verdict_str((FsdBodyWireVerdict)reason);
     }

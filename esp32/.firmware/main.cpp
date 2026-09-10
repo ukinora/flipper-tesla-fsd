@@ -398,30 +398,6 @@ static void serial_command_tick() {
                     Serial.println("[BB]    먼저 폰이나 USB 로 받아 두었는지 확인한다.");
                     Serial.println("[BB]    정말 지우려면: bbclear yes");
                 }
-            } else if (strncmp(buf, "rulearm", 7) == 0) {
-                // 🔴 THE SWITCH THAT LETS THE RULE ENGINE WRITE TO THE CAR.
-                //
-                // Session-only by construction — rule_task.cpp keeps it in a
-                // static bool and nothing writes it to NVS. A board that
-                // reboots comes back disarmed, which is the only honest
-                // default for a thing that can operate the body of a car.
-                //
-                // Arming is NOT sufficient. It sets the per-action enables the
-                // permission axis reads; the axis still asks about mode, bus,
-                // OTA, RX freshness, driver, gear, speed and the drive
-                // session, and the emitter and the chokepoint still have to
-                // agree afterwards. `ruleq` shows what actually happened.
-                const char *arg = buf + 7;
-                while (*arg == ' ') arg++;
-                if (strcmp(arg, "on") == 0) {
-                    rule_task_set_armed(true);
-                } else if (strcmp(arg, "off") == 0) {
-                    rule_task_set_armed(false);
-                } else {
-                    Serial.printf("[RULE] 지금 %s — 켜려면 'rulearm on', "
-                                  "끄려면 'rulearm off'\n",
-                                  rule_task_armed() ? "송신 허용" : "송신 잠금");
-                }
             } else if (serial_cmd_equals(buf, "ruleq")) {
                 rule_task_print();
             } else if (serial_cmd_equals(buf, "rules")) {
@@ -604,8 +580,7 @@ static void serial_command_tick() {
                 Serial.println("[SER]   bbclear yes   — delete ALL captures (irreversible)");
                 Serial.println("[SER]   bball [on|off]— 무필터 캡처 (한 건 1.5 MB, 디스크 2건)");
                 Serial.println("[SER]   rules         — 저장된 매핑");
-                Serial.println("[SER]   rulearm on/off— 송신 허용/잠금 (세션 한정)");
-                Serial.println("[SER]   ruleq         — 송신 허용 여부 · 보냄 · 거부");
+                Serial.println("[SER]   ruleq         — 보냄 · 거부 · 차를 기다리는 명령");
                 Serial.println("[SER]   pwr           — 12V verdict: switched or always-on");
                 Serial.println("[SER]   hw [hw3|hw4|legacy|auto] — 오토파일럿 세대 고정 (persisted)");
                 Serial.println("[SER]   owner / ownerpair / ownerclear");
@@ -796,11 +771,15 @@ static bool send_on_bus(CanBusId bus, const CanFrame &frame) {
 
 /* The rule engine's way onto the bus.
  *
- * 🔴 THE ONLY CALLER THAT EXISTS FOR THIS PURPOSE, and it is four gates deep
- * already: the owner's rule matched, fsd_body_allows() said yes, the emitter
- * built the frame from one the car sent, and the bit-granularity chokepoint
- * compared the two. This adds the fifth and sixth — send_on_bus() still
- * applies its own ID refusals, and the driver still refuses in Listen-Only.
+ * 🔴 THE ONLY CALLER THAT EXISTS FOR THIS PURPOSE, and it is three gates deep
+ * already: the owner's rule matched and is switched on, the emitter built the
+ * frame from one the car sent, and the bit-granularity chokepoint compared the
+ * two. This adds the fourth and fifth — send_on_bus() still applies its own ID
+ * refusals, and the driver still refuses in Listen-Only.
+ *
+ * ⚠️ THERE WAS A PERMISSION AXIS IN THAT LIST UNTIL 2026-09-10 (gear, speed,
+ * mode, the transmit unlock, the rate limit). The owner deleted it. What is
+ * left asks nothing about the car's situation.
  *
  * 🔴 THE BUS IS THE ONE THE FRAME CAME IN ON, not a constant. The first
  * bench write went out on can0 while every frame we read came in on can1;
@@ -2385,9 +2364,22 @@ void setup() {
     // (PERSIST_OP_MODE); this is derived from the operator's intent, and
     // Autonomous transmits nothing on its own — the camera path additionally
     // needs a gear of D and a latched belt.
-    g_state.op_mode = fsd_autonomy_floor(&g_state);
-    if (g_state.op_mode == OpMode_Autonomous)
-        Serial.println("[MODE] Autonomous — camera response only, no general TX");
+    /* 🔴🔴 THE BOARD COMES UP ABLE TO TRANSMIT (owner's instruction,
+     * 2026-09-10): "차의 모든 안전게이트관련사항을 삭제해라. 필요하다면 추후
+     * 내가 하나씩 추가하겠다."
+     *
+     * Until now this settled to Listen-Only and the owner raised it by hand
+     * every session -- three taps in the app, plus `rulearm on`, both dying
+     * with the power. That ritual is what was removed; leaving the radio shut
+     * at boot would have kept it in a different shape.
+     *
+     * ⚠️ SAY IT PLAINLY: A RULE THAT IS SWITCHED ON ACTS FROM POWER-ON.
+     *
+     * 🟢 The toggle still exists and still works -- the BOOT button and the
+     * app can put the radio back in Listen-Only. It is a control the owner
+     * reaches for, not a gate that refuses on its own, which is the whole
+     * distinction this removal was about. */
+    g_state.op_mode = OpMode_Active;
     // Apply a saved manual HW selection immediately (#110) so the correct
     // handlers are live from the first frame, without waiting on detection.
     if (g_state.hw_override != TeslaHW_Unknown) {
@@ -2504,7 +2496,7 @@ void setup() {
         if (!mode_apply(restored)) {
             Serial.println("[CAN] 500 kbps — mode switch failed, staying Listen-Only");
         } else if (restored == OpMode_Active) {
-            Serial.println("[CAN] 500 kbps — Active (restored from NVS)");
+            Serial.println("[CAN] 500 kbps — Active (송신 가능한 채로 뜬다)");
         } else {
             Serial.println("[CAN] 500 kbps — Listen-Only");
         }

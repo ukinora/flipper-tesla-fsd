@@ -288,29 +288,48 @@ static void test_door_refusals(void) {
           "1500 ms old is not");
 }
 
-/* The axis row, checked here rather than only in fsd_body's own tests, because
- * this is the file that made the row's stated condition true. */
-static void test_door_row_is_open_but_narrow(void) {
-    printf("\n-- the door row opened, and nothing else relaxed --\n");
+/* 🔴🔴 THE DOOR'S ROW WAS THE NARROWEST IN THE TABLE AND THIS TEST IS WHAT
+ * KEPT IT THAT WAY: armable, but not while moving, not out of park, and no
+ * more than one command every three seconds -- a rate limit an order above the
+ * map light's, written as a bound on how bad a stuck rule gets rather than as
+ * a debounce.
+ *
+ * The owner deleted every one of those columns on 2026-09-10 -- "차의 모든
+ * 안전게이트관련사항을 삭제해라. 필요하다면 추후 내가 하나씩 추가하겠다" --
+ * so those assertions are not weakened here. They are gone with the fields
+ * they were about, and the guard that keeps them gone is
+ * test_no_gate_stands_in_front_of_a_press() in test_pipeline.c.
+ *
+ * ⚠️ THIS IS THE ACTION WHERE THAT COSTS THE MOST, AND IT IS WORTH SAYING
+ * PLAINLY: the door opens OUTWARD, and no signal on this bus says what is
+ * standing beside the car. That was true while the gates existed too -- park
+ * and standstill never answered that question either -- but nothing answers it
+ * now, and there is no longer even a rate limit between one command and the
+ * next.
+ *
+ * 🟢 WHAT IS LEFT IS WHAT THIS TEST NOW PINS, and it is not nothing: the
+ * command frame is one we are allowed to build at all, and a held command has
+ * a leash. */
+static void test_the_door_keeps_what_survived(void) {
+    printf("\n-- 문에 남은 것: 만들 수 있는 프레임과 목줄 --\n");
 
     const FsdBodyCaps* c = fsd_body_caps(FSD_ACT_DOOR_OPEN);
     CHECK(c != NULL, "row exists");
     if(!c) return;
 
-    CHECK(c->armable_at_runtime, "armable: the command frame is measured");
+    /* 🔴 0x1F9 must NOT be on the deny-list, or the feature is impossible --
+     * and 0x102/0x103, the door STATUS frames the car sends about itself, must
+     * still be, because we have no reason to build one and every reason to
+     * refuse if something ever does. Layer D, which the owner kept. */
+    CHECK(!fsd_body_tx_id_refused(0x1F9u), "0x1F9 is the door open command");
+    CHECK(fsd_body_tx_id_refused(0x102u), "0x102 door status stays refused");
+    CHECK(fsd_body_tx_id_refused(0x103u), "0x103 door status stays refused");
 
-    /* 🔴 Every one of these is a gate that stays shut. If a later change
-     * wants one of them open it has to say so here, in a red test, and not by
-     * quietly widening a row while adding something unrelated. */
-    CHECK(!c->may_act_while_moving, "not while moving");
-    CHECK(!c->may_act_out_of_park, "park only");
-
-    /* A rate limit an order above the light's. Not a debounce -- a bound on how
-     * bad a stuck rule gets. */
-    CHECK(c->min_interval_ms >= 3000u, "at least 3 s apart, got %u",
-          (unsigned)c->min_interval_ms);
-    CHECK(c->min_interval_ms > fsd_body_caps(FSD_ACT_MAP_LIGHT)->min_interval_ms,
-          "slower than the map light");
+    /* Not a question about the car's situation -- a bound on one stuck flag
+     * transmitting forever. The same family as the chokepoint, which is why it
+     * survived the removal. */
+    CHECK(c->max_hold_ms > 0u && c->max_hold_ms <= 30000u,
+          "a held door command has a leash, got %u ms", (unsigned)c->max_hold_ms);
 }
 
 /* 🔴 The car frame carries no counter and no checksum -- that is WHY copying
@@ -428,18 +447,18 @@ static void test_which_actions_have_an_encoding(void) {
               "%s -> NO_ENCODING", fsd_body_action_str(rest[i]));
     }
 
-    /* 🔴 The two statements of the same fact must agree. If someone flips a row
-     * to armable without an encoding, or writes an encoding without opening the
-     * row, this is where it shows. */
+    /* 🔴 THERE USED TO BE TWO STATEMENTS OF THIS FACT AND THEY HAD TO AGREE:
+     * armable_at_runtime in the caps table, and fsd_emit_supported() here. The
+     * check caught a row flipped open without an encoding, or an encoding
+     * written without opening the row.
+     *
+     * 🟢 The owner removed the authority column on 2026-09-10, so there is
+     * ONE statement left -- and one statement cannot disagree with itself.
+     * That is the tenth pattern's better ending: not two copies kept in step
+     * by a test, but one copy. The rows are still checked for existence,
+     * because an action with no row at all is a different fault. */
     for(unsigned a = 0; a < FSD_ACT_COUNT; a++) {
-        const FsdBodyCaps* c = fsd_body_caps((FsdBodyAction)a);
-        CHECK(c != NULL, "caps row exists for %u", a);
-        if(!c) continue;
-        CHECK(c->armable_at_runtime == fsd_emit_supported((FsdBodyAction)a),
-              "%s: armable=%d but emitter=%d -- these must move together",
-              fsd_body_action_str((FsdBodyAction)a),
-              (int)c->armable_at_runtime,
-              (int)fsd_emit_supported((FsdBodyAction)a));
+        CHECK(fsd_body_caps((FsdBodyAction)a) != NULL, "caps row exists for %u", a);
     }
 }
 
@@ -1629,7 +1648,7 @@ int main(void) {
     test_light_horn_refuses_the_other_multiplex();
     test_unmeasured_doors_are_refused();
     test_argless_actions_ignore_the_argument();
-    test_door_row_is_open_but_narrow();
+    test_the_door_keeps_what_survived();
     test_turn_matches_tsl_byte_for_byte();
     test_turn_reproduces_the_cars_own_frames();
     test_turn_refuses_outside_the_measured_region();

@@ -275,12 +275,10 @@ void rules_store_print(void) {
 
     if(shown == 0) Serial.println("  (비어 있다)");
 
-    /* 🔴 Nothing in this build acts on a rule. Saying it on every print is the
-     * cheap way to stop somebody concluding the car is broken because a rule
-     * they can see stored did nothing. Delete this line the day an emitter
-     * exists, and not before. */
-    Serial.printf("[RULES] 송신이 허용돼야 보낸다 — 지금은 %s. 'rulearm on' / 'ruleq'\n",
-                  rule_task_armed() ? "송신 허용" : "송신 잠금");
+    /* 🔴 켜 둔 규칙은 **보드가 뜨는 순간부터** 버스로 나간다 (차주 지시,
+     * 2026-09-10 — 송신 허용이 사라졌다). 이 줄이 한때 *"송신이 허용돼야
+     * 보낸다"* 였고, 그 문장을 믿고 차 옆에 서면 정반대로 안다. */
+    Serial.println("[RULES] 켜 둔 규칙은 지금 바로 나간다 — 'ruleq' 로 센다");
     if(g_save_pending) Serial.println("[RULES] 🔴 아직 플래시에 저장되지 않았다");
 }
 

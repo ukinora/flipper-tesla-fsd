@@ -20,10 +20,17 @@
  * that builds a body frame: no encoding table, no apply(), nothing. T1's action
  * is an enum that gets logged. T2's gesture is a counter and two durations.
  *
- * Three separate things would each have to change before a body frame could
- * exist: someone would have to write an emitter, flip
- * FSD_BODY_CAPS[...].armable_at_runtime, and remove the refusal in
- * send_on_bus(). None of them is an accident away.
+ * ⚠️ THAT IS A STATEMENT ABOUT THESE DETECTORS, NOT ABOUT THE BOARD. Body
+ * frames very much exist elsewhere -- rule_task.cpp puts them on the bus. What
+ * is true here is that T1 and T2 have no emitter of their own and never had
+ * one: T1's action is an enum that gets logged, T2's gesture is a counter and
+ * two durations.
+ *
+ * 🔴 The old wording listed three things that would each have to change first,
+ * one of them being FSD_BODY_CAPS[...].armable_at_runtime. That column is gone
+ * (owner's instruction, 2026-09-10), so the honest list is two: someone would
+ * have to write an emitter for these actions, and send_on_bus() would still
+ * refuse the ids it refuses.
  *
  * WHY IT IS WORTH RUNNING NOW
  * ---------------------------
@@ -40,13 +47,12 @@
  * Without this the timing window has to be guessed, or the car visited again.
  */
 
-#include "../../fsd_logic/fsd_body.h"   // FsdBodyInputs, for the permission accessor
+#include "../../fsd_logic/fsd_body.h"   // FsdBodyAction
 #include "../../fsd_logic/fsd_state.h"
 
 #include <freertos/FreeRTOS.h>
 #include <stdbool.h>
 #include <stdint.h>
-#include <string.h>  // the no-BLE stub zeroes an FsdBodyInputs
 
 #ifdef BLE_SERVER_ENABLED
 
@@ -81,7 +87,6 @@ void body_task_set_bus_tx_open(bool open);
 bool body_task_tx_refused(uint32_t can_id);
 
 // ── read-only accessors, for logging and a future BLE surface ────────────────
-uint8_t  body_task_t1_verdict(void);   // FsdBodyVerdict at the last door edge
 uint16_t body_task_t1_actions(void);   // T1 actions that would have been taken
 uint8_t  body_task_latch_raw(uint8_t side); // last raw nibble, 0xFF = unseen
 uint16_t body_task_t2_gestures(void);
@@ -89,15 +94,6 @@ uint16_t body_task_t2_last_press_ms(void);
 uint16_t body_task_t2_last_gap_ms(void);
 uint8_t  body_task_t2_last_reject(void);
 uint32_t body_task_mux0_period_ms(void); // smallest observed 0x3C2 mux-0 gap
-
-/* The permission inputs, assembled from the shared state and this file's
- * own detectors. Exposed so rule_task.cpp asks the same question with the
- * same answers rather than assembling a second copy that can drift.
- *
- * 🔴 action_enabled is ALL FALSE here. This file has no opinion on
- * whether the operator armed anything; a caller that wants an action to
- * be possible has to say so itself, and rule_task.cpp does. */
-FsdBodyInputs body_task_permission_inputs(uint32_t now_ms);
 
 #else  // no body core on this variant — no-op shims
 
@@ -108,7 +104,6 @@ static inline void body_task_set_bus_tx_open(bool) {}
 /* No body feature on this variant, so nothing here would build a body frame
  * either — and the Flipper's hazard write is not part of this build. */
 static inline bool body_task_tx_refused(uint32_t) { return false; }
-static inline uint8_t  body_task_t1_verdict(void) { return 0; }
 static inline uint16_t body_task_t1_actions(void) { return 0; }
 static inline uint8_t  body_task_latch_raw(uint8_t) { return 0xFFu; }
 static inline uint16_t body_task_t2_gestures(void) { return 0; }
@@ -116,10 +111,5 @@ static inline uint16_t body_task_t2_last_press_ms(void) { return 0; }
 static inline uint16_t body_task_t2_last_gap_ms(void) { return 0; }
 static inline uint8_t  body_task_t2_last_reject(void) { return 0; }
 static inline uint32_t body_task_mux0_period_ms(void) { return 0; }
-static inline FsdBodyInputs body_task_permission_inputs(uint32_t) {
-    FsdBodyInputs in;
-    memset(&in, 0, sizeof(in));
-    return in;
-}
 
 #endif

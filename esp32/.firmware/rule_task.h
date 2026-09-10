@@ -42,15 +42,7 @@ typedef bool (*RuleTaskSend)(uint8_t bus, uint32_t can_id, const uint8_t* data,
  *  body_task_init(). */
 void rule_task_init(FSDState* state, portMUX_TYPE* mux, RuleTaskSend send);
 
-/** Arm or disarm the rule engine for THIS SESSION. Never persisted.
- *
- *  Disarming is immediate and total: the permission axis refuses every action
- *  the moment this is false, so a command already decided but not yet sent
- *  cannot be sent. */
-void rule_task_set_armed(bool armed);
 
-/** Is it armed right now? For the serial line and the app. */
-bool rule_task_armed(void);
 
 /** Offer one received frame. NON-RETURNING, like body_task_observe(): several
  *  readers want the same frames.
@@ -100,8 +92,6 @@ typedef bool (*RuleTaskSend)(uint8_t bus, uint32_t can_id, const uint8_t* data,
                              uint8_t dlc);
 
 static inline void rule_task_init(FSDState*, portMUX_TYPE*, RuleTaskSend) {}
-static inline void rule_task_set_armed(bool) {}
-static inline bool rule_task_armed(void) { return false; }
 static inline void rule_task_observe(uint8_t, uint32_t, const uint8_t*, uint8_t,
                                      uint32_t) {}
 static inline void rule_task_tick(uint32_t) {}

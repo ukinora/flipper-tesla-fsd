@@ -45,7 +45,15 @@ extern "C" {
 
 /* Wire versions. Each payload carries its own — sharing one meant that bumping
  * State also announced a CamStat change that had not happened. */
-#define FSD_WIRE_STATE_VERSION 9u
+/* 🔴 v10 (2026-09-10): flags bit 7 held the transmission lock and the lock is
+ * gone -- the owner removed every safety gate. A bit that always reads one is
+ * a lie on the wire, so the bit went with it.
+ *
+ * 🔴🔴 THE BOARD AND THE APP MUST BE FLASHED TOGETHER. Raise one and not the
+ * other and State does not decode at all -- the dashboard shows nothing. That
+ * is deliberate: the app checks the version exactly and refuses, rather than
+ * reading v9 bytes as v10 ones. The app says so by name ("못 푼 프레임"). */
+#define FSD_WIRE_STATE_VERSION 10u
 #define FSD_WIRE_CAMSTAT_VERSION 2u
 
 /* FSD v14 Lite exposes four speed profiles. */
@@ -149,7 +157,6 @@ typedef struct {
      * its gates are shut and one waits on a measurement -- so the bit was
      * holding a place for something that does not exist. If the loop ever
      * ships it takes a new byte, and by then it will be a real need. */
-    bool rule_armed;
 
     uint8_t op_mode;   // 0=ListenOnly 1=Active 2=Service 3=Autonomous
     uint8_t hw_version; // 0=Unknown 1=Legacy 2=HW3 3=HW4
