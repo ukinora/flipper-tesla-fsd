@@ -235,6 +235,12 @@ static void test_strings_always_terminate(void) {
     full_board[FSD_OTA_MARK_BOARD_LEN] = '\0';
     memset(full_stamp, 'S', FSD_OTA_MARK_STAMP_LEN);
     full_stamp[FSD_OTA_MARK_STAMP_LEN] = '\0';
+    /* 🔴 판번호는 꽉 차 있으면서도 **모양**은 갖춰야 한다. 스캐너는
+     * 2026-09-10 부터 `YYYY-` 로 시작하지 않는 것을 표식으로 안 읽는다 —
+     * 이미지 안의 우연한 매직을 걸러 내려고 그렇게 했고, 그 경위는
+     * fsd_ota_image.c 의 상자에 있다. 이 시험의 주제는 **끝맺음**이지
+     * 모양이 아니므로, 모양을 맞춰 주고 칸은 그대로 꽉 채운다. */
+    memcpy(full_stamp, "2026-", 5);
 
     uint8_t img[600];
     make_image(img, sizeof(img), 300, full_board, full_stamp, FSD_OTA_ESP_MAGIC,
@@ -310,6 +316,110 @@ static void test_names(void) {
     CHECK(fsd_ota_img_verdict_str((FsdOtaImgVerdict)200)[0] != '\0', "모르는 값에도 이름이 있다");
 }
 
+
+/* ── 매직만으로는 표식이 아니다 ────────────────────────────────────────────
+ *
+ * 🔴🔴 이 절은 **실물에서 온 것**이다 (2026-09-10). 2층이 fsd_ota_image.c 를
+ * 부르기 시작하자 스캐너 자신의 매직 배열이 이미지에 실렸고, 그것이 진짜 표식보다
+ * **앞에** 놓였다. 뒤에 붙은 rodata 는 마침 ble_owner.cpp 의 로그였다:
+ *
+ *      0x000985  "enrolled as the owner"   ← 스캐너의 매직 배열
+ *      0x003EAC  "lilygo-t2can"            ← 진짜
+ *
+ * 앞의 것이 이기므로 보드는 **자기가 구운 이미지를 전부 거부**했을 것이다.
+ * 아래 시험이 정확히 그 배치를 만든다 — 바이트까지 그날의 것이다. */
+static void test_a_stray_magic_is_not_a_mark(void) {
+    printf("\n-- 매직이 또 있어도 진짜를 찾는다 (2026-09-10 실물) --\n");
+
+    uint8_t img[600];
+    const uint32_t n = make_image(img, sizeof(img), 400, OUR_BOARD, OUR_STAMP,
+                                  FSD_OTA_ESP_MAGIC, FSD_OTA_CHIP_ESP32S3);
+
+    /* 그날의 미끼: 매직 여덟 바이트 + 그 뒤의 로그 문자열. */
+    static const char DECOY_TAIL[] = "enrolled as the owner\0NOT the owner - commands refused";
+    uint8_t* d = img + 100;
+    d[0] = FSD_OTA_MARK_MAGIC_0;
+    d[1] = FSD_OTA_MARK_MAGIC_1;
+    d[2] = FSD_OTA_MARK_MAGIC_2;
+    d[3] = FSD_OTA_MARK_MAGIC_3;
+    d[4] = FSD_OTA_MARK_MAGIC_4;
+    d[5] = FSD_OTA_MARK_MAGIC_5;
+    d[6] = FSD_OTA_MARK_MAGIC_6;
+    d[7] = (uint8_t)FSD_OTA_MARK_MAGIC_7;
+    memcpy(d + FSD_OTA_MARK_MAGIC_LEN, DECOY_TAIL, sizeof(DECOY_TAIL));
+
+    /* 조각 크기를 여럿 돌린다 — 미끼가 경계에 걸리는 자리도 지나가게. */
+    const uint32_t sizes[] = {7, 64, 71, 72, 73, 512};
+    for (size_t k = 0; k < sizeof(sizes) / sizeof(sizes[0]); k++) {
+        FsdOtaScan s;
+        fsd_ota_scan_init(&s);
+        feed_in_chunks(&s, img, n, sizes[k]);
+        CHECK(fsd_ota_scan_verdict(&s, OUR_BOARD, FSD_OTA_CHIP_ESP32S3) == FSD_OTA_IMG_OK,
+              "조각 %u: 미끼를 넘어 진짜를 찾아야 하는데 %s (board=%s)", (unsigned)sizes[k],
+              fsd_ota_img_verdict_str(fsd_ota_scan_verdict(&s, OUR_BOARD, FSD_OTA_CHIP_ESP32S3)),
+              s.mark.board);
+        CHECK(strcmp(s.mark.board, OUR_BOARD) == 0, "조각 %u: 보드 이름이 %s", (unsigned)sizes[k],
+              s.mark.board);
+    }
+}
+
+/* 미끼만 있고 진짜가 없으면 **없다고** 답해야 한다 — 미끼를 표식으로 읽으면
+ * "다른 보드용" 이 되고, 그 둘은 사람이 할 일이 다르다. */
+static void test_only_a_stray_magic_means_no_mark(void) {
+    uint8_t img[600];
+    const uint32_t n = make_image(img, sizeof(img), 0, NULL, NULL, FSD_OTA_ESP_MAGIC,
+                                  FSD_OTA_CHIP_ESP32S3);
+    uint8_t* d = img + 100;
+    d[0] = FSD_OTA_MARK_MAGIC_0;
+    d[1] = FSD_OTA_MARK_MAGIC_1;
+    d[2] = FSD_OTA_MARK_MAGIC_2;
+    d[3] = FSD_OTA_MARK_MAGIC_3;
+    d[4] = FSD_OTA_MARK_MAGIC_4;
+    d[5] = FSD_OTA_MARK_MAGIC_5;
+    d[6] = FSD_OTA_MARK_MAGIC_6;
+    d[7] = (uint8_t)FSD_OTA_MARK_MAGIC_7;
+    memcpy(d + FSD_OTA_MARK_MAGIC_LEN, "enrolled as the owner", 22);
+
+    FsdOtaScan s;
+    fsd_ota_scan_init(&s);
+    feed_in_chunks(&s, img, n, 512);
+    CHECK(fsd_ota_scan_verdict(&s, OUR_BOARD, FSD_OTA_CHIP_ESP32S3) == FSD_OTA_IMG_NO_MARK,
+          "미끼뿐이면 '표식이 없다' 여야 하는데 %s",
+          fsd_ota_img_verdict_str(fsd_ota_scan_verdict(&s, OUR_BOARD, FSD_OTA_CHIP_ESP32S3)));
+}
+
+/* 모양 검사가 무엇을 요구하는지 못 박는다. 판번호 형식을 바꾸면 여기가 먼저
+ * 빨개진다 — 차에서 "우리가 구운 파일이 아니다" 를 만나는 것보다 훨씬 싸다. */
+static void test_the_stamp_must_start_with_a_year(void) {
+    struct { const char* stamp; bool ok; } cases[] = {
+        {"2026-09-10 12:38:09 23a2b16a", true},
+        {"26-09-10 12:38:09 23a2b16a", false},   /* 두 자리 연도 */
+        {"2026/09/10 12:38:09 abc", false},      /* 구분자가 '-' 가 아니다 */
+        {"v1.2.3", false},                       /* 판번호 형식이 아니다 */
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        uint8_t img[600];
+        const uint32_t n = make_image(img, sizeof(img), 300, OUR_BOARD, cases[i].stamp,
+                                      FSD_OTA_ESP_MAGIC, FSD_OTA_CHIP_ESP32S3);
+        FsdOtaScan s;
+        fsd_ota_scan_init(&s);
+        feed_in_chunks(&s, img, n, 512);
+        CHECK(s.found == cases[i].ok, "판번호 %s 는 %s 여야 한다", cases[i].stamp,
+              cases[i].ok ? "표식" : "표식이 아니다");
+    }
+}
+
+/* 보드 이름 칸이 비어 있으면 표식이 아니다. */
+static void test_an_empty_board_name_is_not_a_mark(void) {
+    uint8_t img[600];
+    const uint32_t n = make_image(img, sizeof(img), 300, "", OUR_STAMP, FSD_OTA_ESP_MAGIC,
+                                  FSD_OTA_CHIP_ESP32S3);
+    FsdOtaScan s;
+    fsd_ota_scan_init(&s);
+    feed_in_chunks(&s, img, n, 512);
+    CHECK(!s.found, "빈 보드 이름은 표식이 아니다");
+}
+
 int main(void) {
     printf("test_ota_image: 이 이미지가 이 보드의 것인가\n");
     test_our_own_image_passes();
@@ -321,6 +431,10 @@ int main(void) {
     test_the_first_mark_wins();
     test_quiet_cases();
     test_names();
+    test_a_stray_magic_is_not_a_mark();
+    test_only_a_stray_magic_means_no_mark();
+    test_the_stamp_must_start_with_a_year();
+    test_an_empty_board_name_is_not_a_mark();
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

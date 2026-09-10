@@ -2,12 +2,58 @@
 
 #include <string.h>
 
-static const uint8_t MAGIC[FSD_OTA_MARK_MAGIC_LEN] = {
-    (uint8_t)FSD_OTA_MARK_MAGIC_0, (uint8_t)FSD_OTA_MARK_MAGIC_1,
-    (uint8_t)FSD_OTA_MARK_MAGIC_2, (uint8_t)FSD_OTA_MARK_MAGIC_3,
-    (uint8_t)FSD_OTA_MARK_MAGIC_4, (uint8_t)FSD_OTA_MARK_MAGIC_5,
-    (uint8_t)FSD_OTA_MARK_MAGIC_6, (uint8_t)FSD_OTA_MARK_MAGIC_7,
-};
+/*
+ * 🔴🔴 여기에 `static const uint8_t MAGIC[8]` 이 있었다. 지웠다 — 그 배열이
+ * **이미지 안에서 표식 행세를 했다** (2026-09-10, CI 가 잡았다).
+ *
+ * 무슨 일이 있었나: 2층(`esp32/.firmware/ota_store.cpp`)이 이 파일을 부르기
+ * 시작하자 `lilygo-t2can` 이미지에 매직이 **두 번** 실렸다 — 진짜 표식 하나와
+ * 이 배열 하나. 그리고 이 배열이 **더 앞에** 놓였고, 그 뒤에 붙은 rodata 는
+ * 마침 `ble_owner.cpp` 의 로그 문자열이었다:
+ *
+ *      0x000985  board = "enrolled as the owner"
+ *      0x003EAC  board = "lilygo-t2can"          ← 진짜
+ *
+ * 앞의 것이 이기므로, 이 보드는 **자기가 구운 이미지를 전부 "다른 보드용"** 으로
+ * 거부했을 것이다. 그리고 그 증상은 차 옆에서 원인을 짚을 수 없다 — 앱도 배선도
+ * 아니고 링커가 상수를 놓은 자리다.
+ *
+ * 그래서 둘을 함께 고쳤다:
+ *   ⑴ 매직을 통째로 들고 있지 않는다 — 바이트마다 비교한다(아래).
+ *   ⑵ **모양을 본다** — 매직만으로는 표식이라고 믿지 않는다(`shaped_like_mark`).
+ *
+ * ⑵ 가 진짜 방어다. ⑴ 만으로는 컴파일러가 리터럴 풀에 같은 여덟 바이트를 다시
+ * 만들 수 있고, 그때 조용히 같은 자리로 돌아온다.
+ */
+static bool magic_at(const uint8_t* p) {
+    return p[0] == (uint8_t)FSD_OTA_MARK_MAGIC_0 && p[1] == (uint8_t)FSD_OTA_MARK_MAGIC_1 &&
+           p[2] == (uint8_t)FSD_OTA_MARK_MAGIC_2 && p[3] == (uint8_t)FSD_OTA_MARK_MAGIC_3 &&
+           p[4] == (uint8_t)FSD_OTA_MARK_MAGIC_4 && p[5] == (uint8_t)FSD_OTA_MARK_MAGIC_5 &&
+           p[6] == (uint8_t)FSD_OTA_MARK_MAGIC_6 && p[7] == (uint8_t)FSD_OTA_MARK_MAGIC_7;
+}
+
+static bool a_digit(uint8_t c) { return c >= (uint8_t)'0' && c <= (uint8_t)'9'; }
+
+/*
+ * 매직 뒤에 오는 72바이트가 **표식의 모양인가.**
+ *
+ * 판번호는 `gen_build_stamp.py` 가 언제나 `"YYYY-MM-DD HH:MM:SS <rev>"` 로 낸다.
+ * 그 앞 다섯 글자(`숫자 넷 + '-'`)를 요구하면, 우연히 매직처럼 보이는 자리가
+ * 표식으로 읽힐 확률이 사실상 0 이 된다 — 로그 문자열이든 리터럴 풀이든.
+ * 보드 이름은 첫 글자가 인쇄 가능해야 한다(빈 이름은 표식이 아니다).
+ *
+ * 🔴 이것은 `gen_build_stamp.py` 와의 약속이다. 판번호 형식을 바꾸면 이 검사가
+ * **모든 이미지를 거부한다.** 그래서 그쪽에도 같은 모양 검사를 넣어 두었다 —
+ * 형식이 바뀌는 날 차가 아니라 빌드가 먼저 터지게.
+ */
+static bool shaped_like_mark(const uint8_t* p) {
+    const uint8_t* board = p + FSD_OTA_MARK_MAGIC_LEN;
+    const uint8_t* stamp = board + FSD_OTA_MARK_BOARD_LEN;
+    if (board[0] <= 0x20u || board[0] > 0x7Eu) return false;
+    if (!a_digit(stamp[0]) || !a_digit(stamp[1]) || !a_digit(stamp[2]) || !a_digit(stamp[3]))
+        return false;
+    return stamp[4] == (uint8_t)'-';
+}
 
 void fsd_ota_scan_init(FsdOtaScan* s) {
     if(!s) return;
@@ -35,10 +81,14 @@ static void take_mark(FsdOtaMark* out, const uint8_t* at) {
     out->stamp[FSD_OTA_MARK_STAMP_LEN] = '\0';
 }
 
-/* 창 하나에서 **첫** 표식을 찾는다.
+/* 창 하나에서 **첫 진짜** 표식을 찾는다.
  *
  * 앞의 조각에서 남긴 꼬리(최대 71바이트)와 새 조각을 한 줄로 놓고 훑으므로,
  * 조각 경계에 걸친 표식도 정확히 한 번 보인다.
+ *
+ * 🔴 매직이 맞아도 모양이 아니면 **넘어가고 계속 찾는다.** 이미지 안에는 매직과
+ * 같은 여덟 바이트가 또 있을 수 있다 — 실제로 있었다(위 상자). 거기서 멈추면
+ * 멀쩡한 이미지를 "다른 보드용" 으로 거부한다.
  *
  * 🔴 부르는 쪽이 `!s->found` 를 보장한다 — 그래서 여기에 그 검사가 없다.
  * 한때 있었는데, **어떤 시험도 그것을 켜고 끌 수 없었다**(돌연변이로 확인,
@@ -48,7 +98,8 @@ static void take_mark(FsdOtaMark* out, const uint8_t* at) {
 static void scan_window(FsdOtaScan* s, const uint8_t* win, uint32_t len) {
     if(len < FSD_OTA_MARK_LEN) return;
     for(uint32_t i = 0; i + FSD_OTA_MARK_LEN <= len; i++) {
-        if(memcmp(win + i, MAGIC, FSD_OTA_MARK_MAGIC_LEN) != 0) continue;
+        if(!magic_at(win + i)) continue;
+        if(!shaped_like_mark(win + i)) continue;
         take_mark(&s->mark, win + i);
         s->found = true;
         return;

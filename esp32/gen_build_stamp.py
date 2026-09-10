@@ -97,6 +97,15 @@ if len(board) > MARK_BOARD_LEN:
     raise SystemExit(
         "[stamp] 보드 이름 %r 이 %d 자를 넘는다 — fsd_ota_image.h 의 "
         "FSD_OTA_MARK_BOARD_LEN 과 함께 늘려야 한다" % (board, MARK_BOARD_LEN))
+# 🔴 판번호의 **모양**은 이제 계약이다. 받는 쪽(fsd_ota_image.c 의
+# shaped_like_mark)이 `YYYY-` 로 시작하는 것만 표식으로 읽는다 — 이미지 안의
+# 우연한 매직을 걸러 내기 위해서다. 형식을 바꾸면 그 보드는 **어떤 이미지도
+# 안 받는다**. 그 사고를 차가 아니라 여기서 만나게 한다.
+if not (stamp[:4].isdigit() and stamp[4:5] == "-"):
+    raise SystemExit(
+        "[stamp] 판번호 %r 이 'YYYY-' 로 시작하지 않는다 — fsd_ota_image.c 의 "
+        "shaped_like_mark() 가 이것을 표식으로 안 읽는다" % stamp)
+
 if len(stamp) > MARK_STAMP_LEN:
     raise SystemExit(
         "[stamp] 판번호 %r 이 %d 자를 넘는다 — fsd_ota_image.h 의 "

@@ -51,6 +51,40 @@ def _hdr_int(text, name):
     return int(val.split()[0].rstrip("u"), 0)
 
 
+def _shaped_like_mark(img, at, board_len, stamp_len):
+    """fsd_ota_image.c 의 shaped_like_mark() 와 같은 질문.
+
+    🔴 사본이 둘이다 — 하나는 C, 하나는 파이썬이라 합칠 수 없다. 갈라지면
+    무엇이 터지나: CI 가 초록인데 보드가 이미지를 거부한다. 그래서 이 함수를
+    고칠 때는 저쪽도 같이 본다. (열 번째 패턴)
+    """
+    b0 = at + 8
+    s0 = b0 + board_len
+    if s0 + stamp_len > len(img):
+        return None
+    board_raw = img[b0:s0]
+    stamp_raw = img[s0:s0 + stamp_len]
+    if not (0x20 < board_raw[0] <= 0x7E):
+        return None
+    if not stamp_raw[:4].isdigit():
+        return None
+    if stamp_raw[4:5] != b"-":
+        return None
+    return (board_raw.split(b"\x00")[0].decode("utf-8", "replace"),
+            stamp_raw.split(b"\x00")[0].decode("utf-8", "replace"))
+
+
+def _find_marks(img, magic, board_len, stamp_len):
+    out = []
+    at = img.find(magic)
+    while at >= 0:
+        got = _shaped_like_mark(img, at, board_len, stamp_len)
+        if got:
+            out.append((at, got[0], got[1]))
+        at = img.find(magic, at + 1)
+    return out
+
+
 def main() -> int:
     if len(sys.argv) != 2:
         print(__doc__)
@@ -76,7 +110,19 @@ def main() -> int:
     with open(path, "rb") as f:
         img = f.read()
 
-    n = img.count(magic)
+    # 🔴 매직을 세지 않고 **표식을 센다** (2026-09-10).
+    #
+    # 처음에는 img.count(magic) 이었다. 그런데 2층이 fsd_ota_image.c 를 부르기
+    # 시작하자 스캐너 자신의 매직 배열이 이미지에 실렸고, 이 검사가 "표식이
+    # 2 개다" 로 빨개졌다 — 그 빨간 화면이 실제 결함을 잡았다(진짜보다 앞에
+    # 놓여서 보드가 자기 이미지를 거부했을 것이다).
+    #
+    # 고친 뒤에도 매직을 세면 여전히 2 가 나올 수 있다. 컴파일러가 리터럴 풀에
+    # 같은 여덟 바이트를 만들 자유가 있기 때문이다. **늘 실패하는 검사는
+    # 지워진다** — 이 저장소가 ci_check_no_wifi.py 에서 이미 배운 것이다.
+    # 그래서 스캐너와 **같은 모양 검사**를 여기서도 한다.
+    marks = _find_marks(img, magic, board_len, stamp_len)
+    n = len(marks)
     if n == 0:
         print("[ota-mark] 🔴 %s: 표식이 이미지에 없다.\n"
               "           링커가 FSD_OTA_MARK 를 버린 것이다 — main.cpp 의 배너가\n"
@@ -87,10 +133,7 @@ def main() -> int:
         print("[ota-mark] 🔴 %s: 표식이 %d 개다. 하나여야 한다." % (env, n))
         return 1
 
-    at = img.index(magic)
-    board = img[at + 8:at + 8 + board_len].split(b"\x00")[0].decode("utf-8", "replace")
-    stamp = img[at + 8 + board_len:at + 8 + board_len + stamp_len].split(b"\x00")[0].decode(
-        "utf-8", "replace")
+    at, board, stamp = marks[0]
 
     if board != env:
         print("[ota-mark] 🔴 %s: 표식의 보드 이름이 %r 이다 — env 와 달라야 할 이유가 없다.\n"
