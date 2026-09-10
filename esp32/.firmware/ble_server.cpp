@@ -25,6 +25,7 @@
 #include "blackbox.h"
 #include "ble_central.h"
 #include "ble_owner.h"
+#include "ota_store.h"
 #include "camera_store.h"
 #include "camera_task.h"
 #include "capability.h"
@@ -67,6 +68,13 @@
  * checked against it. The JSON documents have overflowed the 512-byte limit
  * three times; 288 bytes cannot. */
 #define BLE_UUID_RULES   "6b1a000b-4b53-4d4f-4432-43414e000001"
+/* 펌웨어 이미지가 들어오는 곳.
+ *
+ * 🔴 camera.bin 의 UPLOAD 와 **따로** 둔다. 프레이밍이 같아서 한 특성에 종류
+ * 바이트 하나만 붙이면 되지만, 그러면 카메라 업로드의 결함 하나가 곧 펌웨어
+ * 쓰기의 결함이 된다 — 한쪽은 DB 를 망치고 한쪽은 **보드를 못 켜게 만든다.**
+ * 서비스 발견에 이것이 있는지로 앱이 "이 판이 OTA 를 받나" 를 알 수도 있다. */
+#define BLE_UUID_OTA     "6b1a000c-4b53-4d4f-4432-43414e000001"
 
 #define BLE_STATE_LEN  31u   // v9: +bytes 29-30, the RANGE on that same screen
 #define BLE_RESULT_LEN 4u
@@ -91,6 +99,7 @@ static NimBLECharacteristic *g_ch_result = nullptr;
 static NimBLECharacteristic *g_ch_cap    = nullptr;
 static NimBLECharacteristic *g_ch_bulk   = nullptr;
 static NimBLECharacteristic *g_ch_upload = nullptr;
+static NimBLECharacteristic *g_ch_ota    = nullptr;
 static NimBLECharacteristic *g_ch_camstat = nullptr;
 static NimBLECharacteristic *g_ch_scan    = nullptr;
 static NimBLECharacteristic *g_ch_buttons = nullptr;
@@ -212,6 +221,14 @@ static volatile uint8_t  g_bb_req           = 0;
 /* v9: the transmission lock, parked by the BLE task for loop(). Volatile and
  * beside the recorder's pair for the same reason -- two tasks touch them. */
 static volatile bool     g_rulearm_req_pending = false;
+
+/* OTA. 머리말은 파킹만 하고 loop() 가 실제로 칸을 연다 — 지우기가 1~3 초
+ * 블로킹이라 BLE 호스트 태스크에서 할 수 없다. BB_ENABLE 과 같은 모양. */
+static volatile uint32_t g_ota_begin_req      = 0;
+static volatile bool     g_ota_begin_pending  = false;
+/* 연결이 끊겼다. onDisconnect 는 BLE 태스크라 거기서 접지 않고 여기 맡긴다 —
+ * loop() 가 3 초짜리 지우기 중이면 그 뮤텍스를 기다리다 스택이 멈춘다. */
+static volatile bool     g_ota_abandon_pending = false;
 static volatile uint8_t  g_rulearm_req         = 0;
 static volatile bool     g_bb_mark_pending  = false;
 /* Delete every capture, parked for loop(). blackbox_delete_all() walks the
@@ -1031,6 +1048,97 @@ class UploadCB : public NimBLECharacteristicCallbacks {
     }
 };
 
+// ── 펌웨어 업로드 (폰 -> 모듈) ───────────────────────────────────────────────
+//
+// 프레이밍은 camera.bin 과 같다 (seq LE16, 0 = 머리말). 다른 것은 답이 오는
+// 시점이다: 머리말의 답은 loop() 가 칸을 다 지운 뒤에야 나간다.
+class OtaCB : public NimBLECharacteristicCallbacks {
+    void onWrite(NimBLECharacteristic *ch, NimBLEConnInfo &info) override {
+        std::string v = ch->getValue();
+        if (v.size() < BLE_UPLOAD_HDR) return;
+
+        /* 🔴 ATT 선언이 아니라 여기서 묻는다. camera.bin 의 UPLOAD 와 같은
+         * 모양이고 같은 이유다 — WRITE_AUTHEN 을 선언했다가 모든 명령이 ATT
+         * 계층에서 조용히 거절된 적이 있다(PR #23). 이 보드는 화면이 없어
+         * Just Works 밖에 못 하므로 "암호화됐다" 는 신원이 아니고, 신원은
+         * ble_owner 가 갖는다. */
+        if (!info.isEncrypted()) return;
+        if (!ble_owner_allows(info.getIdAddress().getType(),
+                              info.getIdAddress().getVal())) {
+            ble_send_result(BLE_CMD_OTA_BEGIN, BLE_RES_NOT_OWNER, 0);
+            return;
+        }
+
+        const uint16_t seq = (uint8_t)v[0] | ((uint16_t)(uint8_t)v[1] << 8);
+        const uint8_t *body = (const uint8_t *)v.data() + BLE_UPLOAD_HDR;
+        const size_t n = v.size() - BLE_UPLOAD_HDR;
+
+        if (seq == 0) {
+            if (n < 4) { ble_send_result(BLE_CMD_OTA_BEGIN, BLE_RES_REJECTED, 0); return; }
+            if (g_ota_begin_pending) {
+                ble_send_result(BLE_CMD_OTA_BEGIN, BLE_RES_BUSY, BLE_BUSY_TRANSFER);
+                return;
+            }
+            g_ota_begin_req = (uint32_t)body[0] | ((uint32_t)body[1] << 8) |
+                              ((uint32_t)body[2] << 16) | ((uint32_t)body[3] << 24);
+            /* 🔴 여기서 답하지 않는다. 칸을 여는 데 몇 초가 걸리고, 그 전에
+             * "OK" 를 보내면 폰이 곧바로 조각을 쏘기 시작한다. */
+            g_ota_begin_pending = true;
+            return;
+        }
+
+        const uint8_t res = ota_store_chunk(seq, body, n);
+        /* 🔴 성공은 답하지 않는다. 1,378 조각마다 알림을 하나씩 되쏘면 그것이
+         * 곧 전송 속도의 상한이 된다 — 카메라 업로드가 같은 이유로 같다.
+         * 완료는 loop() 가 알아채고, 실패는 여기서 한 번만 말한다. */
+        if (res != OTA_ST_OK) {
+            ble_send_result(BLE_CMD_OTA_CHUNK, BLE_RES_REJECTED, res);
+        }
+    }
+};
+
+/* loop() 쪽. 파킹된 시작 · 완료 · 시한 · 끊긴 연결을 여기서 처리한다. */
+static void ble_apply_ota_request(uint32_t now_ms) {
+    if (g_ota_abandon_pending) {
+        g_ota_abandon_pending = false;
+        ota_store_abandon("연결이 끊겼다");
+    }
+
+    if (g_ota_begin_pending) {
+        g_ota_begin_pending = false;
+
+        /* 차가 움직이는 것을 **보았는가**. 속도 프레임이 아예 안 오는 것은 여기
+         * 안 든다 — 차가 자리를 잡으면 구동 인버터가 잠들어 0x257 이 버스에서
+         * 사라지고, 그때가 정확히 폰으로 굽고 싶은 때다. 미러가 그 함정에
+         * 물렸었다(`axis: no gear signal`). */
+        bool moving = false;
+        if (g_state && g_mux) {
+            portENTER_CRITICAL(g_mux);
+            moving = g_state->speed_seen && g_state->vehicle_speed_kph > 1.0f;
+            portEXIT_CRITICAL(g_mux);
+        }
+
+        const uint8_t res = ota_store_begin(g_ota_begin_req, moving,
+                                            blackbox_capture_pending());
+        ble_send_result(BLE_CMD_OTA_BEGIN,
+                        res == OTA_ST_OK ? BLE_RES_OK : BLE_RES_REJECTED, res);
+        return;   // 지우기가 이 loop 을 이미 오래 먹었다. 나머지는 다음 바퀴에.
+    }
+
+    if (ota_store_ready_to_finish()) {
+        const uint8_t res = ota_store_finish();
+        ble_send_result(BLE_CMD_OTA_DONE,
+                        res == OTA_ST_OK ? BLE_RES_OK : BLE_RES_REJECTED, res);
+        return;
+    }
+
+    /* 🔴 시한. 폰이 그냥 사라지면 칸이 영원히 잡혀 있고 다음 시도가 BUSY 로
+     * 거절된다 — 그 증상은 차 옆에서 "왜 안 되지" 로만 보인다. */
+    if (ota_store_tick(now_ms)) {
+        ble_send_result(BLE_CMD_OTA_DONE, BLE_RES_TIMEOUT, OTA_ST_STALLED);
+    }
+}
+
 // ── Command handling ─────────────────────────────────────────────────────────
 class CommandCB : public NimBLECharacteristicCallbacks {
     void onWrite(NimBLECharacteristic *ch, NimBLEConnInfo &info) override {
@@ -1203,6 +1311,14 @@ class CommandCB : public NimBLECharacteristicCallbacks {
             if (g_rulearm_req_pending) { ble_send_result(cmd, BLE_RES_BUSY, 0); break; }
             g_rulearm_req         = arg ? 1u : 0u;
             g_rulearm_req_pending = true;
+            break;
+
+        /* 받던 펌웨어를 접는다. loop() 로 미루는 이유는 나머지와 같다 —
+         * 그쪽이 뮤텍스를 3 초 쥐고 있을 수 있고, 여기서 기다리면 BLE
+         * 호스트 태스크가 그동안 멈춘다. */
+        case BLE_CMD_OTA_ABORT:
+            g_ota_abandon_pending = true;
+            ble_send_result(cmd, BLE_RES_OK, 0);
             break;
 
         case BLE_CMD_BB_ENABLE:
@@ -1547,6 +1663,12 @@ class ServerCB : public NimBLEServerCallbacks {
         g_bulk_active      = false;  // a half-sent capture is not resumable
         camera_store_upload_abort(); // half-written database is worse than none
         g_upload_expect    = 0;
+        /* 🔴 반쯤 쓴 펌웨어는 반쯤 쓴 DB 보다 나쁘다 — 그대로 두면 칸이 잡힌
+         * 채로 남는다. 다만 여기서 접지 않고 loop() 에 맡긴다: 이 콜백은 BLE
+         * 태스크이고, loop() 가 3 초짜리 지우기 중이면 그 뮤텍스를 기다리다
+         * 스택이 그동안 멈춘다. */
+        g_ota_begin_pending   = false;
+        g_ota_abandon_pending = true;
         g_mtu              = 23;     // next peer renegotiates from the default
         // Start the grace timer only if there is something to take back. millis()
         // can return 0 exactly once at boot, which would read as "no timer" — so
@@ -1694,6 +1816,14 @@ void ble_server_init(FSDState *state, portMUX_TYPE *state_mux) {
         BLE_UUID_UPLOAD, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
     g_ch_upload->setCallbacks(new UploadCB());
 
+    /* 펌웨어. UPLOAD 와 같은 성질(WRITE | WRITE_NR)로 둔다 — 일부러 더 엄하게
+     * 선언하지 않는다. WRITE_AUTHEN 을 붙였다가 모든 명령이 ATT 계층에서
+     * 조용히 거절된 적이 있고(PR #23), 그 실패는 앱에서 "무응답" 으로만
+     * 보인다. 신원은 onWrite 안의 주인 검사가 갖는다. */
+    g_ch_ota = svc->createCharacteristic(
+        BLE_UUID_OTA, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
+    g_ch_ota->setCallbacks(new OtaCB());
+
     // Camera / autonomy status. Readable so the app can ask once on connect,
     // and notified at 1 Hz because the supervision verdict changes with the
     // gear and the belt.
@@ -1760,6 +1890,7 @@ void ble_server_tick(uint32_t now_ms) {
     ble_apply_btn_request();       // NVS write belongs on this task, not the BLE one
     ble_apply_action_request();    // 〃
     ble_apply_blackbox_request();
+    ble_apply_ota_request(now_ms);  // 지우기·해시는 여기서. BLE 태스크에서 할 수 없다
     ble_apply_bb_clear_request();  // walks the filesystem — never on the BLE task
     ble_apply_rules_request();     // NVS write + the verdict that IS the answer
     ble_publish_rules();           // after the apply, so a write is visible now

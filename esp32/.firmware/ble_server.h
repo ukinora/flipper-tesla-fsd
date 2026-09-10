@@ -217,6 +217,22 @@
  * that one, and copies of checks are how they come to disagree. */
 #define BLE_CMD_RULE_ARM     0x72u
 
+/* ── OTA — 폰이 보낸 펌웨어를 다음 칸에 굽는다 ────────────────────────────────
+ *
+ * 세 개는 **결과 꼬리표일 뿐**이고 폰이 Command 에 쓰는 것이 아니다. 카메라
+ * 업로드가 세 가지 답(머리말 승인 · 조각 거절 · 완료)을 UPLOAD_ABORT 하나로
+ * 보내는 것과 일부러 다르게 했다 — 여기서는 **머리말의 답이 몇 초 뒤에 온다.**
+ * `esp_ota_begin()` 이 칸을 지우는 데 689 KB 면 1~3 초 걸리기 때문이다. 꼬리표가
+ * 하나면 폰은 "지금 온 이 OK 가 머리말 것인가 완료 것인가" 를 알 수 없다.
+ *
+ * 🔴 `detail` 바이트는 ota_store.h 의 `OTA_ST_*` 다. 구간이 나뉘어 있다 —
+ * 시작 거절 1..9 · 조각 거절 20..29 · 이미지 정체 30..39 · ESP-IDF 실패 40.. */
+#define BLE_CMD_OTA_BEGIN    0x80u  // 결과 전용: 머리말을 받아들였는가
+#define BLE_CMD_OTA_CHUNK    0x81u  // 결과 전용: 조각이 거절됐다 (성공은 안 보낸다)
+#define BLE_CMD_OTA_DONE     0x82u  // 결과 전용: 심었는가
+/* 진짜 명령. 받던 것을 접는다. arg 는 안 본다. */
+#define BLE_CMD_OTA_ABORT    0x83u
+
 // ── Camera / autonomy status (read + notify) ─────────────────────────────────
 // A separate characteristic rather than more bytes in State: State is a fixed
 // 20 and full, and widening it would bump the wire version for every client.

@@ -53,7 +53,8 @@
 #include "../../fsd_logic/fsd_events.h"
 #include "prefs.h"
 #include "power_log.h"
-#include "fsd_build_stamp.h"   // 🔴 조건부 블록 밖 — 모든 보드가 쓴다
+#include "fsd_build_stamp.h"
+#include "ota_store.h"   // 🔴 조건부 블록 밖 — 모든 보드가 쓴다
 #if defined(BOARD_TTGO_DISPLAY)
 #include "display.h"
 #endif
@@ -2277,6 +2278,10 @@ void setup() {
      * 그러면 OTA 가 자기 이미지를 "우리가 구운 것이 아니다" 로 거부한다.
      * 나머지 절반은 배너가 어느 보드용 판인지 말해 주는 것이다. */
     Serial.printf("[FSD] Board: %.*s\n", (int)FSD_OTA_MARK_BOARD_LEN, FSD_OTA_MARK.board);
+
+    /* 폰이 보낸 펌웨어를 받을 자리. 뮤텍스 하나를 만드는 것이 전부이고, 실제로
+     * 무엇을 받는 것은 주인 폰이 버튼 창 안에서 보낼 때뿐이다. */
+    ota_store_init();
 
     const esp_partition_t *running = esp_ota_get_running_partition();
     if (running) {
