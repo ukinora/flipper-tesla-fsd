@@ -71,7 +71,21 @@ void ota_store_init(void);
  * `motion_seen`·`saving_capture` 는 이 파일이 알 수 없는 바깥 사정이라 넣어
  * 준다 — 전역을 들여다보게 만들면 사본이 늘고 시험이 못 닿는다.
  */
-uint8_t ota_store_begin(uint32_t total_bytes, bool motion_seen, bool saving_capture);
+uint8_t ota_store_begin(uint32_t total_bytes, uint8_t xfer_id, bool motion_seen,
+                        bool saving_capture);
+
+/**
+ * 지금 세션의 번호. 세션이 없으면 0.
+ *
+ * 🔴🔴 **이것이 없어서 여덟 번을 헤맸다 (2026-09-10).** 결과 프레임에는 *어느
+ * 전송의 것인가* 가 없었다. 그래서 앞선 전송이 끝난 뒤 늦게 배달된 실패 통지를
+ * **다음 전송이 자기 것으로 읽고 스스로 멈췄다** — 시작 0.9 초 만에. 한 번
+ * 실패하면 그다음이 전부 같은 자리에서 죽었고, **실패가 자기를 재생산했다.**
+ *
+ * 이제 결과의 `extra` 는 `(번호 << 8) | 코드` 이고, 앱은 자기 번호가 아닌 것을
+ * 버린다.
+ */
+uint8_t ota_store_xfer_id(void);
 
 /** 조각 하나를 쓴다. **BLE 태스크에서.** */
 uint8_t ota_store_chunk(uint16_t seq, const uint8_t* data, size_t n);

@@ -37,10 +37,33 @@ typedef struct {
     FsdOtaXfer xfer;
     FsdOtaScan scan;
     uint32_t last_ms;
+    uint32_t first_ms; /* 속도를 재는 기준점 */
+    uint8_t id;        /* 이 전송의 번호 — 결과가 어느 것인지 말하려고 */
 } OtaSession;
 
 static SemaphoreHandle_t g_mux = nullptr;
 static OtaSession *g_s = nullptr;
+
+/*
+ * 🔴🔴 **loop() 가 뮤텍스를 매 바퀴 잡으면 안 된다 — BLE 태스크가 굶는다.**
+ *
+ * 처음에는 `ota_store_ready_to_finish()` 와 `ota_store_tick()` 이 둘 다 잠그고
+ * 시작했다. 그 둘은 `ble_server_tick()` 에서 불리고 그것은 loop() 안이라, **초당
+ * 수만 번** 이 뮤텍스를 잡았다 놓는 셈이었다. 그동안 조각은 BLE 호스트
+ * 태스크에서 같은 뮤텍스를 기다린다 — 다른 코어에서.
+ *
+ * 벤치에서 전송이 **첫 버스트(8조각) 뒤에 멈췄다** (2026-09-10). 그래서 이 둘은
+ * 이제 **잠그지 않고 읽는 칸**을 먼저 본다. 잠그는 것은 실제로 할 일이 있을
+ * 때뿐이다.
+ *
+ * `volatile` 이면 충분한 이유: 둘 다 **한 곳에서만 쓰고**(뮤텍스를 쥔 채),
+ * 읽는 쪽은 늦게 알아도 무해하다 — 한 바퀴 늦게 끝내거나 한 바퀴 늦게 접을
+ * 뿐이다. 그리고 그 뒤에는 어차피 잠그고 다시 확인한다.
+ */
+static volatile bool g_active = false;   /* 세션이 살아 있는가 */
+static volatile uint8_t g_xfer_id = 0;  /* 잠그지 않고 읽는다 — 부르는 쪽이 매번 쓴다 */
+static volatile bool g_complete = false; /* 선언한 만큼 다 왔는가 */
+static volatile uint32_t g_last_seen_ms = 0;
 
 static inline bool lock(void) {
     if (!g_mux) return false;
@@ -59,12 +82,21 @@ static void free_locked(void) {
     if (g_s->handle != 0) esp_ota_abort(g_s->handle);
     heap_caps_free(g_s);
     g_s = nullptr;
+    g_active = false;
+    g_complete = false;
+    g_xfer_id = 0;
 }
 
-/* 접는다 — 이유를 말하고 놓아 준다. */
+/* 접는다 — 이유와 **어디까지 받았는지**를 말하고 놓아 준다.
+ *
+ * 🔴 그 수가 이 진단의 전부다. 앱도 자기가 보낸 양을 안다 — 둘이 같으면 폰이
+ * 못 보낸 것이고, 모듈 쪽이 적으면 무선이 버린 것이다. 수가 없으면 그 둘이
+ * 화면에서 똑같이 보인다 (2026-09-10 에 실제로 그랬다). */
 static void drop_locked(const char *why) {
     if (!g_s) return;
-    Serial.printf("[OTA] 받던 것을 접었다 — %s\n", why ? why : "이유 없음");
+    Serial.printf("[OTA] 받던 것을 접었다 — %s (받은 양 %u / %u, 다음 순번 %u)\n",
+                  why ? why : "이유 없음", (unsigned)g_s->xfer.written,
+                  (unsigned)g_s->xfer.declared, (unsigned)g_s->xfer.next_seq);
     free_locked();
 }
 
@@ -89,7 +121,10 @@ static uint16_t running_chip_id(void) {
                       ((uint16_t)head[FSD_OTA_CHIP_OFFSET + 1u] << 8));
 }
 
-uint8_t ota_store_begin(uint32_t total_bytes, bool motion_seen, bool saving_capture) {
+uint8_t ota_store_xfer_id(void) { return g_xfer_id; }
+
+uint8_t ota_store_begin(uint32_t total_bytes, uint8_t xfer_id, bool motion_seen,
+                        bool saving_capture) {
     if (!lock()) return OTA_ST_ESP_BEGIN;
 
     const esp_partition_t *slot = esp_ota_get_next_update_partition(nullptr);
@@ -131,11 +166,36 @@ uint8_t ota_store_begin(uint32_t total_bytes, bool motion_seen, bool saving_capt
         return OTA_ST_ESP_BEGIN;
     }
 
+    /* 🔬 **정말 다 지웠나.** 지운 영역의 맨 끝을 읽어 본다 — 0xFF 가 아니면
+     * `esp_ota_begin` 이 앞에서 다 안 지운 것이고, 그러면 그 나머지는 **조각을
+     * 받는 도중에** 지워진다. 플래시를 지우는 동안에는 캐시가 꺼져서 BLE 를
+     * 포함한 모든 것이 선다. */
+    {
+        uint8_t tail[16];
+        const size_t probe_at = (size_t)total_bytes > sizeof(tail)
+                                    ? (size_t)total_bytes - sizeof(tail)
+                                    : 0u;
+        if (esp_partition_read(slot, probe_at, tail, sizeof(tail)) == ESP_OK) {
+            bool all_ff = true;
+            for (size_t i = 0; i < sizeof(tail); ++i) {
+                if (tail[i] != 0xFFu) { all_ff = false; break; }
+            }
+            Serial.printf("[OTA] 지운 자리 끝(%u)은 %s\n", (unsigned)probe_at,
+                          all_ff ? "비었다" : "🔴 아직 안 지워졌다");
+        }
+    }
+
     s->slot = slot;
+    s->id = xfer_id;
     s->last_ms = millis();
+    s->first_ms = s->last_ms;
     fsd_ota_xfer_init(&s->xfer, total_bytes);
     fsd_ota_scan_init(&s->scan);
     g_s = s;
+    g_xfer_id = xfer_id;
+    g_last_seen_ms = s->last_ms;
+    g_complete = false;
+    g_active = true;
     Serial.printf("[OTA] 준비됐다 — %s, 지우는 데 %u ms\n", slot->label,
                   (unsigned)(s->last_ms - t0));
     unlock();
@@ -163,7 +223,15 @@ uint8_t ota_store_chunk(uint16_t seq, const uint8_t *data, size_t n) {
         return (uint8_t)(OTA_ST_CHUNK_BASE + (uint8_t)cv);
     }
 
+    const uint32_t t_w0 = millis();
     const esp_err_t err = esp_ota_write(g_s->handle, data, n);
+    const uint32_t write_ms = millis() - t_w0;
+    /* 🔬 1 ms 짜리 쓰기 사이에 **긴 것 하나**가 섞여 있는지 본다. 있으면 멈춘
+     * 것은 무선이 아니라 이 보드다. */
+    if (write_ms >= 20u) {
+        Serial.printf("🔴 [OTA] 조각 %u 쓰기가 %u ms 걸렸다\n", (unsigned)seq,
+                      (unsigned)write_ms);
+    }
     if (err != ESP_OK) {
         Serial.printf("[OTA] esp_ota_write 실패: %s\n", esp_err_to_name(err));
         drop_locked("플래시에 못 썼다");
@@ -176,15 +244,17 @@ uint8_t ota_store_chunk(uint16_t seq, const uint8_t *data, size_t n) {
     fsd_ota_scan_feed(&g_s->scan, data, (uint32_t)n);
     g_s->last_ms = millis();
 
+    /* 잠그지 않고 읽는 칸을 여기서 갱신한다 — 이미 잠근 채다. */
+    g_last_seen_ms = g_s->last_ms;
+    if (fsd_ota_xfer_complete(&g_s->xfer)) g_complete = true;
+
     unlock();
     return OTA_ST_OK;
 }
 
 bool ota_store_ready_to_finish(void) {
-    if (!lock()) return false;
-    const bool done = g_s && fsd_ota_xfer_complete(&g_s->xfer);
-    unlock();
-    return done;
+    /* 🔴 **잠그지 않는다.** loop() 가 매 바퀴 부르는 자리다 — 위 상자 참조. */
+    return g_active && g_complete;
 }
 
 uint8_t ota_store_finish(void) {
@@ -225,8 +295,15 @@ uint8_t ota_store_finish(void) {
         return OTA_ST_ESP_BOOT;
     }
 
+    const uint32_t took = millis() - g_s->first_ms;
     Serial.printf("[OTA] 심었다 — %s · %s · %s\n", g_s->slot->label, g_s->scan.mark.board,
                   g_s->scan.mark.stamp);
+    /* 🔴 **모듈이 자기 수를 말한다.** 앱도 처리량을 그리는데, 오늘 그 수가 세 번
+     * 다 **더미가 지어낸 것**이었고 화면만 봐서는 갈리지 않았다. 둘을 맞대 볼 수
+     * 있으면 그런 날이 다시 와도 그 자리에서 드러난다. */
+    Serial.printf("[OTA] 받은 양 %u B · %u.%u 초 · %u KB/s\n", (unsigned)g_s->xfer.written,
+                  (unsigned)(took / 1000u), (unsigned)((took % 1000u) / 100u),
+                  took ? (unsigned)((uint64_t)g_s->xfer.written * 1000u / took / 1024u) : 0u);
     Serial.println("[OTA] 다시 켜면 이 판으로 뜬다. 자가진단을 통과해야 확정된다.");
     free_locked();
     unlock();
@@ -234,24 +311,31 @@ uint8_t ota_store_finish(void) {
 }
 
 bool ota_store_tick(uint32_t now_ms) {
+    /* 🔴 **잠그기 전에 먼저 본다.** loop() 가 매 바퀴 부르는 자리다 — 위 상자
+     * 참조. 여기서 참이어야만 잠그고 다시 확인한다. */
+    if (!g_active) return false;
+    /* 🔴 판정은 `fsd_ota_gate.c` 가 갖는다 — 여기서 다시 쓰면 사본이 둘이 되고,
+     * 이 사본은 호스트 시험이 닿지 않는다. 그리고 **바로 그 자리에서 물렸다.** */
+    if (!fsd_ota_stalled(now_ms, g_last_seen_ms, FSD_OTA_STALL_MS)) return false;
+
     if (!lock()) return false;
     bool cut = false;
-    if (g_s && (uint32_t)(now_ms - g_s->last_ms) > FSD_OTA_STALL_MS) {
+    if (g_s && fsd_ota_stalled(now_ms, g_s->last_ms, FSD_OTA_STALL_MS)) {
         /* 🔴 시한이 없으면 폰이 그냥 사라졌을 때 칸이 영원히 잡혀 있고, 다음
          * 시도가 BUSY 로 거절된다 — 그 증상은 차 옆에서 "왜 안 되지" 로만 보인다. */
-        drop_locked("조각이 15초째 안 온다");
+        char why[64];
+        snprintf(why, sizeof(why), "조각이 %u ms 째 안 온다 (시한 %u ms)",
+                 (unsigned)(now_ms - g_s->last_ms), (unsigned)FSD_OTA_STALL_MS);
+        drop_locked(why);
         cut = true;
     }
     unlock();
     return cut;
 }
 
-bool ota_store_busy(void) {
-    if (!lock()) return false;
-    const bool b = (g_s != nullptr);
-    unlock();
-    return b;
-}
+/* 🔴 이것도 안 잠근다. 부르는 쪽이 "지금 받는 중인가" 를 물을 뿐이고, 한
+ * 바퀴 낡은 답으로 나빠지는 것이 없다. */
+bool ota_store_busy(void) { return g_active; }
 
 uint32_t ota_store_progress(void) {
     if (!lock()) return 0;
@@ -261,6 +345,8 @@ uint32_t ota_store_progress(void) {
 }
 
 void ota_store_abandon(const char *why) {
+    /* 받는 중이 아니면 잠그지도 않는다 — 연결 해제마다 불리는 자리다. */
+    if (!g_active) return;
     if (!lock()) return;
     drop_locked(why);
     unlock();

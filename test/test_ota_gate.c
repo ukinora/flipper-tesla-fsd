@@ -291,7 +291,45 @@ static void test_names(void) {
           "모르는 조각 판정에도 이름이 있다");
 }
 
+
+/* ── 시한 ──────────────────────────────────────────────────────────────── */
+
+static void test_stall_needs_the_whole_wait(void) {
+    /* 아직 안 됐다 */
+    CHECK(!fsd_ota_stalled(1000u, 1000u, 60000u), "막 왔으면 안 접는다");
+    CHECK(!fsd_ota_stalled(61000u, 1000u, 60000u), "시한 직전에는 안 접는다");
+    /* 딱 넘었다 */
+    CHECK(fsd_ota_stalled(61001u, 1000u, 60000u), "시한을 넘으면 접는다");
+}
+
+static void test_stall_survives_a_last_seen_from_the_future(void) {
+    /*
+     * 🔴 **이 시험이 실차에서 물린 것을 그대로 재현한다.**
+     *
+     * loop() 가 시각을 뜨고 여러 일을 하는 동안 BLE 태스크가 조각을 받는다.
+     * 그러면 `last_seen_ms` 가 `now_ms` 보다 **몇 ms 앞선다.** 앞선 것은
+     * "방금 왔다" 는 뜻이지 "49 일 전에 왔다" 는 뜻이 아니다.
+     */
+    CHECK(!fsd_ota_stalled(1000u, 1001u, 60000u), "1 ms 앞선 것은 방금 온 것이다");
+    CHECK(!fsd_ota_stalled(1000u, 1200u, 60000u), "200 ms 앞서도 마찬가지");
+    /* loop() 한 바퀴가 아무리 길어도 앞서는 폭은 그 한 바퀴다. */
+    CHECK(!fsd_ota_stalled(1000u, 1000u + 5000u, 60000u),
+          "loop 한 바퀴가 길어도 앞선 것은 앞선 것이다");
+}
+
+static void test_stall_still_fires_across_the_millis_wrap(void) {
+    /* millis() 는 49 일에 한 번 0 으로 돌아온다. 그때도 판정이 서야 한다. */
+    const uint32_t before_wrap = 0xFFFFF000u;
+    CHECK(!fsd_ota_stalled(before_wrap + 1000u, before_wrap, 60000u),
+          "49 일 넘김 자리에서도 시한 전에는 안 접는다");
+    CHECK(fsd_ota_stalled(before_wrap + 61001u, before_wrap, 60000u),
+          "49 일 넘김 자리에서도 시한을 넘으면 접는다");
+}
+
 int main(void) {
+    test_stall_needs_the_whole_wait();
+    test_stall_survives_a_last_seen_from_the_future();
+    test_stall_still_fires_across_the_millis_wrap();
     printf("test_ota_gate: 받기 시작해도 되는가 · 조각이 제대로 오는가\n");
     test_the_ordinary_case_passes();
     test_each_gate_refuses_on_its_own();
