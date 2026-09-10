@@ -144,6 +144,15 @@ OTA_IMG_SRC := test_ota_image.c $(ROOT)/fsd_logic/fsd_ota_image.c
 test_ota_image: $(OTA_IMG_SRC) $(ROOT)/fsd_logic/fsd_ota_image.h
 	$(CC) $(CFLAGS) -I$(ROOT)/fsd_logic $(OTA_IMG_SRC) -o $@
 
+# 받기 시작해도 되는가 + 조각이 순서대로 오는가. 이미지 내용은 안 본다 —
+# 그것은 위의 test_ota_image 다. 둘을 한 바이너리에 넣지 않는 이유는 묻는
+# 질문이 다르기 때문이다(허가 vs 정체), test_body 와 test_body_wire 가 갈려
+# 있는 것과 같은 논거다.
+OTA_GATE_SRC := test_ota_gate.c $(ROOT)/fsd_logic/fsd_ota_gate.c
+
+test_ota_gate: $(OTA_GATE_SRC) $(ROOT)/fsd_logic/fsd_ota_gate.h
+	$(CC) $(CFLAGS) -I$(ROOT)/fsd_logic $(OTA_GATE_SRC) -o $@
+
 # 🔴 `-lm` 이 필요하다. fsd_camera.c 가 sqrtf/cosf/sinf 를 쓰는데, **MinGW 는
 # libm 을 자동으로 링크하고 glibc 는 안 한다** — 그래서 이 줄이 없어도 내
 # 로컬은 통과하고 CI 만 터진다. CLAUDE.md 가 "Docker 로 갈아타는 조건" 넷 중
@@ -161,7 +170,7 @@ CAPJSON_SRC := test_cap_json.c $(ROOT)/fsd_logic/fsd_cap_json.c
 test_cap_json: $(CAPJSON_SRC) $(ROOT)/fsd_logic/fsd_cap_json.h
 	$(CC) $(CFLAGS) -I$(ROOT)/fsd_logic $(CAPJSON_SRC) -o $@
 
-check: test_pipeline test_fsd_core test_speed_profile test_camera test_gps test_body test_body_emit test_body_wire test_signal test_trigger test_rules test_button test_btn_j6 test_wire test_cap_json test_route test_ota_image
+check: test_ota_gate test_pipeline test_fsd_core test_speed_profile test_camera test_gps test_body test_body_emit test_body_wire test_signal test_trigger test_rules test_button test_btn_j6 test_wire test_cap_json test_route test_ota_image
 	./test_pipeline
 	./test_fsd_core
 	./test_speed_profile
@@ -179,8 +188,9 @@ check: test_pipeline test_fsd_core test_speed_profile test_camera test_gps test_
 	./test_cap_json
 	./test_route
 	./test_ota_image
+	./test_ota_gate
 
 clean:
-	rm -rf test_pipeline test_fsd_core test_speed_profile test_camera test_gps test_body test_body_emit test_body_wire test_signal test_trigger test_rules test_button test_btn_j6 test_wire test_cap_json test_route test_ota_image *.dSYM
+	rm -rf test_ota_gate test_pipeline test_fsd_core test_speed_profile test_camera test_gps test_body test_body_emit test_body_wire test_signal test_trigger test_rules test_button test_btn_j6 test_wire test_cap_json test_route test_ota_image *.dSYM
 
 .PHONY: check clean
