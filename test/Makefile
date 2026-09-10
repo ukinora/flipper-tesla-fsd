@@ -137,6 +137,13 @@ ROUTE_SRC := test_route.c $(ROOT)/fsd_logic/fsd_route.c $(ROOT)/fsd_logic/fsd_ca
 test_route: $(ROUTE_SRC) $(ROOT)/fsd_logic/fsd_route.h $(ROOT)/fsd_logic/fsd_camera.h
 	$(CC) $(CFLAGS) -I$(ROOT)/fsd_logic $(ROUTE_SRC) -o $@ -lm
 
+# 폰이 보낸 펌웨어 이미지가 이 보드의 것인가. 순수하게 바이트만 본다 —
+# esp_ota_* 를 부르는 쪽은 esp32/ 에 있고 여기서 닿지 않는다.
+OTA_IMG_SRC := test_ota_image.c $(ROOT)/fsd_logic/fsd_ota_image.c
+
+test_ota_image: $(OTA_IMG_SRC) $(ROOT)/fsd_logic/fsd_ota_image.h
+	$(CC) $(CFLAGS) -I$(ROOT)/fsd_logic $(OTA_IMG_SRC) -o $@
+
 # 🔴 `-lm` 이 필요하다. fsd_camera.c 가 sqrtf/cosf/sinf 를 쓰는데, **MinGW 는
 # libm 을 자동으로 링크하고 glibc 는 안 한다** — 그래서 이 줄이 없어도 내
 # 로컬은 통과하고 CI 만 터진다. CLAUDE.md 가 "Docker 로 갈아타는 조건" 넷 중
@@ -154,7 +161,7 @@ CAPJSON_SRC := test_cap_json.c $(ROOT)/fsd_logic/fsd_cap_json.c
 test_cap_json: $(CAPJSON_SRC) $(ROOT)/fsd_logic/fsd_cap_json.h
 	$(CC) $(CFLAGS) -I$(ROOT)/fsd_logic $(CAPJSON_SRC) -o $@
 
-check: test_pipeline test_fsd_core test_speed_profile test_camera test_gps test_body test_body_emit test_body_wire test_signal test_trigger test_rules test_button test_btn_j6 test_wire test_cap_json test_route
+check: test_pipeline test_fsd_core test_speed_profile test_camera test_gps test_body test_body_emit test_body_wire test_signal test_trigger test_rules test_button test_btn_j6 test_wire test_cap_json test_route test_ota_image
 	./test_pipeline
 	./test_fsd_core
 	./test_speed_profile
@@ -171,8 +178,9 @@ check: test_pipeline test_fsd_core test_speed_profile test_camera test_gps test_
 	./test_wire
 	./test_cap_json
 	./test_route
+	./test_ota_image
 
 clean:
-	rm -rf test_pipeline test_fsd_core test_speed_profile test_camera test_gps test_body test_body_emit test_body_wire test_signal test_trigger test_rules test_button test_btn_j6 test_wire test_cap_json *.dSYM
+	rm -rf test_pipeline test_fsd_core test_speed_profile test_camera test_gps test_body test_body_emit test_body_wire test_signal test_trigger test_rules test_button test_btn_j6 test_wire test_cap_json test_route test_ota_image *.dSYM
 
 .PHONY: check clean
