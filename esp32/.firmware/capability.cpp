@@ -7,6 +7,7 @@
  */
 
 #include "ble_central.h"
+#include "fsd_build_stamp.h"
 #include "blackbox.h"
 #include "capability.h"
 #include "config.h"
@@ -155,6 +156,24 @@ static void fill_status(FsdCapJsonStatus* out) {
         portEXIT_CRITICAL(g_state_mux);
     }
     out->hw = (uint8_t)hw;
+
+    /* 🔴 어느 이미지가 도는가. 그전에는 **부팅 배너에만** 있었고, 리셋하면
+     * COM 포트가 사라졌다 생겨서 그 배너는 대개 놓친다 — 2026-09-11 에
+     * 실제로 놓쳤고 그래서 이 칸이 생겼다.
+     *
+     * 차에서 더 무겁다: 거기엔 PC 가 없다. 앱은 자기 `앱 판` 을 화면에 찍는데
+     * 보드 쪽 반쪽이 없어서, "보드와 앱을 함께 올렸는가" 를 차 옆에서 확인할
+     * 방법이 없었다.
+     *
+     * ⚠️ `strncpy` 가 아니라 길이를 재고 복사한다 — 판번호가 칸보다 길면
+     * 조용히 잘린 문자열이 차에서 보이고, 잘린 판번호는 **다른 판번호**다.
+     * 그런 일이 생기면 컴파일이 먼저 서도록 `fsd_cap_json.c` 가 정적 단언을
+     * 걸어 두었지만, 여기서도 끝을 반드시 닫는다. */
+    {
+        const size_t n = strnlen(FSD_BUILD_STAMP, FSD_CAP_JSON_FW_MAX - 1u);
+        memcpy(out->fw, FSD_BUILD_STAMP, n);
+        out->fw[n] = '\0';
+    }
 
     /* 🔴 The capture disk, which the phone had no way to see. `bbclear` can be
      * pressed from the phone since 2026-09-02, so without these three someone

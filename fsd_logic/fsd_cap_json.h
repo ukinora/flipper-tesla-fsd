@@ -70,6 +70,16 @@ extern "C" {
 /* "can0" plus the terminator, with room for a longer name. */
 #define FSD_CAP_JSON_BUSNAME_MAX 8u
 
+/* The build stamp, plus the terminator.
+ *
+ * 🔴 THE LENGTH IS NOT CHOSEN HERE. gen_build_stamp.py already refuses to build
+ * a stamp longer than FSD_OTA_MARK_STAMP_LEN, so that is the real worst case;
+ * fsd_cap_json.c static-asserts the two agree rather than this header including
+ * fsd_ota_image.h, which would drag the OTA module into every reader of this
+ * one. Two numbers that must match and nothing checking them is how this
+ * repository has been bitten before. */
+#define FSD_CAP_JSON_FW_MAX 41u
+
 /* ── the packed verdict word ─────────────────────────────────────────────────
  *
  * 🔴 THE SIX VERDICTS USED TO BE SIX NAMED FIELDS, and together with the hint
@@ -139,6 +149,21 @@ typedef struct {
      * Carried here rather than in a new command because the app already re-reads
      * this document, and rather than in State because free space changes about
      * once a minute while State goes out five times a second. */
+    /* ── which image is running ──────────────────────────────────────────────
+     *
+     * 🔴 THE BOARD HAD NO WAY TO BE ASKED. The stamp is printed in the boot
+     * banner and nowhere else: resetting makes the COM port disappear and come
+     * back, and the banner lands in that gap — it is missed more often than
+     * caught (2026-09-11, missed it). There is no serial command for it either.
+     *
+     * That matters most in the car, where there is no PC at all. The app prints
+     * `앱 판` on its own settings screen for exactly this reason; the board's
+     * half of the pair was missing.
+     *
+     * Carried in this document rather than in State because it never changes
+     * while the board runs, and State goes out five times a second. */
+    char fw[FSD_CAP_JSON_FW_MAX];
+
     uint32_t bb_free_kb;  /* room left, KB */
     uint16_t bb_count;    /* captures stored */
     uint8_t  bb_lost;     /* 1 = the last manual mark never became a file */
