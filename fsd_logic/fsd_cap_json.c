@@ -2,7 +2,20 @@
 
 #include "fsd_cap_json.h"
 
+/* 🔴 판번호의 길이를 정하는 것은 이 파일이 아니다. gen_build_stamp.py 가
+ * FSD_OTA_MARK_STAMP_LEN 을 넘는 판번호로는 빌드를 세우므로 그것이 진짜 최악의
+ * 경우이고, 여기 칸이 그보다 좁으면 **차에서 판번호가 잘린 채 보인다**.
+ *
+ * 헤더끼리 엮지 않고 여기서만 대는 이유: fsd_cap_json.h 를 읽는 쪽이 OTA
+ * 모듈까지 끌고 오게 하지 않으려는 것이다. 맞춰야 하는 두 수를 아무도 안
+ * 보는 것이 이 저장소가 여러 번 물린 자리라, 안 보는 대신 컴파일러가 본다. */
+#include "fsd_ota_image.h"
+
 #include <string.h>
+
+_Static_assert(FSD_CAP_JSON_FW_MAX >= FSD_OTA_MARK_STAMP_LEN + 1u,
+               "판번호 칸이 gen_build_stamp.py 가 허용하는 길이보다 좁다 "
+               "— 차에서 잘린 판번호를 보게 된다");
 
 /* ── a sink that cannot half-write ───────────────────────────────────────────
  *
@@ -89,6 +102,11 @@ size_t fsd_cap_json_status(char* out, size_t cap, const FsdCapJsonStatus* s) {
     put(&k, ",\"ms_left\":");   put_u(&k, s->ms_left);
     put(&k, ",\"window_ms\":"); put_u(&k, s->window_ms);
     put(&k, ",\"hw\":");        put_u(&k, s->hw);
+    /* 🔴 **키는 값이 없어도 나간다.** 빈 문자열과 "키 자체가 없음" 이 갈려야
+     * 앱이 *"판번호를 모른다"* 와 *"이 칸을 모르는 옛 펌웨어"* 를 구분한다.
+     * 없는 것을 0 이나 "알 수 없음" 으로 채우면 그 구분이 사라진다. */
+    put(&k, ",\"fw\":\"");      put(&k, s->fw);
+    put_c(&k, '"');
     /* One object rather than three top-level keys: it keeps the disk together
      * when someone reads the raw document, and costs the same bytes. */
     put(&k, ",\"bb\":{\"free_kb\":"); put_u(&k, s->bb_free_kb);
@@ -188,6 +206,11 @@ void fsd_cap_json_worst_status(FsdCapJsonStatus* s) {
 
     /* Widened in the same commit as the fields, as the header demands. `lost`
      * renders as `true`, which is the longer of the two spellings. */
+    /* 🔴 판번호는 gen_build_stamp.py 가 40자를 넘지 못하게 막으므로, 그것이
+     * 곧 최악의 경우다. 아래 `_Static_assert` 가 둘이 어긋나면 컴파일을 세운다. */
+    memset(s->fw, 'x', FSD_CAP_JSON_FW_MAX - 1u);
+    s->fw[FSD_CAP_JSON_FW_MAX - 1u] = '\0';
+
     s->bb_free_kb = 0xFFFFFFFFu;
     s->bb_count   = 0xFFFFu;
     s->bb_lost    = 1u;

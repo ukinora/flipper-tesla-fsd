@@ -42,6 +42,39 @@ static int g_fail = 0;
  * rendered in full — otherwise a failure would report 0 and hide by how much. */
 static char g_buf[4096];
 
+/* ── 판번호 (차주 지시 2026-09-11) ────────────────────────────────────────
+ *
+ * 🔴 보드에 "지금 어느 판인가" 를 물을 길이 없었다. 판번호는 부팅 배너에만
+ * 찍히고 그 배너는 대개 놓친다 — 차에는 PC 도 없다. 이 문서가 그 답을 나른다.
+ */
+static void test_status_carries_the_build_stamp(void) {
+    printf("\n-- 문서가 판번호를 나른다 --\n");
+    FsdCapJsonStatus s;
+    memset(&s, 0, sizeof(s));
+    s.bus_count = 0u;
+    memcpy(s.fw, "2026-09-10 21:40:25 3591a61e", 29);
+
+    const size_t n = fsd_cap_json_status(g_buf, sizeof(g_buf), &s);
+    CHECK(n > 0u, "렌더링이 아무것도 안 냈다");
+    CHECK(strstr(g_buf, "\"fw\":\"2026-09-10 21:40:25 3591a61e\"") != NULL,
+          "판번호가 문서에 없다: %s", g_buf);
+}
+
+/* 🔴 빈 칸은 **빈 문자열**로 나간다 — 0 이나 없는 키가 아니라. 읽는 쪽이
+ * "모른다" 와 "옛 펌웨어" 를 가를 수 있어야 하고, 그 구분은 키가 있느냐로
+ * 한다. 옛 펌웨어는 키 자체가 없다. */
+static void test_unknown_stamp_still_renders_the_key(void) {
+    printf("\n-- 판번호를 모를 때도 키는 있다 --\n");
+    FsdCapJsonStatus s;
+    memset(&s, 0, sizeof(s));
+    s.bus_count = 0u;
+
+    const size_t n = fsd_cap_json_status(g_buf, sizeof(g_buf), &s);
+    CHECK(n > 0u, "렌더링이 아무것도 안 냈다");
+    CHECK(strstr(g_buf, "\"fw\":\"\"") != NULL,
+          "빈 판번호가 빈 문자열로 안 나갔다: %s", g_buf);
+}
+
 /* ── the size guard ──────────────────────────────────────────────────────── */
 
 static void test_worst_status_fits_the_att_limit(void) {
@@ -322,6 +355,8 @@ static void test_buses_do_not_share_a_verdict_word(void) {
 }
 
 int main(void) {
+    test_status_carries_the_build_stamp();
+    test_unknown_stamp_still_renders_the_key();
     test_worst_status_fits_the_att_limit();
     test_worst_buttons_fits_the_att_limit();
     test_worst_case_is_not_smaller_than_a_real_one();

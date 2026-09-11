@@ -568,8 +568,16 @@ static void serial_command_tick() {
                     Serial.printf("  %u %s %s\n", (unsigned)i, a,
                                   ble_central_slot_connected(i) ? "connected" : "-");
                 }
+            } else if (serial_cmd_equals(buf, "ver")) {
+                /* 🔴 부팅 배너와 **같은 문자열**을 낸다 — 사본을 만들지 않는다.
+                 * 둘이 갈라지면 어느 쪽이 참인지 차에서 가릴 방법이 없다.
+                 *
+                 * 이 명령이 없던 동안 판번호를 보는 길은 배너뿐이었는데, 리셋하면
+                 * COM 포트가 사라졌다 생겨서 배너는 대개 놓친다(2026-09-11 실측). */
+                Serial.printf("[FSD] Build: %s\n", FSD_BUILD_STAMP);
             } else if (serial_cmd_equals(buf, "help") || serial_cmd_equals(buf, "?")) {
                 Serial.println("[SER] Commands: ip | btnscan | btnlist | btnbind <addr> | btnstat");
+                Serial.println("[SER]   ver           — 지금 도는 판번호 (부팅 배너와 같은 것)");
                 Serial.println("[SER]   bbon / bboff  — capture recorder on/off (persisted)");
                 Serial.println("[SER]   mark          — record a window around NOW");
                 Serial.println("[SER]   canstat       — 버스별 RX/TX/오류 (어느 버스가 받았나)");
