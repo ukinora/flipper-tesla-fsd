@@ -420,6 +420,62 @@ static void ble_update_fps(uint32_t now) {
     g_fps_last_ms = now;
 }
 
+/* ── 카메라 판정 자료로 가는 세 명령: 여기 실었다가 loop() 가 적용한다 ──────
+ *
+ * 🔴 **`camera_task.h` 가 «이 파일의 어떤 것도 NimBLE 콜백에서 부르면 안 된다»
+ * 고 못 박아 두었는데, 세 명령이 그것을 어기고 있었다** (2026-09-22 점검 B).
+ * 그 파일은 «아무것도 지키지 않는다 — 잠금이 없다» 를 전제로 서 있고, 실제로
+ * `g_gps`(구조체)와 `g_route`(512점 배열)를 loop 가 CAN 프레임마다 쓰고 1초
+ * 틱에서 읽는다. 잠금 없이 두 태스크가 같은 메모리를 만지면 **반쯤 바뀐 값**
+ * 으로 판정한다 — 새 위도에 옛 경도가 짝지어지는 식으로.
+ *
+ * 🔴 **그리고 이것은 «잊은 것» 이 아니라 «일부러 한 것» 이었다.** 아래
+ * GPS_FIX 자리에 *"loop 로 미루지 않고 여기서 답한다 — 미루면 틱 하나만큼
+ * 지연이 붙는데, 이 입력은 지금 값인 것이 전부다"* 라고 근거까지 적혀 있었다.
+ * 즉 **두 파일이 서로 반대를 말하고 있었고**, 둘 중 하나는 틀린 것이었다.
+ *
+ * 🟢 **재 보니 그 근거가 낡았다.** `ble_server_tick()` 은 loop 가 **매 바퀴**
+ * 부르고, `ble_apply_mode_request()` 를 비롯한 넷이 이미 같은 방식으로 산다.
+ * 그러니 붙는 지연은 «틱 하나»(5 Hz 라면 200 ms)가 아니라 **loop 한 바퀴**다 —
+ * 1 Hz 로 오는 위치에도, 앞 조각의 답을 받고 다음을 보내는 경로에도 보이지
+ * 않는 크기다. 미루면 그 파일의 계약이 **다시 참이 된다.**
+ *
+ * 🟢 **시각은 도착한 순간에 찍는다.** 적용이 늦어도 «언제 온 것인가» 는 안
+ * 흔들린다. 덤으로 찍은 시각이 언제나 쓰는 시각보다 **앞서므로**, 방금 고친
+ * 부호 없는 뺄셈 함정(fork #133)이 여기서는 생길 수 없다.
+ *
+ * ⚠️ **판정은 여전히 loop 가 한다.** 여기서 하는 것은 «모양이 맞는가»(길이 ·
+ * 바이트 풀기)뿐이고 그것은 공유 자료를 안 만진다. 받아들일지는
+ * `fsd_gps_observe_phone()` · `fsd_route_feed()` 가 정하고, 그 답이 앱으로
+ * 간다 — 거절을 조용히 삼키지 않는다.
+ *
+ * ⚠️ **드레인은 `camera_task_tick()` 보다 뒤에 있다**(loop 차례가 그렇다).
+ * 그래서 방금 실린 위치는 **다음 판정**부터 쓰인다. 판정이 1 Hz 인데 loop 는
+ * 그 사이 수백 바퀴 도니, 늦어지는 것은 최대 한 판정이고 그것은 1 Hz 라는
+ * 말이 이미 뜻하는 것이다. */
+enum : uint8_t {
+    ROUTE_OP_NONE = 0,
+    ROUTE_OP_SET,
+    ROUTE_OP_CLEAR,
+};
+
+/* 한 자리뿐이다. 앱은 앞 조각의 답을 받고 다음을 보내므로 정상 경로에서는
+ * 겹치지 않고, 겹치면 BUSY 라는 **이름 달린 거절**이 나간다 — 조용히 덮어써서
+ * 조각 하나가 사라지는 것보다 낫다. 자리가 하나라 «지우기» 와 «넣기» 의
+ * 순서가 뒤바뀔 수도 없다. */
+static volatile uint8_t g_route_op = ROUTE_OP_NONE;
+
+#define BLE_ROUTE_STAGE_MAX 512u   /* MTU 517 에서 올 수 있는 최대는 509 B */
+static uint16_t g_route_seq   = 0;
+static uint16_t g_route_total = 0;
+static uint16_t g_route_len   = 0;
+static uint32_t g_route_at_ms = 0;
+static uint8_t  g_route_buf[BLE_ROUTE_STAGE_MAX];
+
+static volatile bool g_gps_fix_pending = false;
+static FsdGpsBleFix  g_gps_fix;
+static uint32_t      g_gps_stamp_ms = 0;
+
 static void ble_send_result(uint8_t cmd, uint8_t res, uint16_t extra) {
     if (!g_ch_result) return;
     uint8_t b[BLE_RESULT_LEN];
@@ -1205,44 +1261,45 @@ class CommandCB : public NimBLECharacteristicCallbacks {
             ble_send_result(cmd, BLE_RES_OK, BLE_PROTO_VERSION);
             break;
 
-        /* A position from the phone. The car does not broadcast one on this bus
-         * (swept 2026-09-05), so this is the only producer the camera path has.
-         *
-         * 🔴 ANSWERED HERE RATHER THAN PARKED FOR loop(). Every other command
-         * that touches state is deferred because it writes NVS or drives the
-         * CAN controllers; this writes one struct and must land at 1 Hz. Parking
-         * it would add a tick of latency to the one input whose whole value is
-         * being current.
-         *
-         * 🔴 IT IS STILL NOT TRUSTED. fsd_gps_observe_phone() applies the same
-         * bounds, Null Island and freeze bookkeeping the frame observers do, and
-         * the 0x257 motion witness sits below all of it — which the phone cannot
-         * satisfy. A refused fix is answered so the app can say so rather than
-         * appear to be working. */
-        /* 경로 한 조각. GPS_FIX 와 같은 이유로 그 자리에서 답한다 — 목적지를
-         * 고른 직후에 다섯 번쯤 연달아 오고, 앱이 다음 조각을 보내기 전에
-         * 앞 조각이 들어갔는지 알아야 한다. */
+        /* 경로 한 조각 — **여기서는 실어만 두고 loop() 가 넣는다.** 왜 그렇게
+         * 바뀌었는지는 위 «카메라 판정 자료로 가는 세 명령» 상자에 있다.
+         * 답(`extra` = 지금까지 받은 점 수)도 넣고 나서 loop 가 보낸다. */
         case BLE_CMD_ROUTE_SET: {
             if (v.size() <= 1u + BLE_ROUTE_HDR) {
                 ble_send_result(cmd, BLE_RES_REJECTED, (uint16_t)v.size());
                 break;
             }
             const uint8_t *b = (const uint8_t *)v.data() + 1;
-            const uint16_t seq   = (uint16_t)((uint16_t)b[0] | ((uint16_t)b[1] << 8));
-            const uint16_t total = (uint16_t)((uint16_t)b[2] | ((uint16_t)b[3] << 8));
-            const bool ok = camera_task_route_feed(
-                seq, total, b + BLE_ROUTE_HDR, v.size() - 1u - BLE_ROUTE_HDR, millis());
-            /* extra 는 **지금까지 받은 점 수**다. 앱이 그것으로 다음 seq 를
-             * 정하므로, 조각 하나가 떨어져도 다시 맞출 수 있다. */
-            ble_send_result(cmd, ok ? BLE_RES_OK : BLE_RES_REJECTED,
-                            camera_task_route_points());
-            break;
+            const size_t n = v.size() - 1u - BLE_ROUTE_HDR;
+            /* 실을 자리보다 크면 거절한다. MTU 517 에서 올 수 있는 최대가
+             * 509 B 라 정상 경로에서는 안 걸리지만, 잘라서 싣고 «받았다» 고
+             * 답하면 경로가 조용히 다른 모양이 된다. */
+            if (n > BLE_ROUTE_STAGE_MAX) {
+                ble_send_result(cmd, BLE_RES_REJECTED, (uint16_t)v.size());
+                break;
+            }
+            if (g_route_op != ROUTE_OP_NONE) {
+                ble_send_result(cmd, BLE_RES_BUSY, 0);
+                break;
+            }
+            g_route_seq   = (uint16_t)((uint16_t)b[0] | ((uint16_t)b[1] << 8));
+            g_route_total = (uint16_t)((uint16_t)b[2] | ((uint16_t)b[3] << 8));
+            memcpy(g_route_buf, b + BLE_ROUTE_HDR, n);
+            g_route_len   = (uint16_t)n;
+            g_route_at_ms = millis();
+            /* 🔴 **깃발은 맨 마지막에 세운다.** 앞의 칸들이 다 채워진 뒤여야
+             * loop 가 그것을 본다 — 반대로 두면 빈 조각을 넣는다. */
+            g_route_op = ROUTE_OP_SET;
+            break;   /* 답은 loop 가 한다 */
         }
 
         case BLE_CMD_ROUTE_CLEAR:
-            camera_task_route_clear();
-            ble_send_result(cmd, BLE_RES_OK, 0);
-            break;
+            if (g_route_op != ROUTE_OP_NONE) {
+                ble_send_result(cmd, BLE_RES_BUSY, 0);
+                break;
+            }
+            g_route_op = ROUTE_OP_CLEAR;
+            break;   /* 답은 loop 가 한다 */
 
         case BLE_CMD_GPS_FIX: {
             if (v.size() < 1u + FSD_GPS_BLE_FIX_LEN) {
@@ -1260,12 +1317,22 @@ class CommandCB : public NimBLECharacteristicCallbacks {
                 break;
             }
 
-            const bool ok = camera_task_observe_phone_fix(
-                f.lat_e7, f.lon_e7, f.accuracy_m, f.bearing_deg, f.speed_kph,
-                fsd_gps_stamp_for_age(millis(), f.age_ms));
-            ble_send_result(cmd, ok ? BLE_RES_OK : BLE_RES_REJECTED,
-                            (uint16_t)camera_task_gps_verdict());
-            break;
+            /* 🔴 **실어만 둔다 — 적용도 답도 loop() 가 한다.** 위 상자 참조.
+             * 🟢 시각은 **도착한 지금** 으로 찍는다: 늦게 적용되어도 fix 의
+             * 나이는 안 흔들리고, 찍은 값이 언제나 쓰는 값보다 앞선다.
+             *
+             * 🔴 **여전히 믿고 받는 것이 아니다.** `fsd_gps_observe_phone()` 이
+             * 프레임 관측자와 같은 범위·Null Island·동결 검사를 대고, 그 아래
+             * 0x257 움직임 증인이 있다 — 폰이 채울 수 없는 것이다. 거절도 답이
+             * 나가므로 앱이 «되는 줄» 알지 않는다. */
+            if (g_gps_fix_pending) {
+                ble_send_result(cmd, BLE_RES_BUSY, 0);
+                break;
+            }
+            g_gps_fix      = f;
+            g_gps_stamp_ms = fsd_gps_stamp_for_age(millis(), f.age_ms);
+            g_gps_fix_pending = true;   /* 맨 마지막에 */
+            break;   /* 답은 loop 가 한다 */
         }
 
         case BLE_CMD_SET_MODE: {
@@ -1898,6 +1965,40 @@ void ble_server_init(FSDState *state, portMUX_TYPE *state_mux) {
 
 bool ble_server_up(void) { return g_adv_ok; }
 
+/* 실려 있던 카메라 입력을 적용하고 **그제야** 답한다. loop() 에서만 돈다 —
+ * 그래야 camera_task 의 자료를 만지는 것이 이 태스크 하나가 된다.
+ *
+ * 🔴 답을 보내기 **전에** 깃발을 내린다. 보내는 중에 같은 명령이 또 오면
+ * 그것은 새 요청이고, 내리는 것을 뒤로 미루면 그 새 요청이 BUSY 로 거절된다. */
+static void ble_apply_camera_requests(void) {
+    const uint8_t op = g_route_op;
+    if (op != ROUTE_OP_NONE) {
+        bool ok = true;
+        uint8_t cmd = BLE_CMD_ROUTE_CLEAR;
+        if (op == ROUTE_OP_SET) {
+            cmd = BLE_CMD_ROUTE_SET;
+            ok = camera_task_route_feed(g_route_seq, g_route_total,
+                                        g_route_buf, g_route_len, g_route_at_ms);
+        } else {
+            camera_task_route_clear();
+        }
+        g_route_op = ROUTE_OP_NONE;
+        /* extra 는 **지금까지 받은 점 수**다. 앱이 그것으로 다음 seq 를
+         * 정하므로, 조각 하나가 떨어져도 다시 맞출 수 있다. */
+        ble_send_result(cmd, ok ? BLE_RES_OK : BLE_RES_REJECTED,
+                        camera_task_route_points());
+    }
+
+    if (g_gps_fix_pending) {
+        const bool ok = camera_task_observe_phone_fix(
+            g_gps_fix.lat_e7, g_gps_fix.lon_e7, g_gps_fix.accuracy_m,
+            g_gps_fix.bearing_deg, g_gps_fix.speed_kph, g_gps_stamp_ms);
+        g_gps_fix_pending = false;
+        ble_send_result(BLE_CMD_GPS_FIX, ok ? BLE_RES_OK : BLE_RES_REJECTED,
+                        (uint16_t)camera_task_gps_verdict());
+    }
+}
+
 void ble_server_tick(uint32_t now_ms) {
     if (!g_ch_state) return;
     ble_update_fps(now_ms);
@@ -1910,6 +2011,7 @@ void ble_server_tick(uint32_t now_ms) {
     ble_apply_action_request();    // 〃
     ble_apply_blackbox_request();
     ble_apply_ota_request(now_ms);  // 지우기·해시는 여기서. BLE 태스크에서 할 수 없다
+    ble_apply_camera_requests();    // 위치·경로. camera_task 는 loop 만 만진다
     ble_apply_bb_clear_request();  // walks the filesystem — never on the BLE task
     ble_apply_rules_request();     // NVS write + the verdict that IS the answer
     ble_publish_rules();           // after the apply, so a write is visible now

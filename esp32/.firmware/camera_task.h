@@ -35,6 +35,27 @@
  * CALLED FROM A NimBLE CALLBACK. The one genuinely cross-task object is the
  * camera database, which is why it is borrowed through camera_store's lock
  * rather than held.
+ *
+ * 🔴 **THAT SENTENCE WAS NOT TRUE FROM 2026-09-12 TO 2026-09-22.** The phone's
+ * three inputs — ROUTE_SET, ROUTE_CLEAR and GPS_FIX — were applied straight
+ * from CommandCB::onWrite, which runs on the NimBLE host task. g_gps and
+ * g_route were therefore written by one task while loop() wrote and read them
+ * from another, with nothing in between.
+ *
+ * 🔴 It was a decision, not an oversight: ble_server.cpp argued in writing that
+ * parking them for loop() would cost a tick of latency on the one input whose
+ * value is being current. **Two files stated the opposite of each other**, and
+ * only a reader who opened both could see it.
+ *
+ * 🟢 Fixed by moving, not by locking: ble_server.cpp now stages the three and
+ * ble_server_tick() — which loop() calls every pass, so the cost is one pass,
+ * not one tick — applies them and only then answers. A lock was the wrong tool
+ * here: the reads are not a copy but a scan over the tracker and up to 512
+ * route points, and holding a spinlock across that would stall the radio.
+ *
+ * ⚠️ What is still read from the BLE task: nothing. ble_pack_camstat() reads
+ * the scalar accessors below, and its callers are ble_server_init() and
+ * ble_server_tick(), both on loop().
  */
 
 #include "../../fsd_logic/fsd_state.h"
