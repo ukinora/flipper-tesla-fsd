@@ -51,8 +51,18 @@ jobs:
       # "macro redefined" warning, which nobody read. The warning is gone now
       # (the headers no longer collide), so this is the only thing left that
       # notices when they drift.
-      - name: CAN IDs agree across both headers
-        run: python test/check_can_ids.py
+      - name: CAN IDs agree across both headers
+        run: python test/check_can_ids.py
+
+      # 🔴 camera_task.h 의 THREADING 절이 «이 파일의 어떤 것도 NimBLE
+      # 콜백에서 부르면 안 된다» 고 적는데, **그 문장이 2026-09-12 부터
+      # 09-22 까지 거짓이었다** — 폰의 세 입력이 onWrite 에서 곧장
+      # 적용되고 있었다. 주석은 아무것도 강제하지 않는다.
+      #
+      # 소스만 보는 검사라 빌드 앞에 둔다. 콜백을 하나도 못 찾으면
+      # «위반 없음»이 아니라 «검사가 낡았다»(exit 2)로 터진다.
+      - name: camera_task 는 BLE 콜백에서 안 불린다
+        run: python esp32/ci_check_camera_task_callers.py
 
   flipper-fap:
     name: Flipper .fap (ufbt)
