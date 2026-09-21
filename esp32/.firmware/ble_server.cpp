@@ -918,7 +918,20 @@ static void ble_revoke_active_if_stale(uint32_t now_ms) {
     // g_owner_present, not g_connected: a stranger holding the link open is not
     // a reason to leave the owner's transmit permission standing. See the flag.
     if (g_owner_present || g_link_down_ms == 0) return;
-    if ((uint32_t)(now_ms - g_link_down_ms) < BLE_ACTIVE_GRACE_MS) return;
+    /* 🔴 **부호 있는 차로 잰다.** g_link_down_ms 는 onDisconnect 가 **BLE
+     * 호스트 태스크**에서 자기 millis() 로 찍고(아래 ServerCB), now_ms 는
+     * loop() 가 한참 앞에서 재 둔 값이다(main.cpp). 끊김이 그 사이에 떨어지면
+     * stamp 가 now 보다 **앞선다** — 부호 없이 빼면 그 차가 약 4,290,000,000 ms
+     * 로 읽혀 30초 유예가 **0초**가 되고, 폰이 잠깐 끊긴 것만으로 Active 가
+     * 즉시 회수된다.
+     *
+     * 🔴 이 저장소는 2026-09-10 에 OTA 에서 **정확히 이 산수**에 반나절을 썼다
+     * (fsd_ota_stalled() 이 그때 부호 있는 차로 바뀐 자리다). 여기만 안 따라
+     * 왔다 — 고친 곳의 형제를 안 고치는 일곱 번째 패턴이다.
+     *
+     * 🟢 앞선 stamp 는 «방금» 으로 읽힌다: 음수 차는 이 비교에서 참이 되어
+     * 기다리는 쪽으로 떨어진다. */
+    if ((int32_t)(now_ms - g_link_down_ms) < (int32_t)BLE_ACTIVE_GRACE_MS) return;
 
     // 🔴 The bookkeeping is cleared AFTER the switch succeeds, not before.
     //

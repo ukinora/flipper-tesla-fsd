@@ -117,8 +117,17 @@ bool fsd_t2_observe_switch(FsdT2* t, uint32_t can_id, const uint8_t* data, uint8
         t->last_reject = FSD_T2_REJ_NONE;
         t->gesture_count++;
         t->last_gesture_ms = now_ms;
-        /* PUBLISHED, NOT ACTED ON. There is no emitter, and
-         * FSD_BODY_CAPS[FSD_ACT_DOOR_OPEN].armable_at_runtime is false. */
+        /* 🔴 PUBLISHED, NOT ACTED ON — this function returns true and does
+         * nothing else. Nothing calls it to act; the gesture is not wired to
+         * any command.
+         *
+         * ⚠️ THE OLD WORDING WAS WRONG IN BOTH HALVES, AND IT WAS ABOUT
+         * OPENING A DOOR. It said "there is no emitter, and
+         * FSD_BODY_CAPS[FSD_ACT_DOOR_OPEN].armable_at_runtime is false".
+         * The door emitter has existed since 2026-09-05 (fork #89), and
+         * armable_at_runtime was deleted with the permission axis on
+         * 2026-09-10. Anyone reading it believed two gates stood here that do
+         * not. The one true sentence is the first one: nothing acts on this. */
         return true;
     }
     return false;

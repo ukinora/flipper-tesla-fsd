@@ -45,8 +45,12 @@
  *
  * WHAT THIS IS NOT
  * ----------------
- * Not permission. fsd_can_transmit() and fsd_body_allows() both have to say yes
- * first. This is the last denial before the wire, and it can only subtract.
+ * Not permission. fsd_can_transmit() has to say yes first. This is the last
+ * denial before the wire, and it can only subtract.
+ *
+ * 🔴 This line used to name fsd_body_allows() as a second gate standing in
+ * front of it. That axis was deleted on 2026-09-10 (owner's instruction) and
+ * the sentence outlived it by twelve days.
  *
  * 🔴 THE ROWS ARE NOT VERIFIED YET
  * --------------------------------

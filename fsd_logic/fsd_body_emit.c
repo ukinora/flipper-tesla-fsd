@@ -3,13 +3,21 @@
 #include <string.h>
 
 bool fsd_emit_supported(FsdBodyAction action) {
-    /* Four actions, and they match the four armable rows in fsd_body.c. Written
-     * as a switch rather than a comparison so that adding an action to the enum
-     * without deciding about it here is a compiler warning, not a silent "no".
+    /* SIX actions today. Written as a switch rather than a comparison so that
+     * adding an action to the enum without deciding about it here is a
+     * compiler warning, not a silent "no".
      *
-     * A host test asserts this function and armable_at_runtime agree for every
-     * action. That is deliberate: it makes "we can build the frame" and "the
-     * axis will let it through" one decision instead of two that drift. */
+     * 🔴 THIS USED TO SAY "four actions, and they match the four armable rows
+     * in fsd_body.c", and that a host test asserted this function and
+     * armable_at_runtime agree. BOTH HALVES WENT STALE: the list grew to six
+     * (mirror and the light horn, fork #108), and armable_at_runtime -- the
+     * whole permission axis with it -- was deleted on 2026-09-10 (owner's
+     * instruction). test_body_emit.c already records that ending: two
+     * statements kept in step by a test became one statement.
+     *
+     * What still stands between this list and the wire: the rule the owner
+     * switched on, the chokepoint row (fsd_body_wire), the id deny-list in
+     * send_on_bus(), and the driver's Listen-Only register. */
     switch(action) {
     case FSD_ACT_MAP_LIGHT:
     case FSD_ACT_DOOR_OPEN:

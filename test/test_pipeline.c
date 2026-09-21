@@ -768,6 +768,35 @@ static void test_burst_waits_for_the_cars_frame(void) {
     CHECK(!fsd_burst_on_frame(&b, 0x273u, 1900u, &due), "the next frame is not ours");
 }
 
+/* 🔴 한 id 에 둘이 걸렸을 때, 뒤엣것이 «버스가 조용해서» 죽지 않는가.
+ *
+ * 맵등과 미러는 **같은 0x273** 을 타고, 한 번 누름이 둘을 함께 무장할 수 있다.
+ * 2026-09-22 전까지는 **발화한 슬롯만** 마감을 다시 셌으므로, 차가 내내 말하고
+ * 있는데도 나머지 하나가 제 원래 마감에 죽었다. */
+static void test_two_bursts_on_one_id_both_survive(void) {
+    printf("\n-- burst: 한 id 에 둘이 걸려도 그 id 가 말하는 동안은 안 죽는다 --\n");
+    FsdBurst b;
+    fsd_burst_reset(&b);
+    FsdBurstDue due;
+
+    CHECK(fsd_burst_arm(&b, FSD_ACT_MAP_LIGHT, 0, 1u, 0x273u, 1u, 1000u), "맵등 무장");
+    CHECK(fsd_burst_arm(&b, FSD_ACT_MIRROR, 0, 2u, 0x273u, 1u, 1000u), "미러도 같은 id 에 무장");
+    CHECK(fsd_burst_pending(&b) == 2u, "한 id 에 둘이 기다린다");
+
+    /* 0x273 은 500 ms 주기다. 첫 도착이 오래된 쪽을 내보낸다. */
+    CHECK(fsd_burst_on_frame(&b, 0x273u, 1500u, &due), "첫 도착이 하나를 발화");
+    CHECK(due.action == FSD_ACT_MAP_LIGHT, "오래된 것부터");
+
+    /* 🔴 지금 시각은 둘째 슬롯의 **원래** 마감(1000+1000)을 지났다. 그런데 그
+     * id 는 내내 도착하고 있었으므로 «조용해진» 것이 하나도 없다. */
+    CHECK(fsd_burst_tick(&b, 2100u) == 0u, "말하고 있는 id 에서는 아무것도 안 만료된다");
+    CHECK(fsd_burst_pending(&b) == 1u, "둘째는 아직 기다린다");
+
+    CHECK(fsd_burst_on_frame(&b, 0x273u, 2100u, &due), "다음 도착이 둘째를 발화");
+    CHECK(due.action == FSD_ACT_MIRROR, "그리고 그것이 미러다");
+    CHECK(fsd_burst_pending(&b) == 0u, "둘 다 나갔다");
+}
+
 static void test_burst_counts_four_arrivals_for_the_blinker(void) {
     printf("\n-- burst: four frames, four arrivals --\n");
     FsdBurst b;
@@ -1095,6 +1124,7 @@ int main(void) {
     test_release_faces_the_chokepoint();
     test_burst_waits_for_the_cars_frame();
     test_burst_counts_four_arrivals_for_the_blinker();
+    test_two_bursts_on_one_id_both_survive();
     test_burst_gives_up_when_the_id_never_comes();
     test_burst_deadline_is_per_frame_not_per_press();
     test_burst_one_frame_per_arrival();

@@ -237,9 +237,14 @@ void fsd_pipe_one(FsdBodyAction action, int32_t arg, uint8_t rule_index,
  *
  * WHAT IS STILL ASKED HERE
  *   the rule    the owner has to have written it and switched it on
- *   the axis    fsd_body_allows in full: mode, bus, OTA, RX freshness, gear,
- *               speed, min interval, and the per-action session enable
  *   the row     the chokepoint has to have a row for this action at all
+ *
+ * 🔴 A THIRD LINE USED TO STAND BETWEEN THOSE TWO, and under this heading it
+ * was the most misleading sentence in the repo: "the axis -- fsd_body_allows in
+ * full: mode, bus, OTA, RX freshness, gear, speed, min interval, and the
+ * per-action session enable". NONE OF THAT IS ASKED. The axis was deleted on
+ * 2026-09-10 (owner's instruction) and decide_one() below has never called it.
+ * Read as written, it promised eight gates that do not exist.
  *
  * WHAT IS NOT, AND WHY IT CANNOT BE
  *   the emitter and the byte-level chokepoint both need the car's template.

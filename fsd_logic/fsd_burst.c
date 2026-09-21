@@ -59,8 +59,28 @@ bool fsd_burst_on_frame(FsdBurst* b, uint32_t can_id, uint32_t now_ms, FsdBurstD
     out->rule_index = pick->rule_index;
 
     pick->remaining--;
-    /* The id spoke, so this slot is not the one that has gone quiet. */
-    pick->deadline_ms = now_ms + FSD_BURST_MAX_WAIT_MS;
+
+    /* 🔴 **THE ID SPOKE, SO NONE OF ITS SLOTS HAS GONE QUIET** — every slot
+     * waiting on this id gets its deadline back, not just the one that fires.
+     *
+     * The deadline answers "has this id gone quiet" (see FSD_BURST_MAX_WAIT_MS,
+     * which says so in as many words). That question does not depend on which
+     * slot we happened to pick. Only the picked slot used to be refreshed, so a
+     * SECOND action waiting on the SAME id kept its original deadline while the
+     * id was chattering normally.
+     *
+     * 🔴 It is reachable: MAP_LIGHT and MIRROR both ride 0x273 and one press
+     * can arm both (fsd_pipe_decide returns up to FSD_PIPE_MAX_OUT decisions).
+     * 0x273 arrives every 500 ms against a 1000 ms deadline, so the second slot
+     * had to survive to the SECOND arrival with no margin for jitter. When it
+     * lost, the module reported "대기 중이던 명령을 버렸다" on a bus that had
+     * never gone quiet — a diagnostic naming a cause nobody measured (twelfth
+     * pattern), on top of an action the owner asked for and did not get. */
+    for(unsigned i = 0; i < FSD_BURST_MAX; i++) {
+        FsdBurstSlot* s = &b->slot[i];
+        if(s->remaining != 0u && s->id == can_id)
+            s->deadline_ms = now_ms + FSD_BURST_MAX_WAIT_MS;
+    }
     return true;
 }
 
