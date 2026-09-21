@@ -88,6 +88,15 @@ jobs:
           name: flipper-tesla_mod-fap
           path: out/tesla_mod.fap
           if-no-files-found: error
+          # 7 days, not the 90-day default. Every push leaves 9 of these (8 boards +
+          # the .fap) and nothing deleted them: by 2026-09-22 this repo alone held
+          # 2,590 artifacts / 2.79 GB (2026-08-10 .. 09-11), and GitHub counts that
+          # storage per ACCOUNT, so it was what kept the app repo's release
+          # (ukinora-tesla-can v0.1.23-app, 2026-09-21) failing with
+          # "Artifact storage quota has been hit" even after that repo was emptied.
+          # These are per-commit test builds; anything worth keeping is a release
+          # asset, which lives in a different store and was never affected.
+          retention-days: 7
 
   esp32-matrix:
     name: ESP32 ${{ matrix.env }}
@@ -157,6 +166,15 @@ jobs:
           name: esp32-${{ matrix.env }}
           path: esp32/out/*.bin
           if-no-files-found: error
+          # 7 days, not the 90-day default. Every push leaves 9 of these (8 boards +
+          # the .fap) and nothing deleted them: by 2026-09-22 this repo alone held
+          # 2,590 artifacts / 2.79 GB (2026-08-10 .. 09-11), and GitHub counts that
+          # storage per ACCOUNT, so it was what kept the app repo's release
+          # (ukinora-tesla-can v0.1.23-app, 2026-09-21) failing with
+          # "Artifact storage quota has been hit" even after that repo was emptied.
+          # These are per-commit test builds; anything worth keeping is a release
+          # asset, which lives in a different store and was never affected.
+          retention-days: 7
 
   release:
     name: Attach artifacts to release
