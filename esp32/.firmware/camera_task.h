@@ -85,7 +85,10 @@ bool camera_task_route_feed(uint16_t seq, uint16_t total, const uint8_t* pts,
 void camera_task_route_clear(void);
 /** 지금까지 받은 점 수. 화면이 "정말 들어갔나" 를 눈으로 보게 한다. */
 uint16_t camera_task_route_points(void);
-bool camera_task_route_complete(void);
+/* 🔴 camera_task_route_complete() 를 2026-09-22 에 지웠다 — 부르는 곳이
+ * 없었다(첫 번째 패턴). 없어도 되는 이유를 남긴다: fsd_route_rejects() 가
+ * 스스로 fsd_route_complete() 를 **먼저** 묻는다 — 절반만 온 경로로는
+ * 아무것도 거부하지 않으므로 밖에서 다시 물을 일이 없다. */
 
 /** Run the judgement at its own cadence. Call every loop(); it rate-limits
  *  itself and does nothing at all until a fix, authority and a read-back all

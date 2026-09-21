@@ -115,13 +115,11 @@ String capability_status_json();
  * with them. Served on BLE_UUID_BUTTONS. */
 String capability_buttons_json();
 
-/**
- * True while the listen window is still counting.
- *
- * Exists so a caller can notice the window CLOSING. The BLE Capability
- * characteristic used to be filled once in ble_server_init() -- at boot, before
- * a single frame had arrived -- and never again, so CAP_RECHECK re-ran the
- * probe and the result went nowhere. The dashboard had been rebuilding the JSON
- * live; nothing replaced that when it was removed.
- */
-bool capability_running(void);
+/* 🔴 capability_running() 을 2026-09-22 에 지웠다 — 부르는 곳이 없었다
+ * (첫 번째 패턴). **왜 있었는지는 남긴다**: 창이 *닫히는* 것을 알아채라고
+ * 둔 것이었다. BLE Capability 특성이 한때 ble_server_init() 에서 부팅 직후
+ * 한 번만 채워지고(프레임이 하나도 오기 전이다) 다시는 안 채워져서,
+ * CAP_RECHECK 가 프로브를 다시 돌려도 결과가 갈 곳이 없었다. 그때 JSON 을
+ * 실시간으로 다시 만들던 것은 웹 대시보드였고, 그것을 지우면서 아무것도
+ * 대신 들어오지 않았다. 지금은 ble_server_tick() 이 CAP_REFRESH_MS 마다
+ * 문서를 다시 펴내므로 «창이 닫혔나» 를 밖에서 물을 필요가 없다. */
