@@ -333,17 +333,6 @@ bool ota_store_tick(uint32_t now_ms) {
     return cut;
 }
 
-/* 🔴 이것도 안 잠근다. 부르는 쪽이 "지금 받는 중인가" 를 물을 뿐이고, 한
- * 바퀴 낡은 답으로 나빠지는 것이 없다. */
-bool ota_store_busy(void) { return g_active; }
-
-uint32_t ota_store_progress(void) {
-    if (!lock()) return 0;
-    const uint32_t w = g_s ? g_s->xfer.written : 0u;
-    unlock();
-    return w;
-}
-
 void ota_store_abandon(const char *why) {
     /* 받는 중이 아니면 잠그지도 않는다 — 연결 해제마다 불리는 자리다. */
     if (!g_active) return;

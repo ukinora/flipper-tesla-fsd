@@ -105,7 +105,12 @@ static inline bool fsd_profile_qualifies(const FSDProfile* p, const FSDProfileFr
     bool reached_active = false;
     for (int i = 0; i < n; i++) {
         if (p->apstate.byte >= frames[i].len) return false;  // field must be present
-        uint8_t v = (uint8_t)((frames[i].data[p->apstate.byte] >> p->apstate.shift) & p->apstate.mask);
+        /* 🔴 **같은 산수를 두 벌 두지 않는다** (2026-09-22). 여기 손으로 적힌
+         * 비트 추출이 fsd_profile_decode() 와 글자만 다른 사본이었고, 그래서
+         * 그 함수는 «부르는 곳이 없는» 채로 남아 있었다 — 첫 번째 패턴과 열
+         * 번째 패턴이 한자리에 겹친 모양이다. 길이 검사는 바로 위에서 이미
+         * 했으므로 decode 의 0xFF(프레임 밖) 경로에는 닿지 않는다. */
+        uint8_t v = fsd_profile_decode(p->apstate, &frames[i]);
         if (v > FSD_PROFILE_STATE_MAX) return false;         // out of range -> wrong nibble
         if (!seen[v]) { seen[v] = true; distinct++; }
         if (v >= FSD_PROFILE_ACTIVE_MIN) reached_active = true;

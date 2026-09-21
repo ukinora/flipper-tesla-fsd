@@ -104,11 +104,10 @@ uint8_t ota_store_finish(void);
 /** 시한을 본다. 끊었으면 true. loop() 에서만. */
 bool ota_store_tick(uint32_t now_ms);
 
-/** 지금 받는 중인가. */
-bool ota_store_busy(void);
-
-/** 지금까지 쓴 바이트. */
-uint32_t ota_store_progress(void);
+/* 🔴 ota_store_busy() · ota_store_progress() 를 2026-09-22 에 지웠다 —
+ * 둘 다 부르는 곳이 없었다(첫 번째 패턴). 없어도 되는 이유: 진행률은 **앱이
+ * 자기가 보낸 바이트로** 그리므로 보드에 물을 것이 없고, 받는 중인지는
+ * ota_store_begin() 이 거절로 이미 답한다. */
 
 /** 폰이 사라졌다 — 받던 것을 접는다. loop() 에서만. */
 void ota_store_abandon(const char* why);

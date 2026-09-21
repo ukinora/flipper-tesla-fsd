@@ -154,8 +154,6 @@ void camera_task_route_clear(void) { fsd_route_init(&g_route); }
 
 uint16_t camera_task_route_points(void) { return fsd_route_count(&g_route); }
 
-bool camera_task_route_complete(void) { return fsd_route_complete(&g_route); }
-
 /* 잣대 하나 때문에 구조체를 만든다 — 콜백에 우리 위치까지 실어야 해서다. */
 typedef struct {
     int32_t lat_e7;
