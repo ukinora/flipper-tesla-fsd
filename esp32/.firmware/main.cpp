@@ -2614,9 +2614,28 @@ static void ota_selftest_tick(uint32_t now) {
         // ⚠️ ONLY while a self-test is pending, and switched off the moment it
         // resolves. do_flush() writes a 15-second capture window to LittleFS in
         // one blocking call -- on a busy bus that is hundreds of kilobytes and
-        // will exceed the 5 s timeout. An always-on loop WDT would reboot the
-        // module while it was saving the one-shot capture taken before the TSL
-        // comes out, which is a far worse outcome than the hang it guards.
+        // may exceed the 5 s timeout. An always-on loop WDT would then reboot
+        // the module while it was saving the one-shot capture taken before the
+        // TSL comes out, which is a far worse outcome than the hang it guards.
+        //
+        // 🔴 NARROWING THE WINDOW DID NOT ACTUALLY CLOSE THAT HAZARD, and the
+        // 2026-09-22 audit (item F) said so: a capture can START inside the
+        // window too. BB_MARK arrives from the phone whenever the owner presses
+        // 「지금 기록」, and a bus-off flush arms itself — neither asks whether a
+        // self-test is running. So the first capture after a phone-flashed image
+        // could reboot the board mid-write and roll that image back.
+        //
+        // 🟢 Closed in blackbox.cpp instead, where the work is: disk_emit() and
+        // backend_delete_all() feed the watchdog while they make progress. A
+        // flush that is writing is not a hung loop; one that is truly stuck stops
+        // feeding and this watchdog still fires.
+        //
+        // 🔵 So this scoping is no longer load-bearing for that reason — an
+        // always-on loop WDT is thinkable now. NOT done here: that is a separate
+        // decision about every other blocking call in loop(), and nothing has
+        // measured those. What IS measured from now on is the flush itself — it
+        // prints its own duration, so the next capture turns "may exceed" into a
+        // number.
         enableLoopWDT();
         Serial.println("[OTA] self-test armed — loop watchdog on for the duration");
     }

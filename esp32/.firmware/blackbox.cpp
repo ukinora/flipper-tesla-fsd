@@ -894,6 +894,11 @@ static bool backend_delete(const char* name) {
 static void backend_delete_all() {
     if (!g_fs_ok) return;
     for (;;) {
+        /* 🔴 여기도 먹인다 — disk_emit() 과 **같은 결함**이다(일곱 번째 패턴:
+         * 한 실패에 문이 여럿인데 본 문만 닫는다). 한 바퀴에 파일 하나를 지우려고
+         * 디렉터리를 처음부터 다시 훑으므로 서른 몇 건이면 초 단위가 되고,
+         * 「전부 지우기」는 폰이 아무 때나 누를 수 있다 — 자가시험 중에도. */
+        feedLoopWDT();
         File dir = BB_FS.open(BLACKBOX_DIR);
         if (!dir) return;
         char victim[40] = {};
@@ -1290,9 +1295,28 @@ static void build_summary(char* out, int out_sz, uint32_t frame_count,
 #if defined(BLACKBOX_BACKEND_LITTLEFS) || defined(BLACKBOX_BACKEND_SD)
 // Disk emit: walk the ring window and stream candump lines into the open file.
 static uint32_t g_emit_lo, g_emit_hi, g_emit_start;
+
+/* 🔴 **감시 시계를 이 반복문 안에서 먹인다** (2026-09-22 점검 F).
+ *
+ * OTA 자가시험이 도는 동안(최대 5분) main.cpp 가 loop 감시 시계를 켠다. 시한은
+ * **5초**다. 그런데 이 반복문은 무필터 캡처에서 프레임 **3만 장**을 LittleFS 에
+ * 한 번에 쏟는다 — main.cpp 의 주석 스스로 *"바쁜 버스에서는 5초를 넘긴다"* 고
+ * 적는다. 그러면 **막 구운 판을 저장 도중에 재부팅**시키고, 이미지가 아직
+ * valid 가 아니라 **옛 판으로 되돌아간다.**
+ *
+ * 🟢 **먹이는 것이 감시를 무르게 하지 않는다.** 감시 시계가 잡으려는 것은
+ * «loop 이 멈췄다» 이고, 여기서 먹이는 것은 **한 줄 한 줄 나아가고 있을 때**
+ * 뿐이다. 파일 계층이 정말 멈추면 먹이는 것도 같이 멈추므로 시계는 그대로
+ * 발화한다.
+ *
+ * ⚠️ 감시 시계가 안 켜져 있으면 `feedLoopWDT()` 는 조용한 무동작이다 — 코어가
+ * 오류를 `log_e` 로 흘리는데 `CORE_DEBUG_LEVEL` 이 0 이라 찍히지 않는다. */
+#define BB_WDT_FEED_EVERY 512u
+
 static void disk_emit(File& f) {
     char line[72];
     bool started = false;
+    uint32_t since_feed = 0;
     for (uint32_t i = g_tail; i != g_head; i = ring_next(i)) {
         const BBFrame& fr = g_ring[i];
         if (fr.ts_ms < g_emit_lo) continue;
@@ -1302,6 +1326,7 @@ static void disk_emit(File& f) {
                                           bb_iface_name(fr),
                                           fr.id, fr.data, fr.dlc);
         f.write((const uint8_t*)line, n);
+        if (++since_feed >= BB_WDT_FEED_EVERY) { since_feed = 0; feedLoopWDT(); }
     }
 }
 #endif
@@ -1346,6 +1371,14 @@ static void do_flush() {
                      ",\"tx_frames\":%lu}", (unsigned long)txc);
     }
 
+    /* 🔴 **얼마나 걸리는지 보드가 말하게 한다** (2026-09-22 점검 F).
+     *
+     * 이 저장이 5초를 넘기는지 **잰 적이 한 번도 없었다** — 그런데 그 «넘길 수도
+     * 있다» 가 위 감시 시계를 자가시험 동안으로 좁혀 둔 근거였다. 재지 않은 수를
+     * 근거로 쓰는 것이 이 저장소의 열두 번째 패턴이라, 다음 캡처부터 실제 값이
+     * 남는다. */
+    const uint32_t flush_t0 = millis();
+
 #if defined(BLACKBOX_BACKEND_LITTLEFS) || defined(BLACKBOX_BACKEND_SD)
     if (!bb_store_fits(count, strlen(json), base)) return;   // nothing written
     g_emit_lo = lo; g_emit_hi = hi;
@@ -1379,8 +1412,9 @@ static void do_flush() {
     /* 파일이 실제로 생겼을 때만 짝을 맞춘다. 위 early return 들은
      * 여기에 닿지 못하므로 어긋난 채로 남는다 — 그게 신호다. */
     if (g_trig == BB_TRIG_MANUAL) g_manual_saved_n = g_manual_armed_n;
-    Serial.printf("[BB] flushed %s  frames=%lu (can0=%lu can1=%lu)\n",
-                  base, (unsigned long)count, (unsigned long)bus0, (unsigned long)bus1);
+    Serial.printf("[BB] flushed %s  frames=%lu (can0=%lu can1=%lu)  %lu ms\n",
+                  base, (unsigned long)count, (unsigned long)bus0, (unsigned long)bus1,
+                  (unsigned long)(millis() - flush_t0));
 #if defined(BLACKBOX_BACKEND_LITTLEFS)
     /* Say how much room is left, every time. Without this the operator only
      * finds out at the moment a capture is refused -- which in the car is the
