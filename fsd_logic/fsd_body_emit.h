@@ -587,17 +587,26 @@ typedef struct {
  * The door is the opposite case — there 0 has always meant the right front, so
  * ignoring is exactly what keeps a stored rule pointing at the same door.
  *
- * 🔴 This answers "what would the bytes be", NOT "may this happen". The
- * authority axis (fsd_body_allows) is a separate question asked separately, and
- * this function deliberately does not call it -- a builder that also decides is
+ * 🔴 This answers "what would the bytes be", NOT "may this happen". Whether it
+ * may happen is asked separately -- today by the rule the owner switched on and
+ * by the chokepoint row (fsd_body_wire). ⚠️ This sentence used to name a third
+ * asker, the authority axis fsd_body_allows(), and kept naming it long after
+ * that axis was deleted on 2026-09-10 (owner's instruction).
+ *
+ * This function calls none of them -- a builder that also decides is
  * a builder nobody can test in isolation, and this one has to be testable
  * against bytes copied out of a real capture.
  *
- * Returns FSD_EMIT_NO_ENCODING for every action but FSD_ACT_MAP_LIGHT,
- * FSD_ACT_DOOR_OPEN, FSD_ACT_HAZARDS and FSD_ACT_TURN_SIGNAL. That mirrors
- * fsd_body.c, where those four are the rows with armable_at_runtime = true --
- * two independent statements of the same fact, so widening one without the
- * other does nothing, and a host test asserts they agree for every action.
+ * Returns FSD_EMIT_NO_ENCODING for every action but the six that have an
+ * emitter: FSD_ACT_MAP_LIGHT, FSD_ACT_DOOR_OPEN, FSD_ACT_HAZARDS,
+ * FSD_ACT_TURN_SIGNAL, FSD_ACT_MIRROR and FSD_ACT_LIGHT_HORN.
+ *
+ * 🔴 THIS USED TO SAY FOUR, and that they mirrored the rows with
+ * armable_at_runtime = true in fsd_body.c -- "two independent statements of the
+ * same fact". Both halves are gone: the list is six (fork #108), and
+ * armable_at_runtime went with the permission axis on 2026-09-10. The list that
+ * still has to agree with this one is fsd_emit_supported() in the same file,
+ * and test_body_emit.c walks every action against it.
  */
 FsdEmitResult fsd_emit_build(FsdBodyAction action, int32_t arg,
                              const FsdEmitTemplate* t, uint32_t now_ms,

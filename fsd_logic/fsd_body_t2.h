@@ -37,9 +37,20 @@
  *     how close two presses can even resolve as two. No DBC in this repo states
  *     a cycle time for anything.
  *
- * The permission side is already closed against it: FSD_BODY_CAPS[T2] has
- * armable_at_runtime = false, so fsd_body_allows() returns NOT_ARMABLE in every
- * state and no code path can change that without editing the table.
+ * 🔴 THIS USED TO CLAIM THE PERMISSION SIDE WAS CLOSED AGAINST IT --
+ * "FSD_BODY_CAPS[T2] has armable_at_runtime = false, so fsd_body_allows()
+ * returns NOT_ARMABLE in every state". THAT IS NO LONGER TRUE. The flag and the
+ * whole axis were deleted on 2026-09-10 (owner's instruction), and the door
+ * emitter has existed since 2026-09-05.
+ *
+ * What keeps this detector from opening a door is narrower and worth saying
+ * plainly: **IT HAS NO CALLER THAT ACTS.** It measures and publishes; nothing
+ * turns the gesture into a command.
+ *
+ * ⚠️ So on the day somebody wires this gesture to the door action, there is no
+ * axis waiting to refuse it. What is left is the chokepoint row, the id
+ * deny-list and Listen-Only -- and none of those knows what is outside the
+ * door. That decision is the owner's, and it should be made knowing this.
  *
  * INPUT — AND IT IS FREE
  * ----------------------

@@ -27,7 +27,10 @@
  * 🔴 IT DECIDES. IT DOES NOT DO.
  * ------------------------------
  * fsd_rules_match() returns a list and changes nothing. The caller walks that
- * list through fsd_body_allows() and the emitter, and either may refuse.
+ * list through the chokepoint row and the emitter, and either may refuse.
+ *
+ * 🔴 It used to say "through fsd_body_allows() and the emitter". That axis was
+ * deleted on 2026-09-10 (owner's instruction); the sentence was not.
  *
  * That is not tidiness. A rule engine that dispatched would be a second path to
  * the bus, and this project has already been bitten by exactly that shape: the
