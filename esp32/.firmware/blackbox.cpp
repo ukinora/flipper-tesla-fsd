@@ -1472,12 +1472,25 @@ static void bb_announce_saved(const char* base, uint32_t count, uint32_t bus0,
  * a bench replay -- and a rule switch pressed during it fired late, after the
  * save, as a SHORT press (red-team 2026-10-04, 2-5).
  *
- * Now blackbox_tick() writes at most BB_SAVE_SLICE lines per call and returns.
- * The bookkeeping (and the ring protection that makes it safe) is in
+ * Now blackbox_tick() writes for at most BB_SAVE_BUDGET_US per call and
+ * returns. The bookkeeping (and the ring protection that makes it safe) is in
  * fsd_logic/fsd_bb_save.h and host-tested. Idea from hypery11 v2.17-beta.1
- * (#245). */
+ * (#245).
+ *
+ * 🔴 **A time budget, not a line count (2026-10-14, measured on the bench).**
+ * The first cut wrote 32 lines per pass, as upstream does. Replaying ~2,000
+ * frames/s into can1 during an unfiltered save, the board received about 1,300
+ * frames in 6.3 s of saving -- almost exactly TWO per pass (593 passes). The
+ * MCP2515 that carries the Vehicle bus holds two received frames; 32 lines took
+ * ~10 ms, and everything after the second frame of those 10 ms was dropped by
+ * the chip. Upstream's 32 suits the ESP32's own TWAI controller, which queues
+ * dozens. So the slice ends when its time is up, short enough that the chip's
+ * two buffers are drained before they overflow at the car's ~3,000 frames/s. */
+#ifndef BB_SAVE_BUDGET_US
+#define BB_SAVE_BUDGET_US 600u
+#endif
 #ifndef BB_SAVE_SLICE
-#define BB_SAVE_SLICE 32u
+#define BB_SAVE_SLICE 32u   /* upper bound per pass, whatever the clock says */
 #endif
 
 struct BBSaveCtx {
@@ -1560,9 +1573,14 @@ static bool do_save_begin() {
 /* One slice. Returns true when the save is over (stored or not). */
 static bool do_save_step() {
     g_sv->passes++;
-    if (!fsd_bb_save_step(&g_sv->save, g_cap, g_head, BB_SAVE_SLICE,
-                          bb_ts_at, bb_emit_line, nullptr))
-        return false;
+    const uint32_t t_us = micros();
+    bool done = false;
+    for (uint32_t n = 0; n < BB_SAVE_SLICE && !done; n++) {
+        done = fsd_bb_save_step(&g_sv->save, g_cap, g_head, 1u,
+                                bb_ts_at, bb_emit_line, nullptr);
+        if ((uint32_t)(micros() - t_us) >= BB_SAVE_BUDGET_US) break;
+    }
+    if (!done) return false;
 
     const BBSavePlan plan = g_sv->plan;   // copied: the context is freed below
     const uint32_t written = g_sv->save.written;
