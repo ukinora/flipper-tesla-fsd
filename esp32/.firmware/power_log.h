@@ -44,6 +44,10 @@ void power_log_init(void);
  * contract as prefs.cpp, because an NVS commit is a flash erase-write that can
  * stall for tens of milliseconds and must not run on the BLE host task.
  *
+ * 🔴 And not while the bus is busy either (2026-10-14): this IS the CAN loop.
+ * fsd_pwr_save_due() allows a write only when no frames are flowing, plus one
+ * correcting write when the car wakes over a QUIET/NO_BUS record.
+ *
  * @param last_rx_ms  FSDState.last_rx_ms
  * @param seen_any    whether any frame has ever arrived (last_rx_ms is 0 until
  *                    the first one, and 0 is also a legal clock value)

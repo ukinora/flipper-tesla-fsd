@@ -5,8 +5,8 @@
 #include <esp_system.h>
 
 // Its own namespace. prefs.cpp owns operator settings and is written once when
-// something changes; this is written every minute, and mixing the two would put
-// a periodic writer into the same blob as the settings.
+// something changes; this is a periodic writer (while the bus is quiet), and
+// mixing the two would put it into the same blob as the settings.
 static const char* NS = "pwrlog";
 
 static Preferences g_nvs;
@@ -14,7 +14,10 @@ static bool g_ok = false;
 
 static FsdPwrVerdict g_boot_verdict = FSD_PWR_UNKNOWN;
 static FsdPwrVerdict g_live_verdict = FSD_PWR_UNKNOWN;
-static uint32_t g_last_save_ms = 0;
+/* When to write is decided in fsd_logic/fsd_power.c (host-tested): never while
+ * the bus carries traffic, except once to correct a QUIET/NO_BUS claim when the
+ * car wakes. See fsd_pwr_save_due(). */
+static FsdPwrSaveSched g_sched;
 
 /* Kept so power_log_print() can re-report the boot picture at any time. The
  * banner is printed once and, on this board, is unreadable over USB after a
@@ -26,15 +29,6 @@ static FsdPwrRecord g_prev = {false, 0, 0, false};
 static uint32_t g_now_ms = 0;
 static uint32_t g_quiet_ms = 0;
 static bool g_seen_any = false;
-
-/* Normal cadence, and the faster one used once the bus falls silent.
- *
- * The fast one matters: if the feed is switched, the window between "bus went
- * quiet" and "we lost power" may be short. Writing only once a minute could
- * leave a final record that still says the bus was busy, and the next boot
- * would then report NO_SLEEP -- the wrong answer, arrived at confidently. */
-static const uint32_t SAVE_BUSY_MS = 60000;
-static const uint32_t SAVE_QUIET_MS = 10000;
 
 static FsdPwrReset map_reset(esp_reset_reason_t r) {
     switch(r) {
@@ -59,8 +53,11 @@ static void print_minutes(const char* label, uint32_t ms) {
 static void report_boot(void) {
     Serial.printf("[PWR] 재시작 사유: %s\n", fsd_pwr_reset_str(g_boot_reset));
     if(g_prev.valid) {
-        Serial.print("[PWR] 지난번: ");
-        print_minutes("켜져 있던 시간", g_prev.uptime_ms);
+        /* 🔴 "마지막 기록" -- not "켜져 있던 시간". Since 2026-10-14 nothing is
+         * written while the bus is busy, so after a drive the stored uptime is
+         * when the record was last written, not when the power went. */
+        Serial.print("[PWR] 지난번 마지막 기록: ");
+        print_minutes("켜진 지", g_prev.uptime_ms);
         if(!g_prev.seen_any) {
             /* 🔴 Not the same sentence as "the bus was busy". A session that
              * never heard a frame observed the WIRING, not the car, and saying
@@ -68,7 +65,7 @@ static void report_boot(void) {
              * as "the car never slept". */
             Serial.print(" · CAN 을 한 번도 못 들었다");
         } else if(g_prev.quiet_ms == 0) {
-            Serial.print(" · CAN 은 끝까지 흐르고 있었다");
+            Serial.print(" · CAN 이 흐르고 있었다 (흐르는 동안은 기록하지 않는다)");
         } else {
             Serial.print(" · ");
             print_minutes("CAN 이 조용했던 시간", g_prev.quiet_ms);
@@ -122,6 +119,7 @@ void power_log_init(void) {
             g_nvs.remove("seen");
         }
         g_nvs.end();
+        fsd_pwr_save_init(&g_sched);
         g_ok = true;
     } else {
         Serial.println("[PWR] NVS 를 못 열었다 — 이번 세션은 기록되지 않는다");
@@ -168,9 +166,10 @@ void power_log_tick(uint32_t now_ms, uint32_t last_rx_ms, bool seen_any) {
         }
     }
 
-    uint32_t due = (quiet > 0) ? SAVE_QUIET_MS : SAVE_BUSY_MS;
-    if((uint32_t)(now_ms - g_last_save_ms) < due) return;
-    g_last_save_ms = now_ms;
+    /* 🔴 No flash write while frames are flowing (2026-10-14). An NVS commit is
+     * a flash erase-write that stalls this loop -- the CAN path -- for tens of
+     * ms, and the old 60 s cadence did that every minute of every drive. */
+    if(!fsd_pwr_save_due(&g_sched, now_ms, quiet, seen_any)) return;
 
     if(!g_nvs.begin(NS, /*readOnly=*/false)) return;
     g_nvs.putULong("up", now_ms);

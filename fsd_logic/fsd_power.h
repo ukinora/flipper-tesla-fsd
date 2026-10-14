@@ -127,6 +127,65 @@ FsdPwrVerdict fsd_pwr_live_verdict(uint32_t quiet_ms);
  */
 uint32_t fsd_pwr_quiet_ms(uint32_t now_ms, uint32_t last_rx_ms, bool seen_any);
 
+/* ---------------------------------------------------------------------------
+ * WHEN THE RECORD MAY BE WRITTEN (2026-10-14)
+ *
+ * An NVS commit is a flash erase-write and stalls the loop for tens of ms. The
+ * loop is also the CAN path, so a write while frames are flowing drops frames.
+ * The old shim wrote every 60 s regardless -- a stall every minute of driving.
+ *
+ * Rule: never write while the bus is carrying traffic, with ONE exception that
+ * correctness forces. If flash still says "the bus was quiet" (or "never heard")
+ * and the car wakes, that record is now a lie: cut the power during the drive
+ * and the next boot reads "quiet, then power lost" and answers SWITCHED. So on
+ * that transition the record is corrected once -- at most once per wake, and
+ * only when a quiet or no-bus record was actually written.
+ *
+ * 🔴 hypery11 v2.17-beta.1 (#247) adopted the same "quiet only" rule without
+ * the correction: one checkpoint per quiet episode, nothing on re-wake. That
+ * leaves exactly the SWITCHED-after-a-drive lie described above.
+ *
+ * What it costs: a session whose bus is busy from boot to power-cut leaves no
+ * record (the boot clears the old one), so the next boot says UNKNOWN instead
+ * of NO_SLEEP. Both are non-verdicts; UNKNOWN is the less informative one, and
+ * that is the price of not stalling the CAN path every minute.
+ * ------------------------------------------------------------------------- */
+
+/** What the record in flash currently claims. */
+typedef enum {
+    FSD_PWR_CLAIM_NONE = 0, /* nothing written this session (boot cleared it) */
+    FSD_PWR_CLAIM_NO_BUS,   /* "no frame heard yet" */
+    FSD_PWR_CLAIM_BUSY,     /* "the bus was carrying traffic" */
+    FSD_PWR_CLAIM_QUIET,    /* "the bus had fallen silent" */
+} FsdPwrClaim;
+
+#ifndef FSD_PWR_SAVE_QUIET_MS
+#define FSD_PWR_SAVE_QUIET_MS 10000u   /* refresh cadence while quiet */
+#endif
+#ifndef FSD_PWR_SAVE_NO_BUS_MS
+#define FSD_PWR_SAVE_NO_BUS_MS 60000u  /* cadence while nothing was ever heard */
+#endif
+
+typedef struct {
+    FsdPwrClaim on_flash;   /* what the last write said */
+    uint32_t last_write_ms; /* when it said it; 0 = session start */
+} FsdPwrSaveSched;
+
+/** Start of a session: the boot has just cleared the previous record. */
+void fsd_pwr_save_init(FsdPwrSaveSched* s);
+
+/**
+ * Should the shim write the record now? If true, the caller writes
+ * {uptime=now, quiet=quiet_ms, seen=seen_any} and the scheduler has already
+ * recorded that it did.
+ *
+ *   no frame ever   -> every FSD_PWR_SAVE_NO_BUS_MS (no traffic to disturb)
+ *   bus quiet       -> immediately on entering quiet, then every
+ *                      FSD_PWR_SAVE_QUIET_MS (no traffic to disturb)
+ *   bus busy        -> never, EXCEPT once if flash claims QUIET or NO_BUS
+ */
+bool fsd_pwr_save_due(FsdPwrSaveSched* s, uint32_t now_ms, uint32_t quiet_ms, bool seen_any);
+
 const char* fsd_pwr_reset_str(FsdPwrReset r);
 const char* fsd_pwr_verdict_str(FsdPwrVerdict v);
 
