@@ -1,5 +1,6 @@
 /*
- * fsd_body.c — see fsd_body.h. One predicate, no emitters, no wire tables.
+ * fsd_body.c — see fsd_body.h. The capability table (only max_hold_ms since
+ * 2026-09-10) and the id deny-list. No predicate, no emitters, no wire tables.
  */
 
 #include "fsd_body.h"
@@ -12,7 +13,12 @@
  * below — three independent ways to catch the same class of mistake, because
  * this project has already shipped a permission table that defaulted open.
  *
- * 🔴 FOUR ROWS ARE ARMABLE (2026-09-06). MAP_LIGHT carries over unchanged
+ * 🔴 2026-09-10: "armable" NO LONGER EXISTS. A row is now just its
+ * max_hold_ms; which actions can reach the bus is decided by the emitter
+ * (fsd_emit_supported(), six actions) and by fsd_body_wire.c. The paragraph
+ * below is the 2026-09-06 record.
+ *
+ * FOUR ROWS WERE ARMABLE (2026-09-06). MAP_LIGHT carries over unchanged
  * from the old T1. DOOR_OPEN and HAZARDS joined it when the third visit
  * produced the thing their comments demanded -- the command frames, measured,
  * not inferred. DOOR_OPEN joined with every other restriction still on;
@@ -35,7 +41,18 @@
  *
  * 🔴 **그러나 지금 동작을 말하는 문장이 아니다.** 이 저장소는 2026-09-09
  * 감사에서 정확히 이 모양에 물렸다 — 없는 필드(`may_act_without_driver`)를
- * 근거로 자기를 설명하는 주석 넷이 있었고, 그것만 읽으면 정반대로 안다. */
+ * 근거로 자기를 설명하는 주석 넷이 있었고, 그것만 읽으면 정반대로 안다.
+ *
+ * 🔴 **그리고 그 일이 여기서 또 일어났다 (2026-10-14 정정).** 이 안내를 달고도
+ * 행 주석 여럿이 현재형으로 남아 있었다 — 미러 행의 *"still requires standstill
+ * and park"*, 경적 행의 *"the 1000 ms interval is what keeps…"*, 그리고 지워진
+ * 함수(`fsd_body_caps_verdict()` · `fsd_burst_fill_last_act()`)를 «보라» 고
+ * 가리키는 줄 다섯. 머리의 안내 하나로는 본문의 현재형을 못 이긴다 — 그래서
+ * 그런 문장마다 그 자리에 «2026-09-10 에 지워졌다» 를 달았다.
+ *
+ * 🔴 **지금의 사실**: 켜 둔 매핑은 기어 · 속도 · 주차 · 착석과 무관하게
+ * 나가고, 같은 동작을 얼마나 자주 보내는지 막는 것도 없다(버스트 칸 넷이
+ * 한꺼번에 대기할 수 있는 상한일 뿐). */
 static const FsdBodyCaps FSD_BODY_CAPS[] = {
     [FSD_ACT_MAP_LIGHT] =
         {
@@ -45,7 +62,8 @@ static const FsdBodyCaps FSD_BODY_CAPS[] = {
              * either now: the drive-session gate that used to stop a car which
              * had sat untouched since yesterday, and the occupancy gate this
              * row waived, were both removed on 2026-09-08. What holds this
-             * action is the rate limit and the rule the owner switched on. */
+             * action now is the rule the owner switched on and max_hold_ms --
+             * the rate limit this sentence used to name went on 2026-09-10. */
             /* TSL holds the light by re-sending; whether we must too is not
              * settled (see 권한축-재설계.md 8-D), so the bound exists before the
              * emitter does rather than after it misbehaves. */
@@ -60,7 +78,12 @@ static const FsdBodyCaps FSD_BODY_CAPS[] = {
      * same millisecond as the car's own frame, 113 ms before the right front
      * door moved. So the row opens -- and nothing else about it relaxes.
      *
-     * EVERY restriction stays on. The struct is permissive-when-true, so the
+     * 🔴 2026-09-10: THE GATES IN THE NEXT PARAGRAPH ARE GONE (owner's
+     * instruction). Today the door opens at any speed and in any gear if a
+     * rule the owner switched on fires. The paragraph is the 2026-09-05
+     * record of what the row stood on; the hazard after it is still true.
+     *
+     * (record) EVERY restriction stays on. The struct is permissive-when-true, so the
      * four bools left false below are four gates, each backed by a signal we
      * actually receive:
      *
@@ -70,12 +93,13 @@ static const FsdBodyCaps FSD_BODY_CAPS[] = {
      * 🔴 AND HERE IS WHAT NONE OF THEM COVER. A door swings OUTWARD, and
      * nothing on this bus says what is beside the car -- not a person, not a
      * wall, not a passing cyclist. That hazard is unobservable, it is the main
-     * one, and no gate here reduces it. What the gates do is make the car
-     * stationary, in park, with someone in the driver's seat when it happens.
-     * The residue is why action_enabled[] is session-scoped and dies with the
-     * power: this is an action an operator opts into for one sitting, not a
-     * setting a car carries around.
+     * one, and no gate here reduces it. (record) What the gates did was make
+     * the car stationary, in park, with someone in the driver's seat when it
+     * happened, and action_enabled[] made it session-scoped. 🔴 All of that
+     * went on 2026-09-08/10 -- this hazard now has nothing in front of it but
+     * the owner's own rule.
      *
+     * (record -- min_interval_ms and fsd_body_caps_verdict() went on 2026-09-10)
      * min_interval_ms is 3000, an order above the light's 500. It is not a
      * debounce -- it is a bound on how bad a stuck rule can get, and a door
      * that reopens twice a second is a different event from a light that does.
@@ -143,7 +167,14 @@ static const FsdBodyCaps FSD_BODY_CAPS[] = {
              * no-brake case is measured, this row stays unarmable — borrowed
              * safety you have not seen is safety you are only assuming.
              *
-             * FLIPS WHEN: the no-brake refusal is observed on the car. */
+             * FLIPS WHEN: the no-brake refusal is observed on the car.
+             *
+             * 🔴 2026-09-10: "unarmable" and "every gate this axis has" no
+             * longer exist. What keeps GEAR_D off the bus today is that it has
+             * NO EMITTER (fsd_emit_supported() says false) and send_on_bus()
+             * refuses 0x229. A rule naming it is still accepted and fails at
+             * fire time with NO_ENCODING. The FLIPS WHEN above is now the
+             * condition for writing that emitter. */
         },
 
     /* Hazards. Measured 2026-09-05: 0x3E9 byte 0 bit 2, with a counter and a
@@ -163,8 +194,9 @@ static const FsdBodyCaps FSD_BODY_CAPS[] = {
      *
      * 🔴 THE OCCUPANCY GATE THIS PARAGRAPH ARGUED ABOUT NO LONGER EXISTS
      * (removed 2026-09-08, owner's instruction). Kept as a record of what
-     * the row was reasoning about; see fsd_body_caps_verdict() for what
-     * stands in its place.
+     * the row was reasoning about. (fsd_body_caps_verdict(), which this used
+     * to point at, went too on 2026-09-10 -- what stands in front of a frame
+     * now is listed in the note after fsd_body_action_str().)
      *
      * It said: the driver gate stays shut, not because an empty car must never
      * flash -- that is arguably what hazards are for -- but because no rule we
@@ -209,13 +241,17 @@ static const FsdBodyCaps FSD_BODY_CAPS[] = {
      *
      * 🔴 THE OCCUPANCY GATE THIS PARAGRAPH ARGUED ABOUT NO LONGER EXISTS
      * (removed 2026-09-08, owner's instruction). Kept as a record of what
-     * the row was reasoning about; see fsd_body_caps_verdict() for what
-     * stands in its place.
+     * the row was reasoning about. (fsd_body_caps_verdict(), which this used
+     * to point at, went too on 2026-09-10 -- what stands in front of a frame
+     * now is listed in the note after fsd_body_action_str().)
      *
      * It said: an empty car has no lane to change into. 🔴 THE INDICATOR CAN
-     * NOW FIRE ON AN EMPTY CAR. What bounds it is the 50 ms interval and the
-     * fact that a rule has to fire.
+     * NOW FIRE ON AN EMPTY CAR. What bounded it was the 50 ms interval (gone
+     * 2026-09-10) and the fact that a rule has to fire -- now only the latter,
+     * plus max_hold_ms.
      *
+     * (record -- the interval column went on 2026-09-10; the next two
+     * paragraphs say why 50 was chosen)
      * min_interval_ms is 50, the car's own period for this frame. That number
      * was picked when the column was read as a FRAME spacing: TSL sends three
      * or four back to back at exactly that rate and we do not know which of
@@ -258,13 +294,18 @@ static const FsdBodyCaps FSD_BODY_CAPS[] = {
      *
      * 🔴 THE OCCUPANCY GATE THIS PARAGRAPH ARGUED ABOUT NO LONGER EXISTS
      * (removed 2026-09-08, owner's instruction). Kept as a record of what
-     * the row was reasoning about; see fsd_body_caps_verdict() for what
-     * stands in its place.
+     * the row was reasoning about. (fsd_body_caps_verdict(), which this used
+     * to point at, went too on 2026-09-10 -- what stands in front of a frame
+     * now is listed in the note after fsd_body_action_str().)
      *
      * 🟢 AND IT CHANGES WHAT THIS ROW CAN DO. The paragraph below noted that
      * the gate refused "fold the mirrors after I walk away" -- the most natural
      * rule for this action. That refusal is gone: the rule is now buildable.
-     * The row still requires standstill and park, which that rule satisfies.
+     * 🔴 2026-09-10: the row NO LONGER requires standstill or park either. A
+     * mirror rule now folds the mirrors AT SPEED -- the hazard the paragraph
+     * above is about is open, and the two rear map-light switches are mapped
+     * to fold/unfold today. (This line said "still requires standstill and
+     * park" until 2026-10-14.)
      *
      * (the paragraph as it stood) "That does refuse 'fold the mirrors after I
      * walk away', which is the most natural rule for this action. Refused on
@@ -273,6 +314,8 @@ static const FsdBodyCaps FSD_BODY_CAPS[] = {
      * says what changing it gives up." -- the line did change, and this is
      * what it gave up: nothing now asks whether anyone is in the car.
      *
+     * (record -- gone 2026-09-10, so nothing now stops a rule re-firing
+     * mid-travel)
      * min_interval_ms is 3000. This one drives a MOTOR that takes a second or
      * two to finish, and a rule re-firing inside that is a rule fighting the
      * hardware. Same order as the door, for a different reason: there it
@@ -303,14 +346,20 @@ static const FsdBodyCaps FSD_BODY_CAPS[] = {
      *
      * 🔴 THE OCCUPANCY GATE THIS PARAGRAPH ARGUED ABOUT NO LONGER EXISTS
      * (removed 2026-09-08, owner's instruction). Kept as a record of what
-     * the row was reasoning about; see fsd_body_caps_verdict() for what
-     * stands in its place.
+     * the row was reasoning about. (fsd_body_caps_verdict(), which this used
+     * to point at, went too on 2026-09-10 -- what stands in front of a frame
+     * now is listed in the note after fsd_body_action_str().)
      *
      * It said the same sentence a third time. 🔴 The horn can now sound with
-     * nobody in the car; the 1000 ms interval is what keeps a stuck rule from
-     * leaning on it.
+     * nobody in the car. The 1000 ms interval that kept a stuck rule from
+     * leaning on it went on 2026-09-10 -- what is left is the burst's four
+     * slots and max_hold_ms.
      *
-     * 🔴 min_interval_ms IS THE GATE THAT MATTERS HERE, because the failure to
+     * 🔴 2026-09-10: THIS PARAGRAPH AND THE NEXT TWO ARE THE RECORD. Two days
+     * after the "ENFORCED" below, min_interval_ms, last_act_ms and
+     * fsd_burst_fill_last_act() were all deleted with the other gates.
+     *
+     * (record) min_interval_ms IS THE GATE THAT MATTERS HERE, because the failure to
      * survive is not one beep in the wrong place -- it is a stuck rule leaning
      * on the horn. 1000 is an order above the map light's 500 and still leaves
      * the feature usable: nobody wants two beeps in one second.
@@ -327,7 +376,7 @@ static const FsdBodyCaps FSD_BODY_CAPS[] = {
      * COMMANDS, which is what every row in this table already assumed (3000
      * here is "do not open the door twice in three seconds"). A burst is one
      * command; it is stamped once, at the press, and its own frames are exempt.
-     * See fsd_burst_fill_last_act().
+     * (fsd_burst_fill_last_act(), named here, is gone -- see fsd_burst.h.)
      *
      * max_hold_ms is 1000. There is nothing to hold -- the gesture is 12 ms --
      * so the bound is here for the same reason as the door's: a re-sender
@@ -360,11 +409,13 @@ bool fsd_body_tx_id_refused(uint32_t can_id) {
      *
      * 🔴 0x273 IS DELIBERATELY NOT ON THIS LIST. It is the frame the map
      * light emitter builds, so refusing it here would refuse the one thing this
-     * axis exists to allow. Its protection is the other three layers — the rule
-     * has to match, the axis has to allow, and today nothing calls the emitter
-     * at all. If that ever feels thin, the answer is a narrower gate on 0x273
-     * (bit 59 only, as fsd_body_wire.c already does for 0x3C2), not a blanket
-     * refusal that would make the feature impossible. */
+     * axis exists to allow. Its protection is the other layers — the rule has
+     * to match, the emitter needs a fresh car frame to copy, and
+     * fsd_body_wire.c lets only the bits the map light and mirror own through
+     * (the "narrower gate on 0x273" this comment once asked for exists).
+     * 🔴 This used to say "the axis has to allow, and today nothing calls the
+     * emitter at all": the axis went on 2026-09-10, and the map-light and
+     * mirror emitters have been called by rules since 2026-09-07. */
     return can_id == 0x3F5u || can_id == 0x102u || can_id == 0x103u;
 }
 
