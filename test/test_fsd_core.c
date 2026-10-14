@@ -32,6 +32,7 @@
 #include "fsd_handler.h"
 #include "fsd_ota.h"
 #include "fsd_power.h"
+#include "fsd_bb_save.h"
 #include "fsd_owner.h"
 #include "fsd_rxstall.h"
 #include "fsd_selftest.h"
@@ -2815,6 +2816,116 @@ static void test_power_save_schedule(void) {
     CHECK(!fsd_pwr_save_due(NULL, 0u, 0u, true), "NULL scheduler -> no write");
 }
 
+/* A little ring for the stepped-save tests: timestamps only. */
+#define BBT_CAP 16u
+typedef struct {
+    uint32_t ts[BBT_CAP];
+    uint32_t head, tail;
+    uint32_t out[64];
+    uint32_t out_n;
+    uint32_t dropped;
+} BbtRing;
+
+static uint32_t bbt_ts_at(void* ctx, uint32_t idx) { return ((BbtRing*)ctx)->ts[idx]; }
+static void bbt_emit(void* ctx, uint32_t idx) {
+    BbtRing* r = (BbtRing*)ctx;
+    if(r->out_n < 64u) r->out[r->out_n++] = r->ts[idx];
+}
+static void bbt_push(BbtRing* r, uint32_t ts, uint32_t keep) {
+    uint32_t slot;
+    if(fsd_bb_push(BBT_CAP, &r->head, &r->tail, keep, &slot)) r->ts[slot] = ts;
+    else r->dropped++;
+}
+
+static void test_bb_stepped_save(void) {
+    printf("\n-- black box: save in slices, CAN keeps running --\n");
+    BbtRing r;
+    memset(&r, 0, sizeof(r));
+
+    // No save running: a full ring evicts the oldest frame, as before.
+    for(uint32_t t = 0; t < 20u; t++) bbt_push(&r, t, BBT_CAP);
+    CHECK(r.dropped == 0u, "idle ring never drops, dropped %u", r.dropped);
+    CHECK(r.ts[r.tail] == 5u, "idle ring keeps the newest 15 (oldest ts 5), got %u", r.ts[r.tail]);
+
+    // Save the window [7, 14] in slices of 2 while 3 new frames arrive between
+    // every slice. The ring is full the whole time.
+    FsdBbSave s;
+    fsd_bb_save_begin(&s, r.tail, 7u, 14u);
+    uint32_t next_ts = 100u;
+    int passes = 0;
+    while(!fsd_bb_save_step(&s, BBT_CAP, r.head, 2u, bbt_ts_at, bbt_emit, &r)) {
+        for(int k = 0; k < 3; k++) bbt_push(&r, next_ts++, fsd_bb_keep(&s, BBT_CAP));
+        if(++passes >= 100) break;
+    }
+    CHECK(passes < 100, "save terminates");
+    CHECK(r.out_n == 8u, "every window frame written once, got %u", r.out_n);
+    int in_order = 1;
+    for(uint32_t i = 0; i < r.out_n; i++) if(r.out[i] != 7u + i) in_order = 0;
+    CHECK(in_order, "window written in order 7..14 with no gap");
+    CHECK(s.written == 8u, "written counter matches, got %u", s.written);
+    CHECK(!s.active && fsd_bb_keep(&s, BBT_CAP) == BBT_CAP, "finished save protects nothing");
+    // The point of keep: without it the arriving frames would have evicted the
+    // unwritten ones. Some new frames had to be dropped instead.
+    CHECK(r.dropped > 0u, "new frames dropped rather than evicting unwritten ones");
+
+    // After the save the ring evicts normally again.
+    uint32_t before = r.dropped;
+    for(int k = 0; k < 20; k++) bbt_push(&r, next_ts++, fsd_bb_keep(&s, BBT_CAP));
+    CHECK(r.dropped == before, "idle again -> no drops");
+
+    // A window with nothing in it finishes with nothing written.
+    memset(&r, 0, sizeof(r));
+    for(uint32_t t = 0; t < 10u; t++) bbt_push(&r, t * 10u, BBT_CAP);
+    fsd_bb_save_begin(&s, r.tail, 41u, 49u);
+    bool done = false;
+    for(int i = 0; i < 10 && !done; i++)
+        done = fsd_bb_save_step(&s, BBT_CAP, r.head, 4u, bbt_ts_at, bbt_emit, &r);
+    CHECK(done && r.out_n == 0u, "empty window -> done, nothing written (%u)", r.out_n);
+
+    // An empty ring is done on the first step.
+    memset(&r, 0, sizeof(r));
+    fsd_bb_save_begin(&s, r.tail, 0u, 100u);
+    CHECK(fsd_bb_save_step(&s, BBT_CAP, r.head, 4u, bbt_ts_at, bbt_emit, &r),
+          "empty ring -> done at once");
+
+    // A slice never looks at more than max_lines entries, skipped ones included.
+    memset(&r, 0, sizeof(r));
+    for(uint32_t t = 0; t < 12u; t++) bbt_push(&r, t, BBT_CAP);
+    fsd_bb_save_begin(&s, r.tail, 10u, 11u);
+    CHECK(!fsd_bb_save_step(&s, BBT_CAP, r.head, 4u, bbt_ts_at, bbt_emit, &r) && r.out_n == 0u,
+          "four skipped entries use up a slice");
+    CHECK(s.cursor == 4u, "cursor advanced by exactly four, got %u", s.cursor);
+
+    // The window straddles the end of the array: cursor wraps 15 -> 0 while
+    // the ring stays full and frames keep arriving.
+    memset(&r, 0, sizeof(r));
+    for(uint32_t t = 0; t < 27u; t++) bbt_push(&r, t, BBT_CAP);   // tail at 12
+    CHECK(r.tail == 12u, "set-up: oldest frame sits at index 12, got %u", r.tail);
+    fsd_bb_save_begin(&s, r.tail, 12u, 20u);
+    next_ts = 200u;
+    passes = 0;
+    while(!fsd_bb_save_step(&s, BBT_CAP, r.head, 3u, bbt_ts_at, bbt_emit, &r)) {
+        for(int k = 0; k < 2; k++) bbt_push(&r, next_ts++, fsd_bb_keep(&s, BBT_CAP));
+        if(++passes >= 100) break;
+    }
+    in_order = (r.out_n == 9u);
+    for(uint32_t i = 0; i < r.out_n && in_order; i++) if(r.out[i] != 12u + i) in_order = 0;
+    CHECK(in_order, "window across the array end written 12..20 in order (%u frames)", r.out_n);
+
+    // Full ring, nothing left to write (cursor == head): a new frame is not
+    // dropped -- the oldest, already written, frame is evicted as usual.
+    memset(&r, 0, sizeof(r));
+    for(uint32_t t = 0; t < 15u; t++) bbt_push(&r, t, BBT_CAP);
+    fsd_bb_save_begin(&s, r.tail, 0u, 100u);
+    s.cursor = r.head;   // everything already written
+    bbt_push(&r, 15u, fsd_bb_keep(&s, BBT_CAP));
+    CHECK(r.dropped == 0u && r.ts[r.tail] == 1u, "cursor at head -> normal eviction");
+
+    // NULL is a finished save, not a crash.
+    CHECK(fsd_bb_save_step(NULL, BBT_CAP, 0u, 4u, bbt_ts_at, bbt_emit, &r), "NULL save -> done");
+    CHECK(fsd_bb_keep(NULL, BBT_CAP) == BBT_CAP, "NULL save protects nothing");
+}
+
 static void test_selftest_decide(void) {
     printf("\n-- OTA self-test decision --\n");
 
@@ -4595,6 +4706,7 @@ int main(void) {
     test_power_verdict();
     test_power_quiet_ms();
     test_power_save_schedule();
+    test_bb_stepped_save();
     test_owner();
     test_ble_session();
     test_speed_observer();

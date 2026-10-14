@@ -16,6 +16,8 @@
 #include "../../fsd_logic/fsd_blackbox_summary.h"  // fsd_blackbox_format_json
 #include "../../fsd_logic/fsd_blackbox_filter.h"   // fsd_blackbox_should_record
 #include "../../fsd_logic/fsd_readcache.h"         // FsdReadCache (download path)
+#include "../../fsd_logic/fsd_bb_save.h"          // stepped save + ring protection
+#include <new>       // std::nothrow -- the save context
 #include <stdlib.h>
 #include <string.h>
 #if defined(BLACKBOX_BACKEND_LITTLEFS)
@@ -132,6 +134,23 @@ static bool      g_ring_psram = false;
 static bool      g_want_psram = false;  // size decision from init; alloc is lazy
 
 static bool      g_armed = false;
+
+/* 🔴 A capture is saved a slice per loop pass (2026-10-14) -- see
+ * fsd_logic/fsd_bb_save.h. While a save runs, g_save.cursor is the next ring
+ * slot still to be written and bb_record() must not evict it; a new frame is
+ * dropped from the RING instead (CAN itself is unaffected). g_armed stays true
+ * until the save is finished, so blackbox_capture_pending() -- which holds the
+ * BLE download back -- covers the save too. */
+/* 🔴 A pointer, not the state: the save context lives on the heap only while a
+ * save runs. As a static it overflowed DRAM on the classic-ESP32 boards
+ * (esp32-lilygo) -- they had under 100 bytes of .bss to spare. */
+static FsdBbSave* g_save_p = nullptr;     // non-null while a disk save runs
+static uint32_t   g_save_dropped = 0;     // ring frames dropped during this save
+static inline uint32_t bb_keep_slot() {
+    return g_save_p ? fsd_bb_keep(g_save_p, g_cap) : g_cap;
+}
+static void bb_save_abort(const char* why);   // per backend, below
+static void bb_save_abort_if_named(const char* name);
 
 /* 🔴 "방금 찍은 것이 실제로 저장됐는가" 를 센다 (2026-08-31 레드팀 ①).
  *
@@ -385,6 +404,37 @@ static int bb_scan_count() {
     return n;
 }
 
+/* A .log without its .json: a save cut short by a reset or a power cut (the
+ * .json is written last, after the .log is complete). Nothing lists it -- the
+ * event list keys on .json -- and nothing ever deletes it, so it would only eat
+ * the space the next capture needs. Removed once, at boot. */
+static void bb_remove_orphan_logs() {
+    for (int round = 0; round < 32; round++) {
+        File dir = BB_FS.open(BLACKBOX_DIR);
+        if (!dir) return;
+        char victim[64] = {};
+        for (File e = dir.openNextFile(); e; e = dir.openNextFile()) {
+            const char* nm = e.name();
+            const char* dot = strstr(nm, ".log");
+            if (dot && dot[4] == '\0') {
+                char base[40], jp[64];
+                bb_basename(nm, base, sizeof(base));
+                snprintf(jp, sizeof(jp), BLACKBOX_DIR "/%s.json", base);
+                if (!BB_FS.exists(jp)) {
+                    snprintf(victim, sizeof(victim), BLACKBOX_DIR "/%s.log", base);
+                    e.close();
+                    break;
+                }
+            }
+            e.close();
+        }
+        dir.close();
+        if (victim[0] == '\0') return;
+        BB_FS.remove(victim);
+        Serial.printf("[BB] 저장 도중 끊긴 반쪽 파일을 지웠다: %s\n", victim);
+    }
+}
+
 #if defined(BLACKBOX_BACKEND_LITTLEFS)
 /* "Has this board ever mounted its filesystem?" — and the answer has to live
  * OUTSIDE that filesystem, or a format erases the very fact that says a format
@@ -470,6 +520,7 @@ static void backend_init() {
     g_fs_ok = SD.cardType() != CARD_NONE;  // can_dump_init() already mounted SD
 #endif
     if (g_fs_ok && !BB_FS.exists(BLACKBOX_DIR)) BB_FS.mkdir(BLACKBOX_DIR);
+    if (g_fs_ok) bb_remove_orphan_logs();
     g_event_count = g_fs_ok ? bb_scan_count() : 0;  // one boot-time scan
     /* +1 so the next capture strictly outranks the highest stored one, even if
      * it is taken in the same millisecond of uptime as that one was. */
@@ -604,12 +655,29 @@ static bool bb_size_of(const char* path, size_t* out) {
     return true;
 }
 
+/* The capture is written in two calls now (2026-10-14): backend_open_log()
+ * opens the .log, the loop writes it a slice per pass (do_save_step), and
+ * backend_finish() closes it and writes the .json LAST -- so a reset mid-save
+ * leaves an orphan .log (removed at boot) and never a .json naming a short
+ * file. */
+static File g_save_file;
+static bool g_save_log_open = false;
+
+static bool backend_open_log(const char* base) {
+    if (!g_fs_ok) return false;
+    char lp[64];
+    snprintf(lp, sizeof(lp), BLACKBOX_DIR "/%s.log", base);
+    g_save_file = BB_OPEN_W(lp);
+    g_save_log_open = (bool)g_save_file;
+    if (!g_save_log_open) Serial.printf("[BB] .log open failed: %s\n", lp);
+    return g_save_log_open;
+}
+
 /* Returns true only when BOTH halves of the capture are on flash and the
- * right size. `expect_frames` is how many frames the emitter was given, so
- * an empty .log can be told apart from a lost one. */
-static bool backend_store(const char* base, const char* json,
-                          uint32_t expect_frames,
-                          void (*emit)(File&)) {
+ * right size. `expect_frames` is how many frames were written, so an empty
+ * .log can be told apart from a lost one. */
+static bool backend_finish(const char* base, const char* json,
+                           uint32_t expect_frames) {
     if (!g_fs_ok) return false;
     char lp[64], jp[64];
     snprintf(lp, sizeof(lp), BLACKBOX_DIR "/%s.log", base);
@@ -618,9 +686,12 @@ static bool backend_store(const char* base, const char* json,
     bool log_ok = false, json_ok = false;
     const size_t json_len = strlen(json);
 
-    File lf = BB_OPEN_W(lp);
-    if (lf) { emit(lf); lf.flush(); lf.close(); log_ok = true; }
-    else Serial.printf("[BB] .log open failed: %s\n", lp);
+    if (g_save_log_open) {
+        g_save_file.flush();
+        g_save_file.close();
+        g_save_log_open = false;
+        log_ok = true;
+    }
 
     File jf = BB_OPEN_W(jp);
     if (jf) {
@@ -894,7 +965,8 @@ static bool backend_delete(const char* name) {
 static void backend_delete_all() {
     if (!g_fs_ok) return;
     for (;;) {
-        /* 🔴 여기도 먹인다 — disk_emit() 과 **같은 결함**이다(일곱 번째 패턴:
+        /* 🔴 여기도 먹인다 — 옛 일괄 저장(disk_emit, 2026-10-14 단계 저장으로
+         * 바뀌었다)과 **같은 결함**이었다(일곱 번째 패턴:
          * 한 실패에 문이 여럿인데 본 문만 닫는다). 한 바퀴에 파일 하나를 지우려고
          * 디렉터리를 처음부터 다시 훑으므로 서른 몇 건이면 초 단위가 되고,
          * 「전부 지우기」는 폰이 아무 때나 누를 수 있다 — 자가시험 중에도. */
@@ -1097,6 +1169,8 @@ static bool blackbox_alloc_ring() {
 
 // Free the ring and drop any pre-roll / armed capture (on disable).
 static void blackbox_free_ring() {
+    // A save in flight walks this ring; stop it before the ring goes away.
+    bb_save_abort("기록기를 껐다");
     if (g_ring) { free(g_ring); g_ring = nullptr; }
     g_cap = 0;
     g_head = g_tail = 0;
@@ -1138,8 +1212,12 @@ static void bb_record(CanBusId bus, const CanFrame& frame, uint32_t now_ms, uint
      * reaching into a global from a shared header would make that untestable.
      * The compile-time BLACKBOX_CAPTURE_ALL still works and still wins. */
     if (!blackbox_capture_all() && !fsd_blackbox_should_record(frame.id)) return;
-    if (ring_next(g_head) == g_tail) g_tail = ring_next(g_tail);  // evict oldest
-    BBFrame& s = g_ring[g_head];
+    uint32_t slot;
+    if (!fsd_bb_push(g_cap, &g_head, &g_tail, bb_keep_slot(), &slot)) {
+        g_save_dropped++;   // full ring, oldest frame not yet saved: keep it
+        return;
+    }
+    BBFrame& s = g_ring[slot];
     s.ts_ms = now_ms;
     s.id    = frame.id;
     s.bus   = (uint8_t)bus;
@@ -1147,7 +1225,6 @@ static void bb_record(CanBusId bus, const CanFrame& frame, uint32_t now_ms, uint
     s.is_tx = is_tx;
     memcpy(s.data, frame.data, s.dlc);
     if (s.dlc < 8) memset(s.data + s.dlc, 0, 8 - s.dlc);
-    g_head = ring_next(g_head);
 }
 
 void blackbox_record(CanBusId bus, const CanFrame& frame, uint32_t now_ms) {
@@ -1169,7 +1246,12 @@ void blackbox_note_ap_state(uint8_t ap_state, uint32_t now_ms) {
 
 void blackbox_arm(BBTrigger trig, const FSDState* snap, uint32_t now_ms) {
     if (g_cap == 0 || g_state == nullptr || !g_state->blackbox_enabled) return;
-    if (g_armed) return;  // already capturing; ignore until the post-roll flushes
+    if (g_armed) {  // already capturing; ignore until the post-roll flushes
+        if (g_save_p != nullptr)
+            Serial.printf("[BB] %s 는 담지 못했다 — 앞 캡처를 저장하는 중이다\n",
+                          trig_name_uc(trig));
+        return;
+    }
     g_armed = true;
     if (trig == BB_TRIG_MANUAL) g_manual_armed_n++;   // 짝은 do_flush 에서 맞춘다
     g_trig = trig;
@@ -1196,6 +1278,19 @@ void blackbox_busoff(uint32_t now_ms) {
 
 uint32_t blackbox_mark(uint32_t now_ms) {
     if (g_state == nullptr) return 0;
+    /* 🔴 **저장 중에는 거절한다** (2026-10-14, 단계 저장 검토 M-1).
+     *
+     * 저장이 loop 를 막던 때에는 이 자리에 올 수가 없었다. 이제는 온다. 그때
+     * blackbox_arm() 은 g_armed 때문에 조용히 돌아가고, 아래 `if (!g_armed)`
+     * 는 거짓이라 **성공(1)** 을 답한다 — 폰은 저장이 끝나자마자 «최신» 을
+     * 받는데 그것은 **앞 캡처**다. 위 g_manual_* 주석의 사고 그대로다.
+     * 창이 이미 닫혔으니 이번 누름은 그 파일에 없다. 0 = 거절, BLE 는
+     * REJECTED 로 답하고 사장님은 저장이 끝난 뒤 다시 누른다. 쿨다운도
+     * 소모하지 않도록 inject 보다 먼저 본다. */
+    if (g_save_p != nullptr) {
+        Serial.println("[BB] 🔴 기록하지 않았다 — 앞 캡처를 아직 저장하는 중이다. 끝난 뒤 다시 누른다.");
+        return 0;
+    }
 #if defined(BLACKBOX_BACKEND_LITTLEFS) || defined(BLACKBOX_BACKEND_SD)
     /* 🔴 자리가 없으면 **무장하지 않는다** (2026-08-31 레드팀 ①).
      *
@@ -1233,8 +1328,12 @@ uint32_t blackbox_mark(uint32_t now_ms) {
      * 반환값 = 파일이 생기기까지 남은 ms (0 이면 아무것도 무장되지 않았다).
      * 호출자는 이것으로 "지금 받으면 엉뚱한 것을 받는다" 를 알 수 있다. */
     if (!g_armed) return 0;
-    uint32_t left = (uint32_t)(g_flush_at_ms - now_ms);
-    return left ? left : 1u;   // armed 인데 0 을 돌려주지 않는다
+    /* 🔴 post-roll 이 끝나 **저장 중**이면 g_flush_at_ms 는 이미 지났다.
+     * 그대로 빼면 40억 ms 로 감겨 "41일 뒤에 받으세요" 가 된다 (단계 저장이
+     * 생긴 2026-10-14 부터 가능해졌다 — 그전에는 저장이 loop 를 막아 이
+     * 자리에 올 수 없었다). 남은 시간을 모르니 "곧" 을 뜻하는 1 을 준다. */
+    const int32_t left = (int32_t)(g_flush_at_ms - now_ms);
+    return left > 0 ? (uint32_t)left : 1u;   // armed 인데 0 을 돌려주지 않는다
 }
 
 // Build the .json summary from g_snap + the windowed frame/bus counts + timeline.
@@ -1292,141 +1391,258 @@ static void build_summary(char* out, int out_sz, uint32_t frame_count,
     fsd_blackbox_format_json(out, out_sz, &s);
 }
 
-#if defined(BLACKBOX_BACKEND_LITTLEFS) || defined(BLACKBOX_BACKEND_SD)
-// Disk emit: walk the ring window and stream candump lines into the open file.
-static uint32_t g_emit_lo, g_emit_hi, g_emit_start;
-
-/* 🔴 **감시 시계를 이 반복문 안에서 먹인다** (2026-09-22 점검 F).
- *
- * OTA 자가시험이 도는 동안(최대 5분) main.cpp 가 loop 감시 시계를 켠다. 시한은
- * **5초**다. 그런데 이 반복문은 무필터 캡처에서 프레임 **3만 장**을 LittleFS 에
- * 한 번에 쏟는다 — main.cpp 의 주석 스스로 *"바쁜 버스에서는 5초를 넘긴다"* 고
- * 적는다. 그러면 **막 구운 판을 저장 도중에 재부팅**시키고, 이미지가 아직
- * valid 가 아니라 **옛 판으로 되돌아간다.**
- *
- * 🟢 **먹이는 것이 감시를 무르게 하지 않는다.** 감시 시계가 잡으려는 것은
- * «loop 이 멈췄다» 이고, 여기서 먹이는 것은 **한 줄 한 줄 나아가고 있을 때**
- * 뿐이다. 파일 계층이 정말 멈추면 먹이는 것도 같이 멈추므로 시계는 그대로
- * 발화한다.
- *
- * ⚠️ 감시 시계가 안 켜져 있으면 `feedLoopWDT()` 는 조용한 무동작이다 — 코어가
- * 오류를 `log_e` 로 흘리는데 `CORE_DEBUG_LEVEL` 이 0 이라 찍히지 않는다. */
-#define BB_WDT_FEED_EVERY 512u
-
-static void disk_emit(File& f) {
-    char line[72];
-    bool started = false;
-    uint32_t since_feed = 0;
-    for (uint32_t i = g_tail; i != g_head; i = ring_next(i)) {
-        const BBFrame& fr = g_ring[i];
-        if (fr.ts_ms < g_emit_lo) continue;
-        if (fr.ts_ms > g_emit_hi) break;
-        if (!started) { g_emit_start = fr.ts_ms; started = true; }
-        int n = tesla_format_candump_line(line, sizeof(line), fr.ts_ms - g_emit_start,
-                                          bb_iface_name(fr),
-                                          fr.id, fr.data, fr.dlc);
-        f.write((const uint8_t*)line, n);
-        if (++since_feed >= BB_WDT_FEED_EVERY) { since_feed = 0; feedLoopWDT(); }
-    }
-}
-#endif
-
-static void do_flush() {
-    uint32_t lo = (g_trig_ms >= BLACKBOX_PRE_MS) ? g_trig_ms - BLACKBOX_PRE_MS : 0u;
-    uint32_t hi = g_trig_ms + BLACKBOX_POST_MS;
-
-    // Pass 1: window start + per-bus counts + injected (TX) frame count.
-    uint32_t count = 0, bus0 = 0, bus1 = 0, window_start = 0, txc = 0;
-    bool started = false;
-    for (uint32_t i = g_tail; i != g_head; i = ring_next(i)) {
-        const BBFrame& fr = g_ring[i];
-        if (fr.ts_ms < lo) continue;
-        if (fr.ts_ms > hi) break;
-        if (!started) { window_start = fr.ts_ms; started = true; }
-        count++;
-        if (fr.is_tx) txc++;
-        if (fr.bus == CAN_BUS_SECONDARY) bus1++; else bus0++;
-    }
-    if (!started) window_start = g_trig_ms;
-
+/* What every save starts with, whatever the backend: the window, its frame and
+ * per-bus counts, the file name and the .json summary. One walk of the ring in
+ * RAM -- milliseconds even at 40,000 frames -- so it stays synchronous. */
+/* 🔴 No .json buffer in here. The disk backend keeps one plan for the whole
+ * stepped save, statically, and 640 more bytes of .bss overflowed DRAM on the
+ * classic-ESP32 boards (esp32-lilygo, by 696 bytes). The summary is built on
+ * the stack where it is needed instead -- bb_plan_json() -- from inputs that do
+ * not change during a save: g_snap, g_trig_ms, the window, and timeline
+ * entries inside the window (newer ones post-date hi and are filtered out). */
+#define BB_JSON_MAX 640
+struct BBSavePlan {
+    uint32_t lo, hi;
+    uint32_t count, bus0, bus1, window_start, txc;
     char base[40];
+};
+
+static void bb_plan_save(BBSavePlan* p) {
+    p->lo = (g_trig_ms >= BLACKBOX_PRE_MS) ? g_trig_ms - BLACKBOX_PRE_MS : 0u;
+    p->hi = g_trig_ms + BLACKBOX_POST_MS;
+
+    // Window start + per-bus counts + injected (TX) frame count.
+    p->count = p->bus0 = p->bus1 = p->window_start = p->txc = 0;
+    bool started = false;
+    for (uint32_t i = g_tail; i != g_head; i = ring_next(i)) {
+        const BBFrame& fr = g_ring[i];
+        if (fr.ts_ms < p->lo) continue;
+        if (fr.ts_ms > p->hi) break;
+        if (!started) { p->window_start = fr.ts_ms; started = true; }
+        p->count++;
+        if (fr.is_tx) p->txc++;
+        if (fr.bus == CAN_BUS_SECONDARY) p->bus1++; else p->bus0++;
+    }
+    if (!started) p->window_start = g_trig_ms;
+
     /* g_name_base, not a bare millis(): see the note on g_name_base. Without it
      * a capture taken after a reboot sorts BELOW one taken before it, and
      * "download the latest" hands over the wrong file while reporting success. */
-    snprintf(base, sizeof(base), "evt_%lu_%s",
+    snprintf(p->base, sizeof(p->base), "evt_%lu_%s",
              (unsigned long)(g_name_base + g_trig_ms), trig_name(g_trig));
+}
 
-    char json[640];
-    build_summary(json, sizeof(json), count, window_start, bus0, bus1);
+static void bb_plan_json(const BBSavePlan* p, char* json, size_t cap) {
+    build_summary(json, (int)cap, p->count, p->window_start, p->bus0, p->bus1);
 
     // The shared summary formatter (fsd_logic, pure) is a per-event summary, not
     // a per-frame record list, so direction is reported here as a count: splice a
     // "tx_frames" field in before the closing brace so a decoded summary tells you
     // how many of the frames were ours. Per-frame direction lives in the .log via
     // the can0TX/can1TX interface tag.
-    {
-        size_t jl = strlen(json);
-        if (jl > 0 && json[jl - 1] == '}' && jl + 24 < sizeof(json))
-            snprintf(json + jl - 1, sizeof(json) - (jl - 1),
-                     ",\"tx_frames\":%lu}", (unsigned long)txc);
-    }
+    size_t jl = strlen(json);
+    if (jl > 0 && json[jl - 1] == '}' && jl + 24 < cap)
+        snprintf(json + jl - 1, cap - (jl - 1),
+                 ",\"tx_frames\":%lu}", (unsigned long)p->txc);
+}
 
-    /* 🔴 **얼마나 걸리는지 보드가 말하게 한다** (2026-09-22 점검 F).
-     *
-     * 이 저장이 5초를 넘기는지 **잰 적이 한 번도 없었다** — 그런데 그 «넘길 수도
-     * 있다» 가 위 감시 시계를 자가시험 동안으로 좁혀 둔 근거였다. 재지 않은 수를
-     * 근거로 쓰는 것이 이 저장소의 열두 번째 패턴이라, 다음 캡처부터 실제 값이
-     * 남는다. */
-    const uint32_t flush_t0 = millis();
+/* A capture made it to storage: count it and say so. */
+static void bb_announce_saved(const char* base, uint32_t count, uint32_t bus0,
+                              uint32_t bus1, uint32_t ms, uint32_t passes,
+                              uint32_t dropped) {
+    g_captures++;
+    /* 파일이 실제로 생겼을 때만 짝을 맞춘다. 실패 경로는 여기에 닿지 못하므로
+     * 어긋난 채로 남는다 — 그게 신호다. */
+    if (g_trig == BB_TRIG_MANUAL) g_manual_saved_n = g_manual_armed_n;
+    /* 🔴 **얼마나 걸리는지 보드가 말하게 한다** (2026-09-22 점검 F). 단계
+     * 저장이 된 뒤로는 그 시간 동안 loop 이 멈추지 않는다 — 몇 번에 나눠
+     * 썼는지와, 그 사이 링이 받지 못한 프레임 수를 같이 남긴다. */
+    Serial.printf("[BB] flushed %s  frames=%lu (can0=%lu can1=%lu)  %lu ms  "
+                  "passes=%lu  ring-dropped=%lu\n",
+                  base, (unsigned long)count, (unsigned long)bus0, (unsigned long)bus1,
+                  (unsigned long)ms, (unsigned long)passes, (unsigned long)dropped);
+}
 
 #if defined(BLACKBOX_BACKEND_LITTLEFS) || defined(BLACKBOX_BACKEND_SD)
-    if (!bb_store_fits(count, strlen(json), base)) return;   // nothing written
-    g_emit_lo = lo; g_emit_hi = hi;
-    const bool stored = backend_store(base, json, count, disk_emit);
-#else
-    // RAM: freeze the windowed frames into a contiguous buffer for download.
-    BBFrame* frozen = (BBFrame*)malloc((size_t)(count ? count : 1) * sizeof(BBFrame));
-    uint32_t fn = 0;
-    if (frozen) {
-        for (uint32_t i = g_tail; i != g_head && fn < count; i = ring_next(i)) {
-            const BBFrame& fr = g_ring[i];
-            if (fr.ts_ms < lo) continue;
-            if (fr.ts_ms > hi) break;
-            frozen[fn++] = fr;
-        }
-        backend_store_ram(base, json, frozen, fn, window_start);
-        free(frozen);
-    } else {
-        Serial.println("[BB] flush alloc failed");
-    }
-    const bool stored = (frozen != nullptr);
+/* ── Disk: saved a slice per loop pass (2026-10-14) ──────────────────────────
+ *
+ * 🔴 It used to be one call that wrote the whole window. The loop that makes
+ * that call is the loop that drains CAN, so for the whole save (seconds on a
+ * busy bus) nothing was received -- 22,947 frames lost on can0 for one save in
+ * a bench replay -- and a rule switch pressed during it fired late, after the
+ * save, as a SHORT press (red-team 2026-10-04, 2-5).
+ *
+ * Now blackbox_tick() writes at most BB_SAVE_SLICE lines per call and returns.
+ * The bookkeeping (and the ring protection that makes it safe) is in
+ * fsd_logic/fsd_bb_save.h and host-tested. Idea from hypery11 v2.17-beta.1
+ * (#245). */
+#ifndef BB_SAVE_SLICE
+#define BB_SAVE_SLICE 32u
 #endif
-    /* 🔴 Count and announce a capture only when it is actually on flash.
-     * "flushed" used to print unconditionally -- including after an open that
-     * failed -- so a lost capture and a stored one produced the same line. */
-    if (!stored) {
-        Serial.printf("[BB] 🔴 %s 를 저장하지 못했다 — 다시 캡처해야 한다\n", base);
-        return;
+
+struct BBSaveCtx {
+    FsdBbSave  save;
+    BBSavePlan plan;
+    uint32_t   emit_start;
+    uint32_t   t0;
+    uint32_t   passes;
+};
+static BBSaveCtx* g_sv = nullptr;   // non-null from begin to finish/abort
+static bool       g_save_short = false;   // a .log write came back short
+
+static void bb_save_free() {
+    g_save_p = nullptr;   // bb_record() stops protecting before the memory goes
+    delete g_sv;
+    g_sv = nullptr;
+}
+
+static uint32_t bb_ts_at(void*, uint32_t idx) { return g_ring[idx].ts_ms; }
+
+static void bb_emit_line(void*, uint32_t idx) {
+    const BBFrame& fr = g_ring[idx];
+    char line[72];
+    int n = tesla_format_candump_line(line, sizeof(line), fr.ts_ms - g_sv->emit_start,
+                                      bb_iface_name(fr), fr.id, fr.data, fr.dlc);
+    if (n > 0 && g_save_file.write((const uint8_t*)line, (size_t)n) != (size_t)n)
+        g_save_short = true;   // disk full mid-save: say so at the end
+}
+
+/* Drop a save that cannot finish: the recorder was switched off (the ring is
+ * about to be freed) or every capture is being deleted. Removes the partial
+ * .log so nothing half-written is left behind, and disarms. */
+static void bb_save_abort(const char* why) {
+    if (!g_sv) return;
+    if (g_save_log_open) {
+        g_save_file.close();
+        g_save_log_open = false;
     }
-    g_captures++;
-    /* 파일이 실제로 생겼을 때만 짝을 맞춘다. 위 early return 들은
-     * 여기에 닿지 못하므로 어긋난 채로 남는다 — 그게 신호다. */
-    if (g_trig == BB_TRIG_MANUAL) g_manual_saved_n = g_manual_armed_n;
-    Serial.printf("[BB] flushed %s  frames=%lu (can0=%lu can1=%lu)  %lu ms\n",
-                  base, (unsigned long)count, (unsigned long)bus0, (unsigned long)bus1,
-                  (unsigned long)(millis() - flush_t0));
+    char lp[64];
+    snprintf(lp, sizeof(lp), BLACKBOX_DIR "/%s.log", g_sv->plan.base);
+    BB_FS.remove(lp);
+    Serial.printf("[BB] 🔴 %s 저장을 멈췄다 (%s) — 이 캡처는 남지 않았다\n",
+                  g_sv->plan.base, why);
+    bb_save_free();
+    g_armed = false;
+}
+
+static void bb_save_abort_if_named(const char* name) {
+    if (g_sv && strcmp(name, g_sv->plan.base) == 0) bb_save_abort("그 캡처를 지웠다");
+}
+
+/* Post-roll is over: plan the save, make room, open the .log. Returns false
+ * when nothing will be written (the caller disarms). */
+static bool do_save_begin() {
+    g_sv = new (std::nothrow) BBSaveCtx();
+    if (!g_sv) {
+        Serial.println("[BB] 🔴 저장할 메모리가 없다 — 이 캡처는 남지 않았다");
+        return false;
+    }
+    BBSavePlan& plan = g_sv->plan;
+    bb_plan_save(&plan);
+    g_sv->t0 = millis();
+    g_sv->passes = 0;
+    g_save_dropped = 0;
+    g_save_short = false;
+    char json[BB_JSON_MAX];
+    bb_plan_json(&plan, json, sizeof(json));
+    if (!bb_store_fits(plan.count, strlen(json), plan.base)) { bb_save_free(); return false; }
+    if (!backend_open_log(plan.base)) {
+        Serial.printf("[BB] 🔴 %s 를 저장하지 못했다 — 다시 캡처해야 한다\n", plan.base);
+        bb_save_free();
+        return false;
+    }
+    g_sv->emit_start = plan.window_start;
+    fsd_bb_save_begin(&g_sv->save, g_tail, plan.lo, plan.hi);
+    g_save_p = &g_sv->save;   // from here bb_record() protects the cursor
+    return true;
+}
+
+/* One slice. Returns true when the save is over (stored or not). */
+static bool do_save_step() {
+    g_sv->passes++;
+    if (!fsd_bb_save_step(&g_sv->save, g_cap, g_head, BB_SAVE_SLICE,
+                          bb_ts_at, bb_emit_line, nullptr))
+        return false;
+
+    const BBSavePlan plan = g_sv->plan;   // copied: the context is freed below
+    const uint32_t written = g_sv->save.written;
+    const uint32_t ms = millis() - g_sv->t0;
+    const uint32_t passes = g_sv->passes;
+    bb_save_free();
+
+    char json[BB_JSON_MAX];
+    bb_plan_json(&plan, json, sizeof(json));
+    const bool stored = backend_finish(plan.base, json, written);
+    if (!stored) {
+        Serial.printf("[BB] 🔴 %s 를 저장하지 못했다 — 다시 캡처해야 한다\n", plan.base);
+        return true;
+    }
+    bb_announce_saved(plan.base, plan.count, plan.bus0, plan.bus1,
+                      ms, passes, g_save_dropped);
+    /* The .json counts were taken when the save began; a frame stamped exactly
+     * `hi` that arrived after that is written but not counted. Rare, harmless,
+     * and said out loud rather than left as a silently wrong number. */
+    if (written != plan.count)
+        Serial.printf("[BB] ⚠️ .log 에 %lu 줄 · .json 은 %lu 개라고 적었다 (저장 시작 뒤 같은 ms 프레임)\n",
+                      (unsigned long)written, (unsigned long)plan.count);
+    if (g_save_short)
+        Serial.printf("[BB] 🔴 %s 의 .log 일부가 써지지 않았다 — 저장 공간을 확인하라\n", plan.base);
 #if defined(BLACKBOX_BACKEND_LITTLEFS)
     /* Say how much room is left, every time. Without this the operator only
      * finds out at the moment a capture is refused -- which in the car is the
      * one moment there is no time to deal with it. */
     {
         uint32_t have = bb_free_bytes();
-        uint32_t per  = (count ? count : 1u) * BB_BYTES_PER_LINE;
+        uint32_t per  = (plan.count ? plan.count : 1u) * BB_BYTES_PER_LINE;
         Serial.printf("[BB] 남은 공간 %lu KB — 이만한 캡처 약 %lu 개분\n",
                       (unsigned long)(have / 1024u),
                       (unsigned long)(per ? (have / per) : 0u));
     }
 #endif
+    return true;
+}
+
+void blackbox_tick(uint32_t now_ms) {
+    if (!g_armed) return;
+    if (g_sv) {
+        if (do_save_step()) g_armed = false;
+        return;
+    }
+    if ((int32_t)(now_ms - g_flush_at_ms) < 0) return;  // post-roll still running
+    if (!do_save_begin()) g_armed = false;
+    /* The first slice waits for the next pass: planning walked the ring and may
+     * have deleted old captures to make room, and CAN gets drained first. */
+}
+
+#else  // ── RAM backend: a memcpy, never long enough to matter ───────────────
+
+static void bb_save_abort(const char*) {}
+static void bb_save_abort_if_named(const char*) {}
+
+static void do_flush() {
+    BBSavePlan p;
+    bb_plan_save(&p);
+    char json[BB_JSON_MAX];
+    bb_plan_json(&p, json, sizeof(json));
+    const uint32_t t0 = millis();
+    // RAM: freeze the windowed frames into a contiguous buffer for download.
+    BBFrame* frozen = (BBFrame*)malloc((size_t)(p.count ? p.count : 1) * sizeof(BBFrame));
+    uint32_t fn = 0;
+    if (frozen) {
+        for (uint32_t i = g_tail; i != g_head && fn < p.count; i = ring_next(i)) {
+            const BBFrame& fr = g_ring[i];
+            if (fr.ts_ms < p.lo) continue;
+            if (fr.ts_ms > p.hi) break;
+            frozen[fn++] = fr;
+        }
+        backend_store_ram(p.base, json, frozen, fn, p.window_start);
+        free(frozen);
+    } else {
+        Serial.println("[BB] flush alloc failed");
+        Serial.printf("[BB] 🔴 %s 를 저장하지 못했다 — 다시 캡처해야 한다\n", p.base);
+        return;
+    }
+    bb_announce_saved(p.base, p.count, p.bus0, p.bus1, millis() - t0, 1u, 0u);
 }
 
 void blackbox_tick(uint32_t now_ms) {
@@ -1435,6 +1651,7 @@ void blackbox_tick(uint32_t now_ms) {
     do_flush();
     g_armed = false;
 }
+#endif
 
 bool blackbox_capture_all() {
 #ifdef BLACKBOX_CAPTURE_ALL
@@ -1548,10 +1765,15 @@ bool blackbox_latest_name(char* out, size_t cap) {
 
 bool blackbox_delete(const char* name) {
     if (!bb_name_ok(name)) return false;
+    bb_save_abort_if_named(name);
     return backend_delete(name);
 }
 
-void blackbox_delete_all() { backend_delete_all(); }
+void blackbox_delete_all() {
+    // The in-flight .log is in the directory being emptied; stop writing it first.
+    bb_save_abort("전부 지우기");
+    backend_delete_all();
+}
 
 uint32_t blackbox_free_bytes() {
     // 🔴 bb_free_bytes() only exists inside the LittleFS/SD section. The RAM
