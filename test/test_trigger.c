@@ -389,12 +389,91 @@ static void test_a_switch_we_drive_is_not_exempt(void) {
           "one switch has an emitter (the horn), found %u", drivable_switches);
 }
 
+/* 🔴 THE TEST ABOVE STOPS AT THE FLAG. This one feeds frames.
+ *
+ * test_a_switch_we_drive_is_not_exempt() proves fsd_trig_disturbed() raises
+ * the quiet flag for the horn switch -- and it was green while the flag did
+ * nothing: the SWITCH branch of fsd_trig_on_frame() never asked
+ * fsd_trig_is_quiet(), only STATE and DELTA did (red-team 2026-10-04, 1-1).
+ * Today the MCP2515 does not receive its own transmissions, so our horn press
+ * never came back; the day a second channel listens on the same bus, a rule
+ * "horn pressed -> light horn" would have re-fired on its own output.
+ *
+ * So: our press, as the bus would show it, inside the window -> no event.
+ * A real press after the window -> an event. And a switch we cannot press is
+ * never silenced, whatever else was disturbed. */
+static void horn_frame(uint8_t* d, bool pressed) {
+    memset(d, 0, 8);
+    d[0] = (uint8_t)(0x00u /* mux 0 */ | (pressed ? 0x04u : 0x00u));
+}
+
+static int count_kind(uint8_t n, FsdTriggerKind k) {
+    int c = 0;
+    for(uint8_t i = 0; i < n; i++)
+        if(g_ev[i].signal == FSD_SIG_HORN_SW && g_ev[i].kind == k) c++;
+    return c;
+}
+
+static void test_our_horn_press_does_not_come_back(void) {
+    FsdTriggers t;
+    fsd_trig_init(&t);
+    uint8_t f[8];
+    int press = 0;
+
+    horn_frame(f, false);
+    fsd_trig_on_frame(&t, 0x3C2u, f, 8, 900, g_ev, EVBUF);   // establish: up
+
+    // We press the horn at 1000. If our release frame is refused, the car's
+    // own next mux-0 frame (~100 ms later) is what lets go -- the longest our
+    // press can look held, and well past the 30 ms debounce.
+    fsd_trig_disturbed(&t, FSD_SIG_HORN_SW, 1000);
+    horn_frame(f, true);
+    press += count_kind(fsd_trig_on_frame(&t, 0x3C2u, f, 8, 1001, g_ev, EVBUF), FSD_TRIG_PRESS);
+    press += count_kind(fsd_trig_tick(&t, 1050, g_ev, EVBUF), FSD_TRIG_PRESS);
+    horn_frame(f, false);
+    press += count_kind(fsd_trig_on_frame(&t, 0x3C2u, f, 8, 1101, g_ev, EVBUF), FSD_TRIG_PRESS);
+    press += count_kind(fsd_trig_tick(&t, 1450, g_ev, EVBUF), FSD_TRIG_PRESS);
+    CHECK(press == 0, "our own horn press inside the window fires nothing (got %d)", press);
+
+    // A person presses the horn after the window: that is the owner, and it
+    // must come through.
+    press = 0;
+    horn_frame(f, true);
+    press += count_kind(fsd_trig_on_frame(&t, 0x3C2u, f, 8, 2000, g_ev, EVBUF), FSD_TRIG_PRESS);
+    press += count_kind(fsd_trig_tick(&t, 2050, g_ev, EVBUF), FSD_TRIG_PRESS);
+    horn_frame(f, false);
+    press += count_kind(fsd_trig_on_frame(&t, 0x3C2u, f, 8, 2100, g_ev, EVBUF), FSD_TRIG_PRESS);
+    press += count_kind(fsd_trig_tick(&t, 2500, g_ev, EVBUF), FSD_TRIG_PRESS);
+    CHECK(press == 1, "a real press after the window still fires (got %d)", press);
+
+    // The time-driven path too: a hold that started before the window and
+    // crosses the long-press threshold inside it is dropped like a frame
+    // event would be. (Without the guard in fsd_trig_tick() this is the
+    // only case that fires -- a mutant that removes it must turn this red.)
+    int longs = 0;
+    horn_frame(f, true);
+    fsd_trig_on_frame(&t, 0x3C2u, f, 8, 4000, g_ev, EVBUF);        // held from 4000
+    fsd_trig_disturbed(&t, FSD_SIG_HORN_SW, 4200);                  // quiet until 4700
+    longs += count_kind(fsd_trig_tick(&t, 4590, g_ev, EVBUF), FSD_TRIG_LONG); // 590 ms: not yet
+    longs += count_kind(fsd_trig_tick(&t, 4610, g_ev, EVBUF), FSD_TRIG_LONG); // 610 ms: long, quiet
+    longs += count_kind(fsd_trig_tick(&t, 4650, g_ev, EVBUF), FSD_TRIG_LONG);
+    CHECK(longs == 0, "a long press reached inside the window is dropped (got %d)", longs);
+    horn_frame(f, false);
+    fsd_trig_on_frame(&t, 0x3C2u, f, 8, 4800, g_ev, EVBUF);
+
+    // Suppression is by EVENT time, not by when the press began. That is
+    // enough because our own press cannot look held for longer than the car's
+    // next mux-0 frame (~100 ms) -- far inside the 500 ms window -- so its
+    // release, which is when a level switch reports, always lands inside.
+}
+
 int main(void) {
     printf("test_trigger\n");
     test_car_switches_are_level();
     test_first_frame_is_not_a_transition();
     test_our_own_writes_go_quiet();
     test_a_switch_we_drive_is_not_exempt();
+    test_our_horn_press_does_not_come_back();
     test_wrong_multiplex_changes_nothing();
     test_scroll_is_a_count_not_a_level();
     test_the_second_bank_is_not_the_first();
