@@ -153,7 +153,19 @@ uint8_t fsd_trig_on_frame(FsdTriggers* t, uint32_t can_id, const uint8_t* data, 
             const FsdBtnEvent e =
                 fsd_btn_report(bank, index_in_bank(slot), v != 0, now_ms);
             const FsdTriggerKind k = kind_of(e);
-            if(k != FSD_TRIG_NONE) emit(out, max_out, &n, s, k, 0, now_ms);
+            /* 🔴 The press machine is fed EVERY frame, quiet or not, so its
+             * idea of up/down never drifts from the bus; only the EVENT is
+             * dropped while the switch is quiet. Skipping the frame instead
+             * would lose a release and turn a later frame into a phantom
+             * long press.
+             *
+             * This line did not exist until 2026-10-14 (red-team 1-1):
+             * fsd_trig_disturbed() raised the flag for the horn switch and
+             * nothing on this path read it. A switch we cannot press never
+             * has the flag raised (see fsd_trig_disturbed), so for every
+             * other switch this is a no-op. */
+            if(k != FSD_TRIG_NONE && !fsd_trig_is_quiet(t, s, now_ms))
+                emit(out, max_out, &n, s, k, 0, now_ms);
             break;
         }
 
@@ -192,7 +204,10 @@ uint8_t fsd_trig_tick(FsdTriggers* t, uint32_t now_ms, FsdTriggerEvent* out, uin
         FsdButtons* bank = bank_of(t, slot);
         if(!bank) continue;
         const FsdTriggerKind k = kind_of(fsd_btn_tick(bank, index_in_bank(slot), now_ms));
-        if(k != FSD_TRIG_NONE) emit(out, max_out, &n, s, k, 0, now_ms);
+        // Same rule as the frame path: time-driven events (long, stuck,
+        // a debounced press) are dropped while the switch is quiet.
+        if(k != FSD_TRIG_NONE && !fsd_trig_is_quiet(t, s, now_ms))
+            emit(out, max_out, &n, s, k, 0, now_ms);
     }
     return n;
 }
