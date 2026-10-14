@@ -2732,6 +2732,89 @@ static void test_power_quiet_ms(void) {
           fsd_pwr_quiet_ms(20000u, 0xFFFFFF00u, true));
 }
 
+/* Drive the save scheduler like the shim does: one call per loop pass. Returns
+ * how many writes it asked for over [from, to) in steps of `step` ms. */
+static unsigned pwr_writes(FsdPwrSaveSched* s, uint32_t from, uint32_t to, uint32_t step,
+                           uint32_t last_rx, bool seen) {
+    unsigned n = 0;
+    for(uint32_t t = from; t < to; t += step) {
+        if(fsd_pwr_save_due(s, t, fsd_pwr_quiet_ms(t, seen ? last_rx : 0u, seen), seen)) n++;
+    }
+    return n;
+}
+
+static void test_power_save_schedule(void) {
+    printf("\n-- power log: no flash writes on a busy bus --\n");
+    FsdPwrSaveSched s;
+
+    // An hour of driving: frames every 10 ms. The old shim wrote 60 times.
+    fsd_pwr_save_init(&s);
+    unsigned busy = 0;
+    for(uint32_t t = 1000u; t < 3600000u; t += 10u)
+        if(fsd_pwr_save_due(&s, t, fsd_pwr_quiet_ms(t, t, true), true)) busy++;
+    CHECK(busy == 0u, "an hour of traffic -> no writes, got %u", busy);
+    CHECK(s.on_flash == FSD_PWR_CLAIM_NONE, "nothing claimed after a busy session");
+
+    // The car falls asleep at 3,600,000. quiet becomes non-zero 10 s later and
+    // the first write comes then, not a minute later -- a switched feed may
+    // drop us soon after the bus goes quiet.
+    const uint32_t sleep_at = 3600000u;
+    CHECK(!fsd_pwr_save_due(&s, sleep_at + FSD_PWR_QUIET_MS - 1u,
+                            fsd_pwr_quiet_ms(sleep_at + FSD_PWR_QUIET_MS - 1u, sleep_at, true), true),
+          "bus not yet quiet -> no write");
+    CHECK(fsd_pwr_save_due(&s, sleep_at + FSD_PWR_QUIET_MS,
+                           fsd_pwr_quiet_ms(sleep_at + FSD_PWR_QUIET_MS, sleep_at, true), true),
+          "entering quiet -> write at once");
+    CHECK(s.on_flash == FSD_PWR_CLAIM_QUIET, "flash now claims QUIET");
+
+    // While quiet, refreshed every FSD_PWR_SAVE_QUIET_MS (unchanged behaviour).
+    // Last write at sleep_at+10000; the window runs to sleep_at+70000 inclusive,
+    // so refreshes land at +20000 ... +70000.
+    unsigned q = pwr_writes(&s, sleep_at + FSD_PWR_QUIET_MS + 100u,
+                            sleep_at + FSD_PWR_QUIET_MS + 60000u + 1u, 100u, sleep_at, true);
+    CHECK(q == 6u, "a quiet minute -> 6 refreshes, got %u", q);
+
+    // 🔴 The trap: the car wakes and drives. Flash still says QUIET; a power cut
+    // now would be read at boot as "quiet, then power lost" = SWITCHED. One
+    // correcting write, at the first busy tick, and then nothing.
+    const uint32_t wake_at = 7200000u;
+    CHECK(fsd_pwr_save_due(&s, wake_at, fsd_pwr_quiet_ms(wake_at, wake_at, true), true),
+          "re-wake with QUIET on flash -> one correcting write");
+    CHECK(s.on_flash == FSD_PWR_CLAIM_BUSY, "flash now claims BUSY");
+    unsigned after = 0;
+    for(uint32_t t = wake_at + 10u; t < wake_at + 3600000u; t += 10u)
+        if(fsd_pwr_save_due(&s, t, fsd_pwr_quiet_ms(t, t, true), true)) after++;
+    CHECK(after == 0u, "the rest of the drive -> no writes, got %u", after);
+
+    // And what the boot would conclude from the record the correction wrote.
+    FsdPwrRecord rec = {true, wake_at, 0u, true};
+    CHECK(fsd_pwr_verdict(FSD_PWR_RESET_POWERON, &rec) == FSD_PWR_NO_SLEEP,
+          "cut during the drive -> NO_SLEEP, not SWITCHED");
+
+    // Never heard a frame (wiring fault): nothing to disturb, so the old
+    // 60 s cadence stays and the next boot can say NO_BUS.
+    fsd_pwr_save_init(&s);
+    // Writes at 60 s, 120 s and 180 s (window inclusive of 180 s).
+    unsigned nb = pwr_writes(&s, 0u, 180000u + 1u, 100u, 0u, false);
+    CHECK(nb == 3u, "three silent minutes -> 3 writes, got %u", nb);
+    CHECK(s.on_flash == FSD_PWR_CLAIM_NO_BUS, "flash claims NO_BUS");
+    // First frame after a NO_BUS write: correct it once, the same trap.
+    CHECK(fsd_pwr_save_due(&s, 180500u, fsd_pwr_quiet_ms(180500u, 180500u, true), true),
+          "first frame with NO_BUS on flash -> one correcting write");
+    CHECK(!fsd_pwr_save_due(&s, 180510u, fsd_pwr_quiet_ms(180510u, 180510u, true), true),
+          "...and only one");
+
+    // Frames within the first minute (the normal boot): no NO_BUS write ever
+    // happened, so the first frame costs nothing.
+    fsd_pwr_save_init(&s);
+    CHECK(!fsd_pwr_save_due(&s, 500u, 0u, false), "no frame yet, 0.5 s in -> no write");
+    CHECK(!fsd_pwr_save_due(&s, 900u, fsd_pwr_quiet_ms(900u, 900u, true), true),
+          "first frame on a clean session -> no write");
+
+    // NULL is not a crash.
+    CHECK(!fsd_pwr_save_due(NULL, 0u, 0u, true), "NULL scheduler -> no write");
+}
+
 static void test_selftest_decide(void) {
     printf("\n-- OTA self-test decision --\n");
 
@@ -4511,6 +4594,7 @@ int main(void) {
 
     test_power_verdict();
     test_power_quiet_ms();
+    test_power_save_schedule();
     test_owner();
     test_ble_session();
     test_speed_observer();

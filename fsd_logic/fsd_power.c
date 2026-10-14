@@ -110,3 +110,41 @@ const char* fsd_pwr_verdict_str(FsdPwrVerdict v) {
     default: return "no verdict yet";
     }
 }
+
+void fsd_pwr_save_init(FsdPwrSaveSched* s) {
+    if(!s) return;
+    s->on_flash = FSD_PWR_CLAIM_NONE;
+    s->last_write_ms = 0u;
+}
+
+bool fsd_pwr_save_due(FsdPwrSaveSched* s, uint32_t now_ms, uint32_t quiet_ms, bool seen_any) {
+    if(!s) return false;
+
+    const FsdPwrClaim want = !seen_any       ? FSD_PWR_CLAIM_NO_BUS :
+                             (quiet_ms > 0u) ? FSD_PWR_CLAIM_QUIET :
+                                               FSD_PWR_CLAIM_BUSY;
+
+    if(want == FSD_PWR_CLAIM_BUSY) {
+        /* Frames are flowing: a flash stall here drops them. The one write
+         * allowed is the correction -- a QUIET or NO_BUS claim left on flash
+         * would be read after a power cut mid-drive as SWITCHED / NO_BUS. */
+        if(s->on_flash != FSD_PWR_CLAIM_QUIET && s->on_flash != FSD_PWR_CLAIM_NO_BUS)
+            return false;
+    } else {
+        /* No traffic to disturb. Entering quiet writes at once (a switched feed
+         * may drop us soon after); otherwise the cadence for this claim. A
+         * NO_BUS claim waits a full period even on a fresh session, so the
+         * normal boot -- first frame within a second -- never writes one and
+         * then never has to correct it on a busy bus. */
+        const uint32_t period = (want == FSD_PWR_CLAIM_QUIET) ? FSD_PWR_SAVE_QUIET_MS
+                                                              : FSD_PWR_SAVE_NO_BUS_MS;
+        const bool entering_quiet = (want == FSD_PWR_CLAIM_QUIET) &&
+                                    (s->on_flash != FSD_PWR_CLAIM_QUIET);
+        /* Unsigned difference: correct across the 49-day millis() wrap. */
+        if(!entering_quiet && (uint32_t)(now_ms - s->last_write_ms) < period) return false;
+    }
+
+    s->on_flash = want;
+    s->last_write_ms = now_ms;
+    return true;
+}
