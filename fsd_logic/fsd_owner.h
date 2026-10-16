@@ -39,11 +39,29 @@ extern "C" {
 
 #define FSD_OWNER_ADDR_LEN 6u
 
+/** Bytes kept from a hash of the bond's keys (LTK + IRK).
+ *
+ *  🔴 Red team 2026-10-16, N-3. The identity address is something the peer
+ *  SAYS during key distribution, and NimBLE stores it unchecked -- with Just
+ *  Works there is nothing to check it against. So an address match proved
+ *  nothing: a stranger could pair fresh, claim the owner's address, and pass
+ *  every per-write check. What a stranger cannot reproduce is the bond the
+ *  owner's phone already holds -- a new pairing makes new keys. So the owner is
+ *  the address AND a fingerprint of those keys. Eight bytes of a hash is plenty
+ *  to tell two random 128-bit keys apart and keeps the key itself out of our
+ *  own NVS record. */
+#define FSD_OWNER_KEY_FP_LEN 8u
+
 /** The enrolled owner, as persisted. `enrolled == false` means nobody yet. */
 typedef struct {
     bool    enrolled;
     uint8_t type;                       /* BLE address type, compared too */
     uint8_t addr[FSD_OWNER_ADDR_LEN];   /* identity address, not the RPA */
+    /* false = enrolled before 2026-10-16, when no keys were recorded. The next
+     * reconnect records them (FSD_OWNER_ADOPT_KEY) instead of locking the owner
+     * out after a firmware update. */
+    bool    keyed;
+    uint8_t key_fp[FSD_OWNER_KEY_FP_LEN];
 } FsdOwner;
 
 typedef enum {
@@ -51,6 +69,8 @@ typedef enum {
     FSD_OWNER_MATCH,      /* this is the owner */
     FSD_OWNER_REFUSE,     /* someone else — refuse commands */
     FSD_OWNER_BAD_ADDR,   /* the peer has no usable identity yet */
+    FSD_OWNER_ADOPT_KEY,  /* the owner, enrolled without keys: record these */
+    FSD_OWNER_REKEYED,    /* the owner's ADDRESS on a different bond — refuse */
 } FsdOwnerVerdict;
 
 /**
@@ -72,6 +92,30 @@ bool fsd_owner_addr_valid(uint8_t type, const uint8_t* addr);
  */
 FsdOwnerVerdict fsd_owner_check(const FsdOwner* stored, uint8_t type,
                                 const uint8_t* addr, bool window_open);
+
+/**
+ * Decide what to do about a peer that has just bonded or re-encrypted, knowing
+ * the bond's key fingerprint.
+ *
+ * @param key_fp  FSD_OWNER_KEY_FP_LEN bytes for the bond in use, or NULL when
+ *                it could not be read. NULL never matches a keyed owner.
+ *
+ * fsd_owner_check() is this with key_fp == NULL.
+ */
+FsdOwnerVerdict fsd_owner_check_bond(const FsdOwner* stored, uint8_t type,
+                                     const uint8_t* addr, const uint8_t* key_fp,
+                                     bool window_open);
+
+/**
+ * May this peer, on this bond, send commands?
+ *
+ * Asked per write. A keyed owner needs both the address and the keys; a
+ * key-less (legacy) owner needs the address, as before. With nobody enrolled
+ * any resolved identity may (trust on first use -- enrolment happens at bond
+ * time, before any write can arrive).
+ */
+bool fsd_owner_allows(const FsdOwner* stored, uint8_t type, const uint8_t* addr,
+                      const uint8_t* key_fp);
 
 /** True when the two identities are the same peer. */
 bool fsd_owner_same(const FsdOwner* stored, uint8_t type, const uint8_t* addr);
@@ -131,6 +175,31 @@ bool fsd_ble_session_teardown(uint16_t served, uint16_t owner,
  */
 bool fsd_ble_session_apply_ok(bool owner_present, uint16_t served,
                               uint16_t parked_on);
+
+/** How long a link may stay up without turning out to be the owner.
+ *
+ *  🔴 Red team 2026-10-16, N-2. NimBLE stops advertising when a peer connects
+ *  and this firmware only restarted it on a disconnect, so ONE stranger that
+ *  connected and sat there kept the owner's phone out entirely -- the
+ *  "serve the owner when it arrives" logic never got an owner to serve. The
+ *  board now keeps advertising and asks every link to encrypt at once; a
+ *  bonded owner re-encrypts within a second or two, a first pairing takes a
+ *  tap on the phone. Thirty seconds is that tap with room to spare. */
+#define FSD_BLE_STRANGER_GRACE_MS 30000u
+
+/**
+ * Should this link be dropped?
+ *
+ * @param who           the link
+ * @param owner         handle the owner authenticated on, or FSD_BLE_CONN_NONE
+ * @param since_ms      when the link came up
+ *
+ * True once a link that is not the owner's has been up for
+ * FSD_BLE_STRANGER_GRACE_MS. Never for the owner's link; never for
+ * FSD_BLE_CONN_NONE. Wrap-safe.
+ */
+bool fsd_ble_should_evict(uint16_t who, uint16_t owner, uint32_t since_ms,
+                          uint32_t now_ms);
 
 #ifdef __cplusplus
 }
