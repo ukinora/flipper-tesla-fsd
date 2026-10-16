@@ -66,6 +66,10 @@ FsdOwnerVerdict fsd_owner_check_bond(const FsdOwner* stored, uint8_t type,
          * made by the phone that enrolled, so take its keys. */
         if(!stored->keyed) return key_fp ? FSD_OWNER_ADOPT_KEY : FSD_OWNER_MATCH;
         if(key_same(stored, key_fp)) return FSD_OWNER_MATCH;
+        /* Could not read the keys: we do not know, so we do not act. Checked
+         * before the window too -- enrolling key-less here would quietly
+         * downgrade a keyed owner. */
+        if(!key_fp) return FSD_OWNER_KEYS_UNREAD;
         /* 🔴 The owner's address on a bond we did not make with the owner.
          * Either somebody claimed the address, or the owner's phone and the
          * board lost their bond and paired again. The two look identical from
@@ -92,6 +96,7 @@ const char* fsd_owner_verdict_str(FsdOwnerVerdict v) {
     case FSD_OWNER_REFUSE: return "NOT the owner - commands refused";
     case FSD_OWNER_BAD_ADDR: return "no resolved identity";
     case FSD_OWNER_ADOPT_KEY: return "the owner - recording this bond's keys";
+    case FSD_OWNER_KEYS_UNREAD: return "owner's address, keys unreadable - refused, bond kept";
     case FSD_OWNER_REKEYED:
         return "owner's address on a NEW bond - refused (button to re-enrol)";
     default: return "unknown";
@@ -117,8 +122,9 @@ bool fsd_ble_session_teardown(uint16_t served, uint16_t owner,
 }
 
 bool fsd_ble_should_evict(uint16_t who, uint16_t owner, uint32_t since_ms,
-                          uint32_t now_ms) {
+                          uint32_t now_ms, bool enrolling) {
     if (who == FSD_BLE_CONN_NONE) return false;
+    if (enrolling) return false;
     if (owner != FSD_BLE_CONN_NONE && who == owner) return false;
     return (uint32_t)(now_ms - since_ms) >= FSD_BLE_STRANGER_GRACE_MS;
 }

@@ -14,6 +14,12 @@
 // makes both harder to reason about.
 static const char* NS = "bleowner";
 static const char* KEY = "own";
+/* 🔴 The keys live under their OWN key, and "own" stays the 7-byte record it
+ * has always been. Growing "own" to 16 bytes made older firmware read 0
+ * (Preferences::getBytes refuses a buffer smaller than the value) -- so an
+ * OTA rollback or a USB flash of an older build came up with NO owner and
+ * enrolled whoever paired next (review of PR #143). */
+static const char* KEY_FP = "ownk";
 
 static Preferences g_nvs;
 
@@ -29,11 +35,11 @@ static volatile bool  g_save_pending = false;
 static volatile uint32_t g_window_until_ms = 0;
 static volatile bool     g_window_active   = false;
 
-/* NVS record. v1 (before 2026-10-16) was 7 bytes: type + address. v2 adds the
- * keyed flag and the bond fingerprint. v1 still loads -- as a key-less owner
- * that records its keys on the next reconnect (FSD_OWNER_ADOPT_KEY). */
-#define OWNER_BLOB_V1 (1u + FSD_OWNER_ADDR_LEN)
-#define OWNER_BLOB_V2 (1u + FSD_OWNER_ADDR_LEN + 1u + FSD_OWNER_KEY_FP_LEN)
+/* NVS: "own" = type + address (7 B, unchanged since it was introduced).
+ * "ownk" = the bond fingerprint, present only once the keys are recorded. A
+ * board with "own" and no "ownk" is a key-less owner that records its keys on
+ * the next reconnect (FSD_OWNER_ADOPT_KEY). */
+#define OWNER_BLOB_LEN (1u + FSD_OWNER_ADDR_LEN)
 
 /* 🔴 The fingerprint of the bond NimBLE holds for this identity (red team
  * 2026-10-16, N-3). The address is what the peer claimed; the keys are what
@@ -79,16 +85,16 @@ void ble_owner_init(void) {
     FsdOwner loaded = {};
 
     if(g_nvs.begin(NS, /*readOnly=*/true)) {
-        uint8_t blob[OWNER_BLOB_V2] = {};
+        uint8_t blob[OWNER_BLOB_LEN] = {};
         size_t n = g_nvs.getBytes(KEY, blob, sizeof(blob));
-        if((n == OWNER_BLOB_V1 || n == OWNER_BLOB_V2) &&
-           fsd_owner_addr_valid(blob[0], &blob[1])) {
+        if(n == sizeof(blob) && fsd_owner_addr_valid(blob[0], &blob[1])) {
             loaded.enrolled = true;
             loaded.type = blob[0];
             memcpy(loaded.addr, &blob[1], FSD_OWNER_ADDR_LEN);
-            if(n == OWNER_BLOB_V2 && blob[1 + FSD_OWNER_ADDR_LEN] == 1u) {
+            uint8_t fp[FSD_OWNER_KEY_FP_LEN] = {};
+            if(g_nvs.getBytes(KEY_FP, fp, sizeof(fp)) == sizeof(fp)) {
                 loaded.keyed = true;
-                memcpy(loaded.key_fp, &blob[2 + FSD_OWNER_ADDR_LEN], FSD_OWNER_KEY_FP_LEN);
+                memcpy(loaded.key_fp, fp, sizeof(fp));
             }
         }
         g_nvs.end();
@@ -207,6 +213,13 @@ void ble_owner_open_window(uint32_t now_ms) {
 
 bool ble_owner_window_open(void) { return g_window_active; }
 
+bool ble_owner_enrolled(void) {
+    portENTER_CRITICAL(&g_mux);
+    const bool e = g_owner.enrolled;
+    portEXIT_CRITICAL(&g_mux);
+    return e;
+}
+
 void ble_owner_forget(void) {
     portENTER_CRITICAL(&g_mux);
     g_owner = FsdOwner{};
@@ -269,21 +282,32 @@ void ble_owner_tick(uint32_t now_ms) {
      * of checking is one read of seven bytes, once per enrolment. */
     bool stored = false;
     if(o.enrolled) {
-        uint8_t blob[OWNER_BLOB_V2];
+        uint8_t blob[OWNER_BLOB_LEN];
         blob[0] = o.type;
         memcpy(&blob[1], o.addr, FSD_OWNER_ADDR_LEN);
-        blob[1 + FSD_OWNER_ADDR_LEN] = o.keyed ? 1u : 0u;
-        memcpy(&blob[2 + FSD_OWNER_ADDR_LEN], o.key_fp, FSD_OWNER_KEY_FP_LEN);
         if(g_nvs.putBytes(KEY, blob, sizeof(blob)) == sizeof(blob)) {
-            uint8_t back[OWNER_BLOB_V2] = {};
+            uint8_t back[OWNER_BLOB_LEN] = {};
             stored = g_nvs.getBytes(KEY, back, sizeof(back)) == sizeof(back) &&
                      memcmp(back, blob, sizeof(blob)) == 0;
+        }
+        /* The fingerprint follows the record: written when keyed, removed when
+         * not (a key-less re-enrolment must not inherit the previous phone's
+         * keys). Both have to land for the save to count. */
+        if(stored && o.keyed) {
+            uint8_t back[FSD_OWNER_KEY_FP_LEN] = {};
+            stored = g_nvs.putBytes(KEY_FP, o.key_fp, sizeof(o.key_fp)) == sizeof(o.key_fp) &&
+                     g_nvs.getBytes(KEY_FP, back, sizeof(back)) == sizeof(back) &&
+                     memcmp(back, o.key_fp, sizeof(back)) == 0;
+        } else if(stored) {
+            g_nvs.remove(KEY_FP);
+            stored = !g_nvs.isKey(KEY_FP);
         }
     } else {
         /* Absent is the goal, however we get there: remove() reports false when
          * the key was not there to begin with, which is success for us. */
         g_nvs.remove(KEY);
-        stored = !g_nvs.isKey(KEY);
+        g_nvs.remove(KEY_FP);
+        stored = !g_nvs.isKey(KEY) && !g_nvs.isKey(KEY_FP);
     }
     g_nvs.end();
 
@@ -311,6 +335,7 @@ FsdOwnerVerdict ble_owner_on_bond(uint8_t, const uint8_t*) { return FSD_OWNER_MA
 bool ble_owner_allows(uint8_t, const uint8_t*) { return true; }
 void ble_owner_open_window(uint32_t) {}
 bool ble_owner_window_open(void) { return false; }
+bool ble_owner_enrolled(void) { return true; }
 void ble_owner_forget(void) {}
 void ble_owner_erase_now(void) {}
 bool ble_owner_save_pending(void) { return false; }

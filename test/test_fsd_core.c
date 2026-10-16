@@ -3461,8 +3461,13 @@ static void test_owner_is_the_bond(void) {
           "owner's address on a new bond may NOT command");
     CHECK(!fsd_owner_allows(&keyed, 1u, phone, NULL),
           "a bond whose keys cannot be read may NOT command");
-    CHECK(fsd_owner_check_bond(&keyed, 1u, phone, NULL, false) == FSD_OWNER_REKEYED,
-          "unreadable keys are not the owner's keys");
+    /* ...but "could not read" is not "different". REKEYED deletes the bond on
+     * the board; doing that on a transient read failure locks the real owner
+     * out for good (review of PR #143). */
+    CHECK(fsd_owner_check_bond(&keyed, 1u, phone, NULL, false) == FSD_OWNER_KEYS_UNREAD,
+          "unreadable keys -> KEYS_UNREAD, never REKEYED");
+    CHECK(fsd_owner_check_bond(&keyed, 1u, phone, NULL, true) == FSD_OWNER_KEYS_UNREAD,
+          "not even with the window open: no key-less downgrade");
 
     /* The real owner who lost the bond (phone forgot it, board evicted it) gets
      * back the same way a new phone does: the button. */
@@ -3504,21 +3509,26 @@ static void test_owner_is_the_bond(void) {
           "REKEYED has a name");
     CHECK(strcmp(fsd_owner_verdict_str(FSD_OWNER_ADOPT_KEY), "unknown") != 0,
           "ADOPT_KEY has a name");
+    CHECK(strcmp(fsd_owner_verdict_str(FSD_OWNER_KEYS_UNREAD), "unknown") != 0,
+          "KEYS_UNREAD has a name");
 
     /* N-2: a link that never turns out to be the owner does not keep the slot. */
     const uint32_t t0 = 1000u;
-    CHECK(!fsd_ble_should_evict(3u, FSD_BLE_CONN_NONE, t0, t0 + FSD_BLE_STRANGER_GRACE_MS - 1u),
+    CHECK(!fsd_ble_should_evict(3u, FSD_BLE_CONN_NONE, t0, t0 + FSD_BLE_STRANGER_GRACE_MS - 1u, false),
           "inside the grace: kept (a first pairing needs a tap)");
-    CHECK(fsd_ble_should_evict(3u, FSD_BLE_CONN_NONE, t0, t0 + FSD_BLE_STRANGER_GRACE_MS),
+    CHECK(fsd_ble_should_evict(3u, FSD_BLE_CONN_NONE, t0, t0 + FSD_BLE_STRANGER_GRACE_MS, false),
           "grace over, nobody is owner: dropped");
-    CHECK(fsd_ble_should_evict(3u, 5u, t0, t0 + FSD_BLE_STRANGER_GRACE_MS),
+    CHECK(fsd_ble_should_evict(3u, 5u, t0, t0 + FSD_BLE_STRANGER_GRACE_MS, false),
           "grace over, the owner is on another link: dropped");
-    CHECK(!fsd_ble_should_evict(5u, 5u, t0, t0 + 10u * FSD_BLE_STRANGER_GRACE_MS),
+    CHECK(!fsd_ble_should_evict(5u, 5u, t0, t0 + 10u * FSD_BLE_STRANGER_GRACE_MS, false),
           "the owner's link is never dropped");
-    CHECK(!fsd_ble_should_evict(FSD_BLE_CONN_NONE, FSD_BLE_CONN_NONE, t0, t0 + 10u * FSD_BLE_STRANGER_GRACE_MS),
+    CHECK(!fsd_ble_should_evict(FSD_BLE_CONN_NONE, FSD_BLE_CONN_NONE, t0, t0 + 10u * FSD_BLE_STRANGER_GRACE_MS, false),
           "no link, nothing to drop");
-    CHECK(!fsd_ble_should_evict(3u, FSD_BLE_CONN_NONE, 0xFFFFFF00u, 0xFFFFFF00u + 0x100u),
+    CHECK(!fsd_ble_should_evict(3u, FSD_BLE_CONN_NONE, 0xFFFFFF00u, 0xFFFFFF00u + 0x100u, false),
           "millis wrap does not read as a long time");
+    /* Enrolling: a person is tapping "pair" on a phone. Never cut that off. */
+    CHECK(!fsd_ble_should_evict(3u, FSD_BLE_CONN_NONE, t0, t0 + 10u * FSD_BLE_STRANGER_GRACE_MS, true),
+          "enrolling (no owner yet / button window): never dropped");
 }
 
 /* RT-01: the served session was whoever connected FIRST, not the owner.

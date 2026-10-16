@@ -60,6 +60,9 @@ void ble_owner_open_window(uint32_t now_ms);
 /** True while that window is open. */
 bool ble_owner_window_open(void);
 
+/** True once some phone is enrolled as the owner. */
+bool ble_owner_enrolled(void);
+
 /** Forget the owner, so the next phone to bond is enrolled. */
 void ble_owner_forget(void);
 

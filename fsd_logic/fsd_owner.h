@@ -71,6 +71,11 @@ typedef enum {
     FSD_OWNER_BAD_ADDR,   /* the peer has no usable identity yet */
     FSD_OWNER_ADOPT_KEY,  /* the owner, enrolled without keys: record these */
     FSD_OWNER_REKEYED,    /* the owner's ADDRESS on a different bond — refuse */
+    /* The owner's address, but this bond's keys could not be read. NOT the
+     * same as REKEYED: a transient read failure must not delete the owner's
+     * bond (review of PR #143). Commands are refused (fsd_owner_allows with no
+     * keys), nothing is deleted, and the link is left to the grace timer. */
+    FSD_OWNER_KEYS_UNREAD,
 } FsdOwnerVerdict;
 
 /**
@@ -194,12 +199,16 @@ bool fsd_ble_session_apply_ok(bool owner_present, uint16_t served,
  * @param owner         handle the owner authenticated on, or FSD_BLE_CONN_NONE
  * @param since_ms      when the link came up
  *
+ * @param enrolling     nobody is enrolled yet, or the button window is open
+ *
  * True once a link that is not the owner's has been up for
  * FSD_BLE_STRANGER_GRACE_MS. Never for the owner's link; never for
- * FSD_BLE_CONN_NONE. Wrap-safe.
+ * FSD_BLE_CONN_NONE. Never while enrolling: a first pairing waits on a person
+ * tapping "pair" on the phone, and cutting that link off at 30 s is how the
+ * owner fails to enrol (review of PR #143). Wrap-safe.
  */
 bool fsd_ble_should_evict(uint16_t who, uint16_t owner, uint32_t since_ms,
-                          uint32_t now_ms);
+                          uint32_t now_ms, bool enrolling);
 
 #ifdef __cplusplus
 }
