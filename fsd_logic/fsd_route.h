@@ -60,6 +60,14 @@ extern "C" {
  *  다른 길로 간 것을 가르는 값이다. */
 #define FSD_ROUTE_ONROUTE_M 250.0f
 
+/** 받은 경로를 들고 있는 최대 시간 — **하루.**
+ *
+ *  🔴 TMAP 약관이 경로 데이터를 하루를 넘겨 보관하지 못하게 한다. 앱도 지우지만
+ *  앱의 만료는 네비 화면이 열려 연결돼 있을 때만 돈다 — 폰을 두고 내리면 그날
+ *  밤은 아무도 안 지운다. 그래서 보드가 스스로 센다 (레드팀 2026-10-16, B-1).
+ *  `set_ms` 가 2026-09-09 부터 적히고 있었는데 읽는 곳이 없었다. */
+#define FSD_ROUTE_KEEP_MS (24u * 60u * 60u * 1000u)
+
 typedef struct {
     int32_t lat_e7[FSD_ROUTE_MAX_POINTS];
     int32_t lon_e7[FSD_ROUTE_MAX_POINTS];
@@ -87,6 +95,14 @@ void fsd_route_init(FsdRoute* r);
  */
 bool fsd_route_feed(FsdRoute* r, uint16_t seq, uint16_t total,
                     const uint8_t* pts, size_t n, uint32_t now_ms);
+
+/**
+ * 마지막 조각을 받은 지 `FSD_ROUTE_KEEP_MS` 가 지났으면 비운다. 지웠으면 true.
+ *
+ * 받는 중인 반쪽 경로도 같다. 시간은 차이로 재므로 `millis()` 가 한 바퀴
+ * 돌아도(49.7 일) 맞다. 빈 경로는 지울 것이 없어 false.
+ */
+bool fsd_route_expire(FsdRoute* r, uint32_t now_ms);
 
 /** 다 왔는가. 미완인 경로로는 아무것도 거부하지 않는다. */
 bool fsd_route_complete(const FsdRoute* r);

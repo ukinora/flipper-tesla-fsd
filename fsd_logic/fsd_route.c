@@ -47,6 +47,14 @@ bool fsd_route_feed(FsdRoute* r, uint16_t seq, uint16_t total, const uint8_t* pt
     return true;
 }
 
+bool fsd_route_expire(FsdRoute* r, uint32_t now_ms) {
+    if(!r) return false;
+    if(r->count == 0u && r->expected == 0u) return false;
+    if((uint32_t)(now_ms - r->set_ms) < FSD_ROUTE_KEEP_MS) return false;
+    fsd_route_init(r);
+    return true;
+}
+
 bool fsd_route_complete(const FsdRoute* r) {
     return r && r->expected != 0u && r->count == r->expected;
 }

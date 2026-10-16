@@ -360,6 +360,14 @@ void camera_task_tick(uint32_t now_ms) {
     g_last_tick_ms = now_ms;
     const float dt_s = (float)elapsed / 1000.0f; // measured, never assumed 1.0
 
+    /* 🔴 TMAP 약관: 경로를 하루 넘겨 들고 있지 않는다 (레드팀 2026-10-16, B-1).
+     * set_ms 를 적기만 하고 읽는 곳이 없었다. 앱의 만료는 네비 화면이 열려
+     * 있어야 돌므로, 보드가 스스로 센다. 같은 loop 스레드라 잠글 것이 없다
+     * — route_feed 도 loop 에서 불린다(camera_task.h THREADING). */
+    if(fsd_route_expire(&g_route, now_ms)) {
+        Serial.println("[ROUTE] 하루가 지나 경로를 지웠다 (TMAP 약관)");
+    }
+
     bool allowed;
     bool rx_stale;
     uint8_t gear;
