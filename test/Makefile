@@ -170,7 +170,19 @@ CAPJSON_SRC := test_cap_json.c $(ROOT)/fsd_logic/fsd_cap_json.c
 test_cap_json: $(CAPJSON_SRC) $(ROOT)/fsd_logic/fsd_cap_json.h
 	$(CC) $(CFLAGS) -I$(ROOT)/fsd_logic $(CAPJSON_SRC) -o $@
 
-check: test_ota_gate test_pipeline test_fsd_core test_speed_profile test_camera test_gps test_body test_body_emit test_body_wire test_signal test_trigger test_rules test_button test_btn_j6 test_wire test_cap_json test_route test_ota_image
+# 🔴 보드 사본(esp32/.firmware/fsd_handler.cpp)을 보드와 같은 스위치로 굽는다.
+# fsd_logic/fsd_handler.c 와 사본이 둘인데 호스트 시험은 한쪽만 돌았다 — 그
+# 틈에서 «NAG 킬러를 컴파일에서 뺐다» 가 0x3FD 경로에서는 거짓이었다
+# (레드팀 2026-10-16, N-1). C++ 이라 CXX 로 굽는다. unused 경고 둘은 끈다 —
+# 스위치가 0 이면 NAG 킬러 몸통의 static 들이 안 쓰이는데, 그것은 보드 빌드와
+# 같은 사정이고 이 시험이 묻는 것이 아니다.
+CXX     ?= c++
+ESP_NAG_SRC := test_esp32_nag.cpp $(ROOT)/esp32/.firmware/fsd_handler.cpp $(ROOT)/fsd_logic/fsd_ota.c
+
+test_esp32_nag: $(ESP_NAG_SRC) $(ROOT)/esp32/.firmware/fsd_handler.h $(ROOT)/esp32/.firmware/can_signals.h
+	$(CXX) -std=c++17 -Wall -Wextra -Wno-unused-function -Wno-unused-variable -O0 -g -DFSD_NAG_KILLER_ENABLED=0 -I$(ROOT)/esp32/.firmware $(ESP_NAG_SRC) -o $@
+
+check: test_ota_gate test_pipeline test_fsd_core test_speed_profile test_camera test_gps test_body test_body_emit test_body_wire test_signal test_trigger test_rules test_button test_btn_j6 test_wire test_cap_json test_route test_ota_image test_esp32_nag
 	./test_pipeline
 	./test_fsd_core
 	./test_speed_profile
@@ -189,8 +201,9 @@ check: test_ota_gate test_pipeline test_fsd_core test_speed_profile test_camera 
 	./test_route
 	./test_ota_image
 	./test_ota_gate
+	./test_esp32_nag
 
 clean:
-	rm -rf test_ota_gate test_pipeline test_fsd_core test_speed_profile test_camera test_gps test_body test_body_emit test_body_wire test_signal test_trigger test_rules test_button test_btn_j6 test_wire test_cap_json test_route test_ota_image *.dSYM
+	rm -rf test_ota_gate test_pipeline test_fsd_core test_speed_profile test_camera test_gps test_body test_body_emit test_body_wire test_signal test_trigger test_rules test_button test_btn_j6 test_wire test_cap_json test_route test_ota_image test_esp32_nag *.dSYM
 
 .PHONY: check clean
