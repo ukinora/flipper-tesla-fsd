@@ -206,6 +206,18 @@ static void test_a_route_does_not_outlive_a_day(void) {
     CHECK(fsd_route_count(&h) == 0u, "반쪽이 비었다");
 
     CHECK(!fsd_route_expire(NULL, t0), "NULL 은 넘어간다");
+
+    /* 받은 시각이 tick 의 시계보다 몇 ms 앞설 수 있다 — 방금 온 경로다. */
+    FsdRoute a;
+    straight_east(&a, 4, t0 + 5u);
+    CHECK(!fsd_route_expire(&a, t0), "받은 시각이 지금보다 앞서면 방금 온 것이다");
+    CHECK(fsd_route_count(&a) == 4u, "그대로 4 점");
+
+    /* 지운 뒤 새 경로는 처음부터 다시 센다. */
+    straight_east(&a, 4, t0 + FSD_ROUTE_KEEP_MS);
+    CHECK(fsd_route_expire(&a, t0 + 2u * FSD_ROUTE_KEEP_MS), "새 경로도 하루");
+    straight_east(&a, 3, t0 + 2u * FSD_ROUTE_KEEP_MS + 10u);
+    CHECK(!fsd_route_expire(&a, t0 + 2u * FSD_ROUTE_KEEP_MS + 20u), "지운 직후 받은 경로는 산다");
 }
 
 int main(void) {
