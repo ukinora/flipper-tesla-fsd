@@ -1639,6 +1639,7 @@ static void button_tick() {
         } else if (!g_factory_reset_eligible && held >= LONG_PRESS_MS) {
             g_long_fired      = true;
             g_pending_clicks  = 0;
+#if FSD_NAG_KILLER_ENABLED
             FSDState saved;
             state_enter();
             g_state.nag_killer = !g_state.nag_killer;
@@ -1647,6 +1648,13 @@ static void button_tick() {
             state_exit();
             Serial.printf("[BTN] NAG Killer: %s\n", enabled ? "ON" : "OFF");
             prefs_save(&saved);
+#else
+            // 🔴 The banner already hid this line on a board without the nag
+            // killer -- but the press still raised the flag, and the 0x3FD
+            // rewrite read that flag (red team 2026-10-16, N-1). No LED here,
+            // so nobody could see it happen. The press now does nothing.
+            Serial.println("[BTN] Long press: nothing (NAG killer not built)");
+#endif
         }
         // eligible press with held < FACTORY_RESET_HOLD_MS: suppress 3s NAG killer
     }
@@ -2348,7 +2356,10 @@ void setup() {
     // Listen-Only until prefs are loaded; the floor is applied afterwards,
     // once autonomy_enabled is actually known.
     g_state.op_mode               = OpMode_ListenOnly;
-    g_state.nag_killer            = true;
+    // 🔴 Was `= true` unconditionally -- before prefs_load(), which returns
+    // early when nothing is saved (first boot, factory reset). On a board
+    // without the nag killer that left the flag up (red team 2026-10-16, N-1).
+    g_state.nag_killer            = FSD_NAG_KILLER_ENABLED ? true : false;
     g_state.suppress_speed_chime  = true;
     g_state.ignore_ota            = false;
     g_state.fsd_unlock            = false;

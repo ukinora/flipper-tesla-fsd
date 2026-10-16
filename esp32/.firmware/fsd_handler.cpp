@@ -271,6 +271,21 @@ bool fsd_handle_driver_assist_override(FSDState *state, CanFrame *frame) {
 
 // ── HW3/HW4 autopilot control (DAS_autopilotControl 0x3FD) ───────────────────
 
+/* 🔴 The nag killer has TWO outputs, not one: the 0x370 echo below, and the
+ * 0x3FD mux1 rewrite in the three autopilot handlers (bit19 cleared, bit47 set
+ * on HW4). FSD_NAG_KILLER_ENABLED used to gate only the echo. The rewrite read
+ * state->nag_killer alone — and setup() raised that flag before prefs_load(),
+ * which returns early on a board with no saved settings (first boot, factory
+ * reset), and the BOOT long press toggled it too. So a board "without the nag
+ * killer" sent a modified 0x3FD to the car (red team 2026-10-16, N-1).
+ *
+ * Every reader goes through this. The flag can be raised by any path someone
+ * adds later; the compile switch has to win at the point a frame is changed.
+ * test/test_esp32_nag.cpp compiles THIS file with the board's switch. */
+static inline bool nag_rewrite_on(const FSDState *state) {
+    return FSD_NAG_KILLER_ENABLED && state->nag_killer;
+}
+
 bool fsd_handle_autopilot_frame(FSDState *state, CanFrame *frame) {
     if (frame->dlc < 8) return false;
     // Only process known HW versions to avoid corrupting frames for HW_Unknown
@@ -314,9 +329,9 @@ bool fsd_handle_autopilot_frame(FSDState *state, CanFrame *frame) {
             modified = true;
         }
         if (mux == CAN_MUX_1 &&
-            (state->nag_killer || state->summon_unlock || state->assist_telemetry_off ||
+            (nag_rewrite_on(state) || state->summon_unlock || state->assist_telemetry_off ||
              state->apmv3_branch <= 5)) {
-            if (state->nag_killer) {
+            if (nag_rewrite_on(state)) {
                 // Nag suppression via bit 19 (clear = no hands-on-wheel request)
                 set_bit(frame, SIG_AP_NAG_CLEAR_BIT, false);
                 state->nag_suppressed = true;
@@ -365,9 +380,9 @@ bool fsd_handle_autopilot_frame(FSDState *state, CanFrame *frame) {
             modified = true;
         }
         if (mux == CAN_MUX_1 &&
-            (state->nag_killer || state->summon_unlock || state->assist_telemetry_off ||
+            (nag_rewrite_on(state) || state->summon_unlock || state->assist_telemetry_off ||
              state->apmv3_branch <= 5)) {
-            if (state->nag_killer) {
+            if (nag_rewrite_on(state)) {
                 set_bit(frame, SIG_AP_NAG_CLEAR_BIT, false);      // clear hands-on-wheel nag
                 set_bit(frame, SIG_AP_HW4_NAG_CONFIRM_BIT, true); // HW4 nag-suppression confirmation bit
                 state->nag_suppressed = true;
@@ -441,7 +456,7 @@ bool fsd_handle_legacy_autopilot(FSDState *state, CanFrame *frame) {
                       SIG_AP_SPEED_PROFILE_SHIFT);
         modified = true;
     }
-    if (mux == CAN_MUX_1 && state->nag_killer) {
+    if (mux == CAN_MUX_1 && nag_rewrite_on(state)) {
         set_bit(frame, SIG_AP_NAG_CLEAR_BIT, false);
         state->nag_suppressed = true;
         modified = true;
