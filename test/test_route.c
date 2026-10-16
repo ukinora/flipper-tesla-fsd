@@ -168,6 +168,58 @@ static void test_it_survives_rubbish(void) {
     CHECK(!fsd_route_rejects(NULL, LAT0, LON0, LAT0, LON0), "NULL 은 안 버린다");
 }
 
+/* 🔴 TMAP 약관: 받은 경로는 하루를 넘겨 들고 있지 않는다 (레드팀 2026-10-16, B-1).
+ *
+ * set_ms 는 2026-09-09 부터 적히고 있었는데 **읽는 곳이 없었다.** 앱 쪽 만료는
+ * 네비 화면이 열려 연결돼 있을 때만 돈다 — 폰을 두고 내리면 보드는 경로를
+ * 재부팅까지 들고 있었다. 그래서 만료는 보드가 스스로 한다. */
+static void test_a_route_does_not_outlive_a_day(void) {
+    FsdRoute r;
+    const uint32_t t0 = 5000u;
+    straight_east(&r, 8, t0);
+    CHECK(fsd_route_complete(&r), "준비: 경로가 다 왔다");
+
+    CHECK(!fsd_route_expire(&r, t0 + FSD_ROUTE_KEEP_MS - 1u), "하루가 안 됐으면 둔다");
+    CHECK(fsd_route_count(&r) == 8u, "그대로 8 점");
+
+    CHECK(fsd_route_expire(&r, t0 + FSD_ROUTE_KEEP_MS), "하루가 되면 지운다");
+    CHECK(fsd_route_count(&r) == 0u && !fsd_route_complete(&r), "지운 뒤에는 빈 경로");
+    CHECK(!fsd_route_rejects(&r, LAT0, LON0, LAT0 + 100000, LON0),
+          "빈 경로는 아무것도 안 버린다 — 경로가 생기기 전과 같다");
+
+    CHECK(!fsd_route_expire(&r, t0 + 3u * FSD_ROUTE_KEEP_MS), "빈 것은 지울 것이 없다");
+
+    /* millis() 가 한 바퀴 돌아도(49.7 일) 차이로 잰다. */
+    FsdRoute w;
+    const uint32_t near_wrap = 0xFFFFFF00u;
+    straight_east(&w, 4, near_wrap);
+    CHECK(!fsd_route_expire(&w, near_wrap + 0x200u), "랩어라운드 직후는 하루가 아니다");
+    CHECK(fsd_route_expire(&w, near_wrap + FSD_ROUTE_KEEP_MS), "랩어라운드를 넘어서도 하루를 센다");
+
+    /* 받는 중인 조각도 하루 묵으면 버린다 — 반쪽 경로는 어차피 안 쓰지만 들고 있지 않는다. */
+    FsdRoute h;
+    fsd_route_init(&h);
+    uint8_t b[16];
+    memset(b, 0, sizeof b);
+    CHECK(fsd_route_feed(&h, 0u, 10u, b, sizeof b, t0), "준비: 반쪽 경로");
+    CHECK(fsd_route_expire(&h, t0 + FSD_ROUTE_KEEP_MS), "반쪽도 하루면 지운다");
+    CHECK(fsd_route_count(&h) == 0u, "반쪽이 비었다");
+
+    CHECK(!fsd_route_expire(NULL, t0), "NULL 은 넘어간다");
+
+    /* 받은 시각이 tick 의 시계보다 몇 ms 앞설 수 있다 — 방금 온 경로다. */
+    FsdRoute a;
+    straight_east(&a, 4, t0 + 5u);
+    CHECK(!fsd_route_expire(&a, t0), "받은 시각이 지금보다 앞서면 방금 온 것이다");
+    CHECK(fsd_route_count(&a) == 4u, "그대로 4 점");
+
+    /* 지운 뒤 새 경로는 처음부터 다시 센다. */
+    straight_east(&a, 4, t0 + FSD_ROUTE_KEEP_MS);
+    CHECK(fsd_route_expire(&a, t0 + 2u * FSD_ROUTE_KEEP_MS), "새 경로도 하루");
+    straight_east(&a, 3, t0 + 2u * FSD_ROUTE_KEEP_MS + 10u);
+    CHECK(!fsd_route_expire(&a, t0 + 2u * FSD_ROUTE_KEEP_MS + 20u), "지운 직후 받은 경로는 산다");
+}
+
 int main(void) {
     printf("test_route\n");
     test_a_route_arrives_in_pieces();
@@ -176,6 +228,7 @@ int main(void) {
     test_it_only_rejects_when_it_is_sure();
     test_a_corridor_wide_enough_to_be_wrong_in();
     test_it_survives_rubbish();
+    test_a_route_does_not_outlive_a_day();
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

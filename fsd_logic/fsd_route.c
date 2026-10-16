@@ -47,6 +47,20 @@ bool fsd_route_feed(FsdRoute* r, uint16_t seq, uint16_t total, const uint8_t* pt
     return true;
 }
 
+bool fsd_route_expire(FsdRoute* r, uint32_t now_ms) {
+    if(!r) return false;
+    if(r->count == 0u && r->expected == 0u) return false;
+    /* 🔴 A stamp AHEAD of now is not a day-old route. The chunk is stamped
+     * when it is applied and the tick samples its clock separately, so the two
+     * can cross by a few ms; read unsigned, that crossing is four billion ms and
+     * a route that just arrived would be thrown away. The day is far below
+     * 2^31 ms, so the signed difference is exact for everything that matters. */
+    const int32_t age = (int32_t)(now_ms - r->set_ms);
+    if(age < (int32_t)FSD_ROUTE_KEEP_MS) return false;
+    fsd_route_init(r);
+    return true;
+}
+
 bool fsd_route_complete(const FsdRoute* r) {
     return r && r->expected != 0u && r->count == r->expected;
 }
