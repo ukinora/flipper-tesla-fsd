@@ -185,6 +185,37 @@ static volatile bool     g_owner_present  = false;
  * decides this lives in fsd_owner.c, where a host test can hold the two-peer
  * sequence still. */
 static volatile uint16_t g_owner_handle    = BLE_CONN_NONE;
+
+/* Every link and when it came up, so loop() can drop the ones that never turn
+ * out to be the owner (red team 2026-10-16, N-2; the rule is
+ * fsd_ble_should_evict() in fsd_owner.c, host-tested). Written on the BLE host
+ * task, read on loop(), hence its own lock. */
+#ifndef CONFIG_BT_NIMBLE_MAX_CONNECTIONS
+#define CONFIG_BT_NIMBLE_MAX_CONNECTIONS 3
+#endif
+struct LinkSeen { uint16_t handle; uint32_t since_ms; };
+static LinkSeen     g_links[CONFIG_BT_NIMBLE_MAX_CONNECTIONS];
+static portMUX_TYPE g_links_mux = portMUX_INITIALIZER_UNLOCKED;
+
+static void links_init(void) {
+    for (auto &l : g_links) { l.handle = BLE_CONN_NONE; l.since_ms = 0; }
+}
+static void links_add(uint16_t h, uint32_t now_ms) {
+    bool placed = false;
+    portENTER_CRITICAL(&g_links_mux);
+    for (auto &l : g_links) {
+        if (l.handle == BLE_CONN_NONE) { l.handle = h; l.since_ms = now_ms; placed = true; break; }
+    }
+    portEXIT_CRITICAL(&g_links_mux);
+    /* A link we cannot track is a link loop() can never drop -- say so. */
+    if (!placed)
+        Serial.printf("[BLE] 🔴 link table full — handle %u will not be timed out\n", (unsigned)h);
+}
+static void links_remove(uint16_t h) {
+    portENTER_CRITICAL(&g_links_mux);
+    for (auto &l : g_links) if (l.handle == h) l.handle = BLE_CONN_NONE;
+    portEXIT_CRITICAL(&g_links_mux);
+}
 // SET_MODE arrives on the BLE task but has to be applied from loop(), because
 // applying it means switching a CAN controller. Single word each, written by
 // the BLE task and read-and-cleared in one place, so no lock is needed.
@@ -1661,6 +1692,22 @@ class ServerCB : public NimBLEServerCallbacks {
                           (unsigned)info.getConnHandle(), (unsigned)g_conn_handle);
         }
         g_connected = true;
+        links_add(info.getConnHandle(), millis());
+
+        /* 🔴 Keep advertising (red team 2026-10-16, N-2). NimBLE stops when a
+         * peer connects, and this file only restarted it on a disconnect -- so
+         * one stranger that connected and stayed kept the owner's phone out
+         * altogether, and the "serve the owner when it arrives" code below
+         * never had an owner to serve. The stack refuses on its own once every
+         * slot is taken, which is fine: loop() frees strangers' slots. */
+        g_adv_ok = NimBLEDevice::startAdvertising();
+
+        /* And ask for encryption now rather than at the first write. A bonded
+         * owner re-encrypts in a second or two and onAuthenticationComplete
+         * names it; a phone that will not encrypt never becomes the owner, and
+         * after FSD_BLE_STRANGER_GRACE_MS loop() lets it go. */
+        NimBLEDevice::startSecurity(info.getConnHandle());
+
         // 🔴 The pending revoke is NOT cancelled here. At this point we know a
         // radio connected and nothing else — not who, not whether it can pair.
         // Cancelling on the bare connection let any passer-by keep a departed
@@ -1673,16 +1720,44 @@ class ServerCB : public NimBLEServerCallbacks {
     // task, so this only updates RAM — the NVS write is queued for loop().
     void onAuthenticationComplete(NimBLEConnInfo &info) override {
         if (!info.isBonded()) return;
-        ble_owner_on_bond(info.getIdAddress().getType(),
-                          info.getIdAddress().getVal());
+        const FsdOwnerVerdict v = ble_owner_on_bond(info.getIdAddress().getType(),
+                                                    info.getIdAddress().getVal());
+
+        /* 🔴 Not the owner: drop the link and its bond now (red team
+         * 2026-10-16, N-2/N-3/N-4). Keeping a stranger's bond costs one of six
+         * slots, and NimBLE evicts the OLDEST bond when they run out -- which is
+         * usually the owner's. REKEYED is the owner's address on a bond we did
+         * not make with the owner; the bond stored under that address is now the
+         * new one, so deleting it removes exactly what was just made. The
+         * owner gets back in the same way a new phone does: the button. */
+        /* KEYS_UNREAD is NOT here: "could not read the keys" must never delete
+         * the owner's bond. It is refused (no owner_present below), and if it
+         * never resolves the grace timer lets the link go. */
+        if (v == FSD_OWNER_REFUSE || v == FSD_OWNER_REKEYED) {
+            Serial.printf("[BLE] handle %u is not the owner — dropping it and its bond\n",
+                          (unsigned)info.getConnHandle());
+            NimBLEDevice::deleteBond(info.getIdAddress());
+            if (NimBLEServer *srv = NimBLEDevice::getServer())
+                srv->disconnect(info.getConnHandle());
+            return;
+        }
 
         // Now — and only now — we can say whether the owner is back. A bonded
         // phone re-encrypting lands here too, which is exactly the "owner
         // reconnected within the grace window" case the cancel is meant for.
         if (ble_owner_allows(info.getIdAddress().getType(),
                              info.getIdAddress().getVal())) {
-            g_owner_present = true;
+            /* Handle first: loop() reads the two without a lock, and a present
+             * owner with no handle would read as "a stranger" for one pass. */
             g_owner_handle  = info.getConnHandle();
+            g_owner_present = true;
+            /* 🔴 Connected again, too. If a stranger held the served slot and
+             * was dropped before the owner finished authenticating, that
+             * teardown set g_connected = false -- and onConnect, the only other
+             * place that sets it, had already run for the owner. State and
+             * CamStat would stop while the owner sat connected (review of
+             * PR #143). */
+            g_connected = true;
             /* 🔴 The owner's link BECOMES the served session.
              *
              * Whoever connected first used to keep it, so a stranger squatting
@@ -1716,6 +1791,7 @@ class ServerCB : public NimBLEServerCallbacks {
          * Active would never be handed back. So: tear down when it is OUR link,
          * or when nobody is left at all. */
         const uint16_t who = info.getConnHandle();
+        links_remove(who);
         const size_t remaining = srv ? srv->getConnectedCount() : 0u;
         /* 🔴 The OWNER's link ends the session too, even when it is not the
          * served one and even when another peer stays. Everything below exists
@@ -1836,6 +1912,7 @@ void ble_server_init(FSDState *state, portMUX_TYPE *state_mux) {
     // the one pairing exchange.
     NimBLEDevice::setSecurityAuth(true, false, true);
 
+    links_init();
     g_server = NimBLEDevice::createServer();
     g_server->setCallbacks(&g_srv_cb);
 
@@ -1999,6 +2076,33 @@ static void ble_apply_camera_requests(void) {
     }
 }
 
+/* Drop links that have been up FSD_BLE_STRANGER_GRACE_MS without turning out to
+ * be the owner (red team 2026-10-16, N-2). loop() only; the decision is
+ * fsd_ble_should_evict(). One per pass -- the disconnect event clears the entry
+ * on the host task, and the next pass sees the table as it then is. */
+static void ble_evict_strangers(uint32_t now_ms) {
+    NimBLEServer *srv = NimBLEDevice::getServer();
+    if (!srv) return;
+    const uint16_t owner = g_owner_present ? g_owner_handle : BLE_CONN_NONE;
+    /* Nobody enrolled, or the button window is open: someone is pairing a phone
+     * and has to tap "pair" on it. Do not time that out. */
+    const bool enrolling = !ble_owner_enrolled() || ble_owner_window_open();
+    uint16_t victim = BLE_CONN_NONE;
+    portENTER_CRITICAL(&g_links_mux);
+    for (auto &l : g_links) {
+        if (fsd_ble_should_evict(l.handle, owner, l.since_ms, now_ms, enrolling)) {
+            victim = l.handle;
+            l.since_ms = now_ms;   // asked once; do not hammer it every pass
+            break;
+        }
+    }
+    portEXIT_CRITICAL(&g_links_mux);
+    if (victim == BLE_CONN_NONE) return;
+    Serial.printf("[BLE] handle %u was not the owner after %u s — disconnecting\n",
+                  (unsigned)victim, (unsigned)(FSD_BLE_STRANGER_GRACE_MS / 1000u));
+    srv->disconnect(victim);
+}
+
 void ble_server_tick(uint32_t now_ms) {
     if (!g_ch_state) return;
     ble_update_fps(now_ms);
@@ -2017,6 +2121,7 @@ void ble_server_tick(uint32_t now_ms) {
     ble_publish_rules();           // after the apply, so a write is visible now
     ble_refresh_capability(now_ms);
     ble_revoke_active_if_stale(now_ms);
+    ble_evict_strangers(now_ms);
 
     if (g_prefs_dirty) {
         g_prefs_dirty = false;

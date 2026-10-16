@@ -42,7 +42,7 @@ void ble_owner_tick(uint32_t now_ms);
  *
  * Decides, updates the in-RAM owner, and queues the write for ble_owner_tick().
  */
-void ble_owner_on_bond(uint8_t addr_type, const uint8_t* addr);
+FsdOwnerVerdict ble_owner_on_bond(uint8_t addr_type, const uint8_t* addr);
 
 /**
  * May this peer drive the module?
@@ -59,6 +59,9 @@ void ble_owner_open_window(uint32_t now_ms);
 
 /** True while that window is open. */
 bool ble_owner_window_open(void);
+
+/** True once some phone is enrolled as the owner. */
+bool ble_owner_enrolled(void);
 
 /** Forget the owner, so the next phone to bond is enrolled. */
 void ble_owner_forget(void);

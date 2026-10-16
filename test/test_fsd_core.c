@@ -3426,6 +3426,111 @@ static void test_owner(void) {
     CHECK(!fsd_owner_same(&o, 1u, NULL), "a NULL address matches nobody");
 }
 
+/* 🔴 Red team 2026-10-16, N-3: the address is something the peer SAYS.
+ *
+ * Just Works pairing has no MITM protection, and during key distribution the
+ * peer hands over its own identity address, which NimBLE stores unchecked. So
+ * "this bond carries the owner's address" proved nothing: a peer could pair
+ * fresh, claim the owner's address, and every per-write check passed. The bond
+ * itself is what the owner's phone has and a stranger cannot reproduce -- a new
+ * pairing makes new keys. The owner is now the address AND the keys. */
+static void test_owner_is_the_bond(void) {
+    printf("\n-- BLE owner: the address and the keys --\n");
+
+    const uint8_t phone[6] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01};
+    const uint8_t other[6] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x02};
+    const uint8_t key_a[FSD_OWNER_KEY_FP_LEN] = {1, 2, 3, 4, 5, 6, 7, 8};
+    const uint8_t key_b[FSD_OWNER_KEY_FP_LEN] = {1, 2, 3, 4, 5, 6, 7, 9};
+
+    FsdOwner keyed = {0};
+    keyed.enrolled = true;
+    keyed.type = 1u;
+    memcpy(keyed.addr, phone, 6);
+    keyed.keyed = true;
+    memcpy(keyed.key_fp, key_a, FSD_OWNER_KEY_FP_LEN);
+
+    /* The owner reconnecting re-encrypts with the bond it already has. */
+    CHECK(fsd_owner_check_bond(&keyed, 1u, phone, key_a, false) == FSD_OWNER_MATCH,
+          "same address, same bond -> the owner");
+    CHECK(fsd_owner_allows(&keyed, 1u, phone, key_a), "the owner may command");
+
+    /* The attack: the owner's address on a bond made just now. */
+    CHECK(fsd_owner_check_bond(&keyed, 1u, phone, key_b, false) == FSD_OWNER_REKEYED,
+          "owner's address on a NEW bond -> refused");
+    CHECK(!fsd_owner_allows(&keyed, 1u, phone, key_b),
+          "owner's address on a new bond may NOT command");
+    CHECK(!fsd_owner_allows(&keyed, 1u, phone, NULL),
+          "a bond whose keys cannot be read may NOT command");
+    /* ...but "could not read" is not "different". REKEYED deletes the bond on
+     * the board; doing that on a transient read failure locks the real owner
+     * out for good (review of PR #143). */
+    CHECK(fsd_owner_check_bond(&keyed, 1u, phone, NULL, false) == FSD_OWNER_KEYS_UNREAD,
+          "unreadable keys -> KEYS_UNREAD, never REKEYED");
+    CHECK(fsd_owner_check_bond(&keyed, 1u, phone, NULL, true) == FSD_OWNER_KEYS_UNREAD,
+          "not even with the window open: no key-less downgrade");
+
+    /* The real owner who lost the bond (phone forgot it, board evicted it) gets
+     * back the same way a new phone does: the button. */
+    CHECK(fsd_owner_check_bond(&keyed, 1u, phone, key_b, true) == FSD_OWNER_ENROLL,
+          "window open -> the owner's phone may re-enrol with new keys");
+
+    /* A different phone is unchanged. */
+    CHECK(fsd_owner_check_bond(&keyed, 1u, other, key_a, false) == FSD_OWNER_REFUSE,
+          "different address -> refused, keys do not matter");
+    CHECK(!fsd_owner_allows(&keyed, 1u, other, key_a), "a different phone may not command");
+
+    /* Migration. Boards enrolled before 2026-10-16 stored no keys. The bond that
+     * is there was made by the phone that enrolled, so the first reconnect
+     * records it rather than locking the owner out after a firmware update. */
+    FsdOwner legacy = keyed;
+    legacy.keyed = false;
+    memset(legacy.key_fp, 0, sizeof legacy.key_fp);
+    CHECK(fsd_owner_check_bond(&legacy, 1u, phone, key_a, false) == FSD_OWNER_ADOPT_KEY,
+          "legacy owner reconnects -> record this bond's keys");
+    CHECK(fsd_owner_check_bond(&legacy, 1u, phone, NULL, false) == FSD_OWNER_MATCH,
+          "legacy owner, keys unreadable -> as before");
+    CHECK(fsd_owner_allows(&legacy, 1u, phone, key_b), "legacy owner may command until adopted");
+    CHECK(!fsd_owner_allows(&legacy, 1u, other, key_a), "legacy: other phones still refused");
+
+    /* fsd_owner_check() is the key-less form: it must say what it always said. */
+    CHECK(fsd_owner_check(&legacy, 1u, phone, false) == FSD_OWNER_MATCH,
+          "fsd_owner_check unchanged for a key-less owner");
+
+    /* Nobody enrolled: trust on first use is unchanged. */
+    FsdOwner empty = {0};
+    CHECK(fsd_owner_check_bond(&empty, 1u, phone, key_a, false) == FSD_OWNER_ENROLL,
+          "first peer is still enrolled");
+
+    CHECK(!fsd_owner_allows(NULL, 1u, phone, key_a), "NULL store: an identity is required");
+    CHECK(fsd_owner_allows(&empty, 1u, phone, key_a) == fsd_owner_addr_valid(1u, phone),
+          "empty store: unchanged rule");
+
+    CHECK(strcmp(fsd_owner_verdict_str(FSD_OWNER_REKEYED), "unknown") != 0,
+          "REKEYED has a name");
+    CHECK(strcmp(fsd_owner_verdict_str(FSD_OWNER_ADOPT_KEY), "unknown") != 0,
+          "ADOPT_KEY has a name");
+    CHECK(strcmp(fsd_owner_verdict_str(FSD_OWNER_KEYS_UNREAD), "unknown") != 0,
+          "KEYS_UNREAD has a name");
+
+    /* N-2: a link that never turns out to be the owner does not keep the slot. */
+    const uint32_t t0 = 1000u;
+    CHECK(!fsd_ble_should_evict(3u, FSD_BLE_CONN_NONE, t0, t0 + FSD_BLE_STRANGER_GRACE_MS - 1u, false),
+          "inside the grace: kept (a first pairing needs a tap)");
+    CHECK(fsd_ble_should_evict(3u, FSD_BLE_CONN_NONE, t0, t0 + FSD_BLE_STRANGER_GRACE_MS, false),
+          "grace over, nobody is owner: dropped");
+    CHECK(fsd_ble_should_evict(3u, 5u, t0, t0 + FSD_BLE_STRANGER_GRACE_MS, false),
+          "grace over, the owner is on another link: dropped");
+    CHECK(!fsd_ble_should_evict(5u, 5u, t0, t0 + 10u * FSD_BLE_STRANGER_GRACE_MS, false),
+          "the owner's link is never dropped");
+    CHECK(!fsd_ble_should_evict(FSD_BLE_CONN_NONE, FSD_BLE_CONN_NONE, t0, t0 + 10u * FSD_BLE_STRANGER_GRACE_MS, false),
+          "no link, nothing to drop");
+    CHECK(!fsd_ble_should_evict(3u, FSD_BLE_CONN_NONE, 0xFFFFFF00u, 0xFFFFFF00u + 0x100u, false),
+          "millis wrap does not read as a long time");
+    /* Enrolling: a person is tapping "pair" on a phone. Never cut that off. */
+    CHECK(!fsd_ble_should_evict(3u, FSD_BLE_CONN_NONE, t0, t0 + 10u * FSD_BLE_STRANGER_GRACE_MS, true),
+          "enrolling (no owner yet / button window): never dropped");
+}
+
 /* RT-01: the served session was whoever connected FIRST, not the owner.
  *
  * Reproduced from the red-team sequence: a stranger holds the slot, the phone
@@ -4708,6 +4813,7 @@ int main(void) {
     test_power_save_schedule();
     test_bb_stepped_save();
     test_owner();
+    test_owner_is_the_bond();
     test_ble_session();
     test_speed_observer();
     test_blinker_decode();

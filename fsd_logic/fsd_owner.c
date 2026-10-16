@@ -29,8 +29,31 @@ bool fsd_owner_same(const FsdOwner* stored, uint8_t type, const uint8_t* addr) {
     return true;
 }
 
+static bool key_same(const FsdOwner* stored, const uint8_t* key_fp) {
+    if(!key_fp) return false;
+    for(unsigned i = 0; i < FSD_OWNER_KEY_FP_LEN; i++) {
+        if(stored->key_fp[i] != key_fp[i]) return false;
+    }
+    return true;
+}
+
 FsdOwnerVerdict fsd_owner_check(const FsdOwner* stored, uint8_t type,
                                 const uint8_t* addr, bool window_open) {
+    return fsd_owner_check_bond(stored, type, addr, NULL, window_open);
+}
+
+bool fsd_owner_allows(const FsdOwner* stored, uint8_t type, const uint8_t* addr,
+                      const uint8_t* key_fp) {
+    if(!stored) return false;
+    if(!stored->enrolled) return fsd_owner_addr_valid(type, addr);
+    if(!fsd_owner_same(stored, type, addr)) return false;
+    if(!stored->keyed) return true;           /* legacy: address only, as before */
+    return key_same(stored, key_fp);
+}
+
+FsdOwnerVerdict fsd_owner_check_bond(const FsdOwner* stored, uint8_t type,
+                                     const uint8_t* addr, const uint8_t* key_fp,
+                                     bool window_open) {
     if(!fsd_owner_addr_valid(type, addr)) return FSD_OWNER_BAD_ADDR;
 
     /* Nobody enrolled: trust on first use. Deliberate -- ordinary first-time
@@ -38,7 +61,21 @@ FsdOwnerVerdict fsd_owner_check(const FsdOwner* stored, uint8_t type,
      * until a button is pressed is a module whose first boot looks broken. */
     if(!stored || !stored->enrolled) return FSD_OWNER_ENROLL;
 
-    if(fsd_owner_same(stored, type, addr)) return FSD_OWNER_MATCH;
+    if(fsd_owner_same(stored, type, addr)) {
+        /* Enrolled before keys were recorded: the bond that is there now was
+         * made by the phone that enrolled, so take its keys. */
+        if(!stored->keyed) return key_fp ? FSD_OWNER_ADOPT_KEY : FSD_OWNER_MATCH;
+        if(key_same(stored, key_fp)) return FSD_OWNER_MATCH;
+        /* Could not read the keys: we do not know, so we do not act. Checked
+         * before the window too -- enrolling key-less here would quietly
+         * downgrade a keyed owner. */
+        if(!key_fp) return FSD_OWNER_KEYS_UNREAD;
+        /* 🔴 The owner's address on a bond we did not make with the owner.
+         * Either somebody claimed the address, or the owner's phone and the
+         * board lost their bond and paired again. The two look identical from
+         * here, so both go through the button -- the same door as a new phone. */
+        return window_open ? FSD_OWNER_ENROLL : FSD_OWNER_REKEYED;
+    }
 
     /* Someone else. The button is the only way past this, and pressing it means
      * being inside the car.
@@ -58,6 +95,10 @@ const char* fsd_owner_verdict_str(FsdOwnerVerdict v) {
     case FSD_OWNER_MATCH: return "the owner";
     case FSD_OWNER_REFUSE: return "NOT the owner - commands refused";
     case FSD_OWNER_BAD_ADDR: return "no resolved identity";
+    case FSD_OWNER_ADOPT_KEY: return "the owner - recording this bond's keys";
+    case FSD_OWNER_KEYS_UNREAD: return "owner's address, keys unreadable - refused, bond kept";
+    case FSD_OWNER_REKEYED:
+        return "owner's address on a NEW bond - refused (button to re-enrol)";
     default: return "unknown";
     }
 }
@@ -78,6 +119,14 @@ bool fsd_ble_session_teardown(uint16_t served, uint16_t owner,
      * teardown does exists to make the owner leaving safe. */
     if (owner != FSD_BLE_CONN_NONE && who == owner) return true;
     return false;
+}
+
+bool fsd_ble_should_evict(uint16_t who, uint16_t owner, uint32_t since_ms,
+                          uint32_t now_ms, bool enrolling) {
+    if (who == FSD_BLE_CONN_NONE) return false;
+    if (enrolling) return false;
+    if (owner != FSD_BLE_CONN_NONE && who == owner) return false;
+    return (uint32_t)(now_ms - since_ms) >= FSD_BLE_STRANGER_GRACE_MS;
 }
 
 bool fsd_ble_session_apply_ok(bool owner_present, uint16_t served,
